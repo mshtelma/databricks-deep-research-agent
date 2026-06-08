@@ -13,6 +13,7 @@ import { Citation, VerificationVerdict } from '@/types/citation';
 import { SourceMetadata } from './SourceMetadata';
 import { EvidenceQuote } from './EvidenceQuote';
 import { VerificationBadge } from './VerificationBadge';
+import { buildCitationCopyText } from '@/lib/citations/copyText';
 
 interface EvidenceCardProps {
   /** Citation data with evidence span and source (optional for claims without citations) */
@@ -43,10 +44,52 @@ export const EvidenceCard: React.FC<EvidenceCardProps> = React.memo(({
   const confidenceScore = citation?.confidenceScore ?? null;
   const isPrimary = citation?.isPrimary ?? false;
 
+  const [copied, setCopied] = React.useState(false);
+  const copyResetRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  React.useEffect(
+    () => () => {
+      if (copyResetRef.current) clearTimeout(copyResetRef.current);
+    },
+    []
+  );
+
+  const handleCopy = React.useCallback(async () => {
+    const text = buildCitationCopyText(citation, claimText);
+    if (!text) return;
+    const flash = () => {
+      setCopied(true);
+      if (copyResetRef.current) clearTimeout(copyResetRef.current);
+      copyResetRef.current = setTimeout(() => setCopied(false), 1500);
+    };
+    try {
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        flash();
+        return;
+      }
+    } catch {
+      // fall through to the legacy copy path below
+    }
+    try {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.style.position = 'fixed';
+      textarea.style.opacity = '0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+      flash();
+    } catch {
+      // Clipboard unavailable; the card text remains manually selectable.
+    }
+  }, [citation, claimText]);
+
   return (
     <div
       data-testid="evidence-card"
       className={`
+        select-text
         bg-white dark:bg-gray-900
         border border-gray-200 dark:border-gray-700
         rounded-lg shadow-lg
@@ -68,27 +111,54 @@ export const EvidenceCard: React.FC<EvidenceCardProps> = React.memo(({
             </span>
           )}
         </div>
-        {isPopover && onClose && (
-          <button
-            data-testid="evidence-card-close"
-            onClick={onClose}
-            className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1"
-            aria-label="Close"
-          >
-            <svg
-              className="w-4 h-4"
-              fill="none"
-              stroke="currentColor"
-              viewBox="0 0 24 24"
+        {isPopover && (
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              data-testid="evidence-card-copy"
+              onClick={handleCopy}
+              className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200 px-1.5 py-1 rounded"
+              aria-label="Copy evidence"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M6 18L18 6M6 6l12 12"
-              />
-            </svg>
-          </button>
+              {copied ? (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                  </svg>
+                  Copied
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z" />
+                  </svg>
+                  Copy
+                </>
+              )}
+            </button>
+            {onClose && (
+              <button
+                data-testid="evidence-card-close"
+                onClick={onClose}
+                className="text-gray-400 hover:text-gray-600 dark:hover:text-gray-300 p-1"
+                aria-label="Close"
+              >
+                <svg
+                  className="w-4 h-4"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth={2}
+                    d="M6 18L18 6M6 6l12 12"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
         )}
       </div>
 

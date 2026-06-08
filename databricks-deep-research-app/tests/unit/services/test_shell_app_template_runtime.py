@@ -20,7 +20,7 @@ import sys
 import zipfile
 from collections.abc import Iterator
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock, patch
 from uuid import uuid4
@@ -103,9 +103,12 @@ def _load_app_module(app_dir: Path) -> ModuleType:
       MagicMock; no real LLM connection.
     - ``databricks_deep_research.tracing.setup_mlflow_tracing`` → no-op.
     - ``mlflow.start_span`` → returns a no-op context manager.
-    - ``databricks_deep_research.WorkflowRunner`` → MagicMock so the test
-      can assert whether the runner was constructed and called (used to
-      prove the fail-closed gate short-circuits before runner build).
+    - ``databricks_deep_research.WorkflowRunner`` → MagicMock (the template
+      still imports it for an ``inspect.signature`` feature-probe).
+    - ``databricks_deep_research.build_databricks_workflow_runner`` →
+      MagicMock so the test can assert whether — and with what kwargs — a
+      per-request runner was built (used to prove the fail-closed gate
+      short-circuits before runner build). Exposed as ``_test_runner_builder``.
     """
     sys_path_entry = str(app_dir)
     sys.path.insert(0, sys_path_entry)
@@ -115,15 +118,29 @@ def _load_app_module(app_dir: Path) -> ModuleType:
     fake_runner = MagicMock()
     fake_runner.stream = MagicMock()  # not async-iterable; will fail if called
     fake_runner_class = MagicMock(return_value=fake_runner)
+    # The template builds the per-request runner via the framework's
+    # ``build_databricks_workflow_runner`` (it no longer constructs
+    # ``WorkflowRunner`` directly). Patch that builder so tests can observe
+    # whether — and with what kwargs — a runner was built.
+    fake_runner_builder = MagicMock(return_value=fake_runner)
     no_op_span = MagicMock()
     no_op_span.__enter__ = MagicMock(return_value=no_op_span)
     no_op_span.__exit__ = MagicMock(return_value=False)
 
-    # Stub the framework's workflow loader so the test doesn't have to
-    # build a fully-valid WorkflowDefinition (with every required field
-    # the schema enforces). The OBO fail-closed gate operates on
-    # ``_DEFINITION_DICT`` (the raw dict), not on the loaded definition.
-    stub_definition = MagicMock(id="shell-app-test", output_keys=[])
+    # Stub the framework's workflow loader so the test doesn't have to build a
+    # fully-valid WorkflowDefinition. The OBO fail-closed gate reads the LOADED
+    # definition's ``.tools`` (``workflow_requires_databricks(_DEFINITION)``),
+    # so the stub mirrors the real loader by exposing ``.tools`` carrying each
+    # declared ``.kind`` taken from the embedded ``agent.yaml`` dict.
+    def _fake_load_workflow_from_dict(definition: dict[str, Any]) -> MagicMock:
+        declared = definition.get("tools") or []
+        loaded = MagicMock(id=definition.get("id", "shell-app-test"), output_keys=[])
+        loaded.tools = [
+            SimpleNamespace(kind=tool.get("kind"), name=tool.get("name"))
+            for tool in declared
+            if isinstance(tool, dict)
+        ]
+        return loaded
 
     with (
         patch("databricks.sdk.WorkspaceClient", return_value=fake_ws),
@@ -141,8 +158,12 @@ def _load_app_module(app_dir: Path) -> ModuleType:
             new=fake_runner_class,
         ),
         patch(
+            "databricks_deep_research.build_databricks_workflow_runner",
+            new=fake_runner_builder,
+        ),
+        patch(
             "databricks_deep_research.workflow.loader.load_workflow_from_dict",
-            return_value=stub_definition,
+            side_effect=_fake_load_workflow_from_dict,
         ),
     ):
         spec = importlib.util.spec_from_file_location(
@@ -154,8 +175,10 @@ def _load_app_module(app_dir: Path) -> ModuleType:
         spec.loader.exec_module(module)
 
     sys.path.remove(sys_path_entry)
-    # Attach the WorkflowRunner mock so tests can introspect call count.
+    # Attach the mocks so tests can introspect construction. The builder is
+    # the seam the template uses now; the runner class is kept for back-compat.
     module._test_runner_class = fake_runner_class  # type: ignore[attr-defined]
+    module._test_runner_builder = fake_runner_builder  # type: ignore[attr-defined]
     return module
 
 
@@ -192,9 +215,9 @@ async def test_fail_closed_when_obo_missing_in_apps_runtime(
     payload = json.loads(data_line[len("data: "):])
     assert payload["code"] == "missing_obo_token"
 
-    # Critical: the runner must NOT have been constructed.
+    # Critical: the runner must NOT have been built.
     assert (
-        app_module._test_runner_class.call_count == 0
+        app_module._test_runner_builder.call_count == 0
     ), "runner was built despite missing OBO — fail-closed gate did not fire"
 
 
@@ -220,8 +243,8 @@ async def test_local_dev_does_not_fail_closed(
     # whether the per-request runner was constructed.
     client.post("/api/chat", json={"query": "irrelevant"})
 
-    # Runner MUST be constructed because the fail-closed gate is bypassed.
-    assert app_module._test_runner_class.call_count == 1, (
+    # Runner MUST be built because the fail-closed gate is bypassed.
+    assert app_module._test_runner_builder.call_count == 1, (
         "runner should have been built in local-dev mode — gate fired "
         "incorrectly when DATABRICKS_APP_NAME was unset"
     )
@@ -233,11 +256,20 @@ async def test_table_tool_context_is_wired_in_rendered_shell_app(
     monkeypatch: pytest.MonkeyPatch,
     cleanup_app_module: None,
 ) -> None:
-    """Rendered shell apps must build table_* factory dependencies.
+    """Rendered shell apps must thread the resolved SQL warehouse into the
+    framework runner builder, which wires the table_* factory dependencies.
 
     Regression target: shell apps used ``ToolFactoryContext.from_defaults``
     directly, which left table_registry/schema_cache/sql_executor unset and
-    caused strict runtime resolution to report table tools as missing.
+    caused strict runtime resolution to report table tools as missing. The
+    template now delegates that wiring to the framework's
+    ``build_databricks_workflow_runner`` (one shared implementation). The
+    actual ctx population (sql_executor/schema_cache/table_registry) is
+    asserted at the framework level in
+    ``databricks-deep-research/tests/unit/tools/test_databricks_runner.py``
+    and ``.../builtins/text_table/test_runtime_wiring.py``; here we assert the
+    app-side contribution — the resolved ``STORAGE_WAREHOUSE_ID``, OBO token,
+    and SP/LLM clients are threaded into that builder.
     """
     app_dir = await _render_and_unpack(["table_read"], tmp_path / "app-table")
     monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
@@ -246,12 +278,12 @@ async def test_table_tool_context_is_wired_in_rendered_shell_app(
 
     app_module._build_per_request_runner("obo-token")
 
-    assert app_module._test_runner_class.call_count == 1
-    _, kwargs = app_module._test_runner_class.call_args
-    ctx = kwargs["factory_context"]
-    assert ctx.table_registry is not None
-    assert ctx.schema_cache is not None
-    assert ctx.sql_executor is not None
+    assert app_module._test_runner_builder.call_count == 1
+    _, kwargs = app_module._test_runner_builder.call_args
+    assert kwargs["warehouse_id"] == "d837825f69a03500"
+    assert kwargs["user_token"] == "obo-token"
+    assert kwargs["sp_workspace_client"] is app_module._SP_WORKSPACE_CLIENT
+    assert kwargs["llm_client"] is app_module._llm_client
 
 
 @pytest.mark.asyncio
@@ -275,44 +307,17 @@ async def test_purely_web_workflow_bypasses_obo_gate(
     # whether the per-request runner was constructed.
     client.post("/api/chat", json={"query": "irrelevant"})
 
-    # Runner MUST be constructed — web-only workflows don't need OBO.
-    assert app_module._test_runner_class.call_count == 1, (
+    # Runner MUST be built — web-only workflows don't need OBO.
+    assert app_module._test_runner_builder.call_count == 1, (
         "runner should have been built for a purely-web workflow; the "
         "fail-closed gate fired incorrectly"
     )
 
 
-def test_workflow_requires_databricks_helper_unit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unit-level check of ``_workflow_requires_databricks`` against
-    every Databricks-bound tool kind from ``ToolKind``."""
-    import asyncio
-
-    app_dir = asyncio.run(
-        _render_and_unpack(["vector_search"], tmp_path / "appunit")
-    )
-    monkeypatch.setenv("DATABRICKS_APP_NAME", "dr-shell-test")
-    app_module = _load_app_module(app_dir)
-    helper = app_module._workflow_requires_databricks
-
-    assert helper({"tools": []}) is False
-    assert helper({"tools": None}) is False
-    assert helper({}) is False
-    assert helper({"tools": [{"kind": "web_search"}]}) is False
-    assert helper({"tools": [{"kind": "vector_search"}]}) is True
-    assert helper({"tools": [{"kind": "genie"}]}) is True
-    assert helper({"tools": [{"kind": "knowledge_assistant"}]}) is True
-    assert helper({"tools": [{"kind": "table_search"}]}) is True
-    assert helper({"tools": [{"kind": "table_read"}]}) is True
-    # Mixed declarations
-    assert (
-        helper({"tools": [{"kind": "web_search"}, {"kind": "genie"}]})
-        is True
-    )
-    # Malformed entries are tolerated (no crash)
-    assert helper({"tools": [{"name": "foo"}]}) is False
-    assert helper({"tools": ["not_a_dict"]}) is False
-
-    sys.modules.pop("app", None)
+# NOTE: the per-kind unit check for ``workflow_requires_databricks`` lives at
+# the framework level (the single source of truth) in
+# ``databricks-deep-research/tests/unit/tools/test_databricks_runner.py``
+# (``test_workflow_requires_databricks_*``). The rendered template imports that
+# helper directly; its integrated behavior is exercised by the
+# ``_WORKFLOW_REQUIRES_DATABRICKS`` assertions in the fail-closed / local-dev /
+# purely-web tests above.

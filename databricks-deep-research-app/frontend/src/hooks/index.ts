@@ -1,4 +1,5 @@
 export { useChats, useCreateChat } from './useChats';
+export { useEventCallback } from './useEventCallback';
 export { useChatActions } from './useChatActions';
 export { useMessages } from './useMessages';
 export { usePrefetchMessages } from './usePrefetchMessages';

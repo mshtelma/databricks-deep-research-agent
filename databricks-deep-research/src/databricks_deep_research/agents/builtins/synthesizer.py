@@ -1002,14 +1002,48 @@ def _build_framework_summary(summary: VerificationSummaryInfo | dict[str, Any] |
     }
 
 
+def _numeric_citation_keys(
+    named_key: str | None,
+    named_keys: list[str] | None,
+    key_to_numeric: dict[str, str],
+) -> list[str]:
+    """Map a record's human-readable citation key(s) to the numeric indices used
+    in the rendered report.
+
+    The citation pipeline tags claims with human-readable keys ("Arxiv"), but the
+    synthesizer rewrites the report to numeric markers ("[1]") via
+    ``_replace_human_citations_with_numeric`` using this same ``key_to_numeric``
+    map. The live UI matches markers by key, so streamed verdicts must carry the
+    *numeric* keys to color the rendered (numeric) report. Unmapped keys fall back
+    to the original value, mirroring the report rewrite (which also leaves them).
+    """
+    keys = list(named_keys or ([named_key] if named_key else []))
+    seen: set[str] = set()
+    numeric: list[str] = []
+    for key in keys:
+        mapped = key_to_numeric.get(key, key)
+        if mapped not in seen:
+            seen.add(mapped)
+            numeric.append(mapped)
+    return numeric
+
+
 def _normalize_verification_records(
     verifications: list[dict[str, Any]],
+    key_to_numeric: dict[str, str],
 ) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     for verification in verifications:
+        numeric_keys = _numeric_citation_keys(
+            verification.get("citation_key"),
+            verification.get("citation_keys"),
+            key_to_numeric,
+        )
         records.append(
             {
                 "claim_index": verification.get("claim_index", 0),
+                "citation_key": numeric_keys[0] if numeric_keys else None,
+                "citation_keys": numeric_keys,
                 "verdict": verification.get("verdict", "unsupported"),
                 "confidence": float(verification.get("confidence", 0.0)),
                 "verification_confidence": float(
@@ -1156,6 +1190,8 @@ def _extract_claim_verified_events(
                 verification_method=verification.get("verification_method", ""),
                 evidence_snippet=verification.get("evidence_snippet", ""),
                 claim_text=verification.get("claim_text", ""),
+                citation_key=verification.get("citation_key"),
+                citation_keys=verification.get("citation_keys") or [],
             )
         )
     return events
@@ -1533,12 +1569,33 @@ def _persist_grounding_state(
 
     payload = {
         "claims": claims,
-        "verifications": _normalize_verification_records(verifications),
+        "verifications": _normalize_verification_records(verifications, key_to_numeric),
         "corrections": _normalize_corrections(corrections, key_to_numeric),
         "numeric_claims": _normalize_numeric_claims(numeric_claims),
         "verification_summary": summary_data,
         "analysis_summary": summary_data.get("analysis_summary", {}),
     }
+
+    # Observability: surface drift between the numeric markers actually rendered in
+    # the report and the numeric keys carried by streamed verdicts. A non-empty diff
+    # means those markers render uncolored ("grey") in the live UI until the
+    # persisted/REST claims arrive. Cheap O(n) check; logs only, no behavior change.
+    report_marker_keys = set(_re.findall(r"\[(\d+)\]", report_content or ""))
+    verdict_keys = {
+        key
+        for record in payload["verifications"]
+        for key in (record.get("citation_keys") or [])
+    }
+    missing_verdicts = report_marker_keys - verdict_keys
+    if missing_verdicts:
+        logger.warning(
+            "SYNTHESIZER_CITATION_KEY_GAP node_id=%s markers_without_verdict=%s "
+            "report_markers=%d verdict_keys=%d",
+            node_id,
+            sorted(missing_verdicts),
+            len(report_marker_keys),
+            len(verdict_keys),
+        )
 
     if claims or summary_data:
         if state.runtime_store is None:

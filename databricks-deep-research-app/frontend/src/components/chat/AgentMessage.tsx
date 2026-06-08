@@ -1,21 +1,12 @@
 import * as React from 'react';
-import {
-  useFloating,
-  autoUpdate,
-  offset,
-  flip,
-  shift,
-  useDismiss,
-  useInteractions,
-  FloatingPortal,
-  useTransitionStyles,
-} from '@floating-ui/react';
+import { FloatingPortal } from '@floating-ui/react';
+import { useCitationPopover } from '@/hooks/useCitationPopover';
 import { Message, Source, ResearchPlan } from '@/types';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { safeOpenUrl } from '@/utils/urlSafety';
 import { MarkdownRenderer, CitationContext } from '@/components/common';
-import { EvidenceCard, SourceGroupedCitations } from '@/components/citations';
+import { ActiveCitationContext, EvidenceCard, SourceGroupedCitations } from '@/components/citations';
 import { MessageExportMenu } from './MessageExportMenu';
 import type { Claim, VerificationSummary } from '@/types/citation';
 import { ComponentRegistry } from '@/core/plugins';
@@ -79,20 +70,6 @@ export function AgentMessage({
   const [showSources, setShowSources] = React.useState(false);
   const [showReasoning, setShowReasoning] = React.useState(false);
   const [showVerification, setShowVerification] = React.useState(false);
-  const [activeCitationKey, setActiveCitationKey] = React.useState<string | null>(null);
-  const [popoverClaim, setPopoverClaim] = React.useState<Claim | null>(null);
-
-  // Ref to track popover hide timeout for proper cleanup
-  const popoverTimeoutRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Cleanup popover timeout on unmount to prevent setState on unmounted component
-  React.useEffect(() => {
-    return () => {
-      if (popoverTimeoutRef.current) {
-        clearTimeout(popoverTimeoutRef.current);
-      }
-    };
-  }, []);
 
   const hasReasoning = reasoning || (plan && plan.steps && plan.steps.length > 0);
   const hasCitations = enableCitations && claims.length > 0;
@@ -111,38 +88,6 @@ export function AgentMessage({
     }
     return null;
   }, [structuredOutput]);
-
-  // Floating UI setup for smart popover positioning
-  const isPopoverOpen = popoverClaim !== null;
-
-  const { refs, floatingStyles, context } = useFloating({
-    open: isPopoverOpen,
-    onOpenChange: (open) => {
-      if (!open) {
-        setPopoverClaim(null);
-        setActiveCitationKey(null);
-      }
-    },
-    placement: 'bottom-start',
-    middleware: [
-      offset(8),
-      flip({ padding: 8, fallbackAxisSideDirection: 'end' }),
-      shift({ padding: 8, crossAxis: true }),
-    ],
-    whileElementsMounted: autoUpdate,
-  });
-
-  const dismiss = useDismiss(context, {
-    escapeKey: true,
-    outsidePress: true,
-  });
-
-  const { getFloatingProps } = useInteractions([dismiss]);
-
-  const { isMounted, styles: transitionStyles } = useTransitionStyles(context, {
-    duration: 150,
-    initial: { opacity: 0, transform: 'scale(0.95)' },
-  });
 
   // Build citation data map for MarkdownRenderer using ALL citation keys
   // This allows multi-marker sentences like "[Arxiv][Arxiv-2]" to resolve correctly
@@ -172,56 +117,26 @@ export function AgentMessage({
     return map;
   }, [claims, enableCitations]);
 
-  // Handle citation click - open source URL in new tab
-  // Uses citationKey to look up the claim
-  const handleCitationClick = React.useCallback((citationKey: string) => {
-    const context = citationData?.get(citationKey);
-    const claim = context?.claim;
-    if (!claim) return;
+  // Citation evidence-card popover: hover opens, click pins, a hover-bridge keeps
+  // it reachable, Esc / outside-press closes. See useCitationPopover.
+  const pop = useCitationPopover(
+    React.useCallback(
+      (citationKey: string) => citationData?.get(citationKey)?.claim ?? null,
+      [citationData]
+    )
+  );
 
-    // Try both paths: source.url (denormalized) and sourceUrl (direct)
+  // Handle claim click in the Sources & Citations list - open the source URL.
+  // (Inline report markers go through the popover instead — see pop.onMarkerClick.)
+  const handleCitationClick = React.useCallback((citationKey: string) => {
+    const claim = citationData?.get(citationKey)?.claim;
+    if (!claim) return;
     const sourceUrl = claim.citations[0]?.evidenceSpan?.source?.url ||
                       (claim.citations[0]?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
     if (sourceUrl) {
       safeOpenUrl(sourceUrl);
     }
   }, [citationData]);
-
-  // Handle citation hover - show evidence card popover
-  // Uses citationKey to look up the claim, element to position popover
-  const handleCitationHover = React.useCallback((
-    citationKey: string | null,
-    element?: HTMLElement | null
-  ) => {
-    // Clear any pending hide timeout
-    if (popoverTimeoutRef.current) {
-      clearTimeout(popoverTimeoutRef.current);
-      popoverTimeoutRef.current = null;
-    }
-
-    if (citationKey === null) {
-      // Mouse left - hide popover (after delay to allow moving to popover)
-      popoverTimeoutRef.current = setTimeout(() => {
-        setPopoverClaim(null);
-        setActiveCitationKey(null);
-        popoverTimeoutRef.current = null;
-      }, 100);
-    } else {
-      // Mouse entered - show popover anchored to the citation marker element
-      const context = citationData?.get(citationKey);
-      const claim = context?.claim;
-      if (claim) {
-        setActiveCitationKey(citationKey);
-        setPopoverClaim(claim);
-        // Use the marker element as the floating reference
-        if (element) {
-          refs.setReference(element);
-        }
-      }
-    }
-  }, [citationData, refs]);
-
-  // Note: click-outside and escape key are handled by useDismiss from floating-ui
 
   // Helper to validate UUID format (8-4-4-4-12 hex characters)
   const isValidMessageId = React.useMemo(() =>
@@ -252,42 +167,43 @@ export function AgentMessage({
                 context={{ theme: 'light', userId: null }}
               />
             ) : (
-              <MarkdownRenderer
-                content={message.content}
-                enableCitations={enableCitations || !isStreaming}
-                // IMPORTANT:
-                // - When we have verified claims, force numeric/key parsing so [Arxiv] / [1] markers become interactive.
-                // - When we DON'T have claims yet (e.g., deferred persistence / slow DB), use 'auto' so we still
-                //   parse numeric markers OR link citations depending on what the model produced.
-                citationMode={claims.length > 0 ? 'numeric' : 'auto'}
-                citationData={citationData}
-                onCitationClick={handleCitationClick}
-                onCitationHover={handleCitationHover}
-                activeCitationKey={activeCitationKey}
-              />
+              <ActiveCitationContext.Provider value={pop.activeKey}>
+                <MarkdownRenderer
+                  content={message.content}
+                  enableCitations={enableCitations || !isStreaming}
+                  // IMPORTANT:
+                  // - When we have verified claims, force numeric/key parsing so [Arxiv] / [1] markers become interactive.
+                  // - When we DON'T have claims yet (e.g., deferred persistence / slow DB), use 'auto' so we still
+                  //   parse numeric markers OR link citations depending on what the model produced.
+                  citationMode={claims.length > 0 ? 'numeric' : 'auto'}
+                  citationData={citationData}
+                  // Stable, ready-to-spread callbacks from the popover hook. Inline arrows
+                  // here would remount the citation markers each render → React #185.
+                  {...pop.markdownCitationProps}
+                />
+              </ActiveCitationContext.Provider>
             )}
             {isStreaming && !CustomRenderer && (
               <span className="inline-block w-2 h-4 bg-primary animate-pulse ml-1 align-text-bottom" />
             )}
 
-            {/* Evidence card popover with smart positioning */}
-            {isMounted && popoverClaim && (
+            {/* Evidence card popover — anchored to the marker, hover-bridged, pinnable */}
+            {pop.isMounted && pop.claim && (
               <FloatingPortal>
                 <div
-                  ref={refs.setFloating}
-                  style={{ ...floatingStyles, ...transitionStyles }}
-                  {...getFloatingProps()}
+                  ref={pop.refs.setFloating}
+                  style={{ ...pop.floatingStyles, ...pop.transitionStyles }}
+                  {...pop.getFloatingProps()}
+                  onMouseEnter={pop.onCardEnter}
+                  onMouseLeave={pop.onCardLeave}
                   className="z-50"
                 >
                   <EvidenceCard
-                    citation={popoverClaim.citations[0]}
-                    claimText={popoverClaim.claimText}
-                    verdict={popoverClaim.verificationVerdict}
+                    citation={pop.claim.citations[0]}
+                    claimText={pop.claim.claimText}
+                    verdict={pop.claim.verificationVerdict}
                     isPopover={true}
-                    onClose={() => {
-                      setPopoverClaim(null);
-                      setActiveCitationKey(null);
-                    }}
+                    onClose={pop.close}
                   />
                 </div>
               </FloatingPortal>

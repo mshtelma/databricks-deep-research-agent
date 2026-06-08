@@ -499,6 +499,11 @@ class ClaimVerifiedEvent(StreamEvent):
     verification_method: str = ""
     evidence_snippet: str = ""
     claim_text: str = ""
+    # Numeric citation keys (e.g. "1", "2") matching the markers in the rendered
+    # report, so the live UI can color this claim's markers before persistence.
+    # Mirrors ClaimGeneratedEvent.citation_keys. See _normalize_verification_records.
+    citation_key: str | None = None
+    citation_keys: list[str] = Field(default_factory=list)
 
 
 class CitationCorrectedEvent(StreamEvent):

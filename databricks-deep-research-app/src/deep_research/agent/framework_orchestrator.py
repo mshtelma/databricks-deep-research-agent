@@ -1554,6 +1554,10 @@ def _to_sse_event(app_evt: AppSSEEvent) -> StreamEvent | None:
                 verdict=data.get("verdict", ""),
                 confidence_level=_conf_level,
                 evidence_preview=data.get("evidence_snippet", ""),
+                # Numeric citation keys → frontend citationData mapping for live
+                # (pre-persistence) marker coloring. Schema defaults handle absence.
+                citation_key=data.get("citation_key"),
+                citation_keys=data.get("citation_keys"),
             )
         elif progress_type == "verification_summary":
             from deep_research.schemas.streaming import (

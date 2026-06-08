@@ -10,6 +10,7 @@ from databricks_deep_research.events.types import (
     AgentOutputEvent,
     AgentStreamChunkEvent,
     BackgroundCompletedEvent,
+    ClaimVerifiedEvent,
     CoordinatorClassifiedEvent,
     ItemCompletedEvent,
     ItemStartedEvent,
@@ -478,6 +479,42 @@ class TestUnknownEvents:
         assert sse_events[0].event_type == "research_progress"
         assert sse_events[0].data["progress_type"] == "tool_call"
         assert sse_events[0].data["tool_name"] == "web_search"
+
+
+class TestHandleClaimVerified:
+    """claim_verified must forward the numeric citation keys so the live UI can
+    color the report's citation markers before persistence completes."""
+
+    def test_forwards_citation_keys(self) -> None:
+        tracker = DomainContextTracker()
+        event = ClaimVerifiedEvent(
+            **_base(),
+            claim_index=0,
+            verdict="supported",
+            confidence=0.9,
+            citation_key="1",
+            citation_keys=["1", "2"],
+        )
+
+        sse_events = tracker.process_event(event)
+
+        assert len(sse_events) == 1
+        data = sse_events[0].data
+        assert data["progress_type"] == "claim_verified"
+        assert data["verdict"] == "supported"
+        assert data["citation_key"] == "1"
+        assert data["citation_keys"] == ["1", "2"]
+
+    def test_absent_keys_default_to_empty(self) -> None:
+        tracker = DomainContextTracker()
+        event = ClaimVerifiedEvent(
+            **_base(), claim_index=0, verdict="partial", confidence=0.5
+        )
+
+        sse_events = tracker.process_event(event)
+
+        assert sse_events[0].data["citation_key"] is None
+        assert sse_events[0].data["citation_keys"] == []
 
 
 # ---------------------------------------------------------------------------

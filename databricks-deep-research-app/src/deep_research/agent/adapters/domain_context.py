@@ -358,6 +358,10 @@ def _handle_claim_verified(event: StreamEvent, delta: PersistenceDelta) -> list[
             "confidence": e.confidence,
             "evidence_snippet": e.evidence_snippet,
             "claim_text": e.claim_text,
+            # Numeric citation keys so the live UI can color this claim's markers
+            # before persistence (matches the numeric markers in the rendered report).
+            "citation_key": e.citation_key,
+            "citation_keys": e.citation_keys,
         },
     )]
 

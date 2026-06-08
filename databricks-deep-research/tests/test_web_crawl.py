@@ -122,25 +122,33 @@ async def test_repeated_non_retryable_url_failure_is_suppressed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_domain_suppression_blocks_third_non_retryable_target() -> None:
+async def test_domain_suppression_blocks_target_after_threshold_failures() -> None:
+    """After ``_DOMAIN_SUPPRESSION_THRESHOLD`` distinct non-retryable failures on a
+    single domain, the next distinct URL on that domain is suppressed without a crawl.
+
+    Kept threshold-relative (derived from the constant rather than hardcoded) so
+    tuning ``_DOMAIN_SUPPRESSION_THRESHOLD`` — raised 2->4 in cfe0b2e so a couple
+    of transient failures don't disable a whole domain — doesn't silently re-break
+    this test.
+    """
+    threshold = UrlRegistry._DOMAIN_SUPPRESSION_THRESHOLD
     crawler = _mock_http_error(403)
     tool = WebCrawlTool(crawler=crawler)
-    ctx = _make_context([
-        "https://example.com/a",
-        "https://example.com/b",
-        "https://example.com/c",
-    ])
+    # ``threshold`` distinct URLs that each fail-and-crawl, plus one more on the
+    # same domain that should be suppressed once the threshold is reached.
+    urls = [f"https://example.com/p{i}" for i in range(threshold + 1)]
+    ctx = _make_context(urls)
 
-    first = await tool.execute({"url_index": 0}, ctx)
-    second = await tool.execute({"url_index": 1}, ctx)
-    third = await tool.execute({"url_index": 2}, ctx)
+    results = [await tool.execute({"url_index": i}, ctx) for i in range(threshold + 1)]
 
-    assert not first.success
-    assert not second.success
-    assert not third.success
-    assert third.error == "Suppressed repeated crawl failure"
-    assert third.data["suppression_scope"] == "domain"
-    assert crawler.await_count == 2
+    # Every distinct URL fails; only the first ``threshold`` are actually crawled.
+    assert all(not r.success for r in results)
+    assert crawler.await_count == threshold
+
+    # The URL past the threshold is suppressed at domain scope without a crawl.
+    suppressed = results[-1]
+    assert suppressed.error == "Suppressed repeated crawl failure"
+    assert suppressed.data["suppression_scope"] == "domain"
 
 
 # ---------------------------------------------------------------------------

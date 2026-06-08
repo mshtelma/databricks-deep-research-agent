@@ -11,3 +11,4 @@ export { NumericChip } from './NumericChip';
 export { NumericDetails } from './NumericDetails';
 export { FloatingEvidenceCard } from './FloatingEvidenceCard';
 export { SourceGroupedCitations } from './SourceGroupedCitations';
+export { ActiveCitationContext } from './ActiveCitationContext';

@@ -2446,6 +2446,32 @@ class TestResearchProgressForwarding:
         assert result.tool_name == "web_search"
         assert result.event_type == "tool_call"
 
+    def test_claim_verified_preserves_citation_keys(self) -> None:
+        """research_progress/claim_verified -> ClaimVerifiedEvent keeps numeric keys.
+
+        Regression guard: dropping these keys left every citation grey until reload.
+        """
+        from deep_research.agent.adapters.domain_context import AppSSEEvent
+        from deep_research.schemas.streaming import (
+            ClaimVerifiedEvent as AppClaimVerified,
+        )
+
+        app_evt = AppSSEEvent(
+            event_type="research_progress",
+            data={
+                "progress_type": "claim_verified",
+                "verdict": "supported",
+                "confidence": 0.9,
+                "citation_key": "1",
+                "citation_keys": ["1", "2"],
+            },
+        )
+        result = _to_sse_event(app_evt)
+        assert isinstance(result, AppClaimVerified)
+        assert result.verdict == "supported"
+        assert result.citation_key == "1"
+        assert result.citation_keys == ["1", "2"]
+
     def test_tool_result_event_forwarded(self) -> None:
         """research_progress with progress_type=tool_result -> ToolResultEvent."""
         from deep_research.agent.adapters.domain_context import AppSSEEvent

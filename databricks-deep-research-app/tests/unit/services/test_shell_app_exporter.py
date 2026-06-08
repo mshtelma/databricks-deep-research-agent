@@ -367,7 +367,7 @@ class TestTranslate:
             app_py = zf.read("app.py").decode("utf-8")
 
         assert "ToolFactoryContext.from_defaults" in app_py
-        assert "_wire_text_table_context(ctx)" in app_py
+        assert "_wire_text_table_context(_factory_context)" in app_py
         assert "wire_statement_execution_text_table_context" in app_py
         assert "class _StatementExecutionTableSQL" not in app_py
         assert "TableBindingRegistry" not in app_py
