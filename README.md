@@ -4,7 +4,6 @@
 [![TypeScript](https://img.shields.io/badge/typescript-5.x-blue.svg)](https://www.typescriptlang.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.109+-green.svg)](https://fastapi.tiangolo.com/)
 [![React](https://img.shields.io/badge/React-18.x-blue.svg)](https://react.dev/)
-[![License](https://img.shields.io/badge/license-Proprietary-red.svg)]()
 
 A **uv workspace monorepo** containing two packages: a standalone multi-agent orchestration framework (`databricks-deep-research`) and a production application (`databricks-deep-research-app`) built on it. Features a 5-agent research architecture with a 7-stage citation verification pipeline grounded in peer-reviewed research, deployed on Databricks infrastructure.
 
@@ -401,7 +400,3 @@ specs/                                  # Feature specifications
 2. Ensure all tests pass: `make test-all`
 3. Type check: `make typecheck`
 4. Lint: `make lint`
-
-## License
-
-Proprietary
