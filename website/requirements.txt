@@ -1,0 +1,4 @@
+# Documentation site build dependencies (MkDocs + Material).
+# Pinned to compatible major lines; bump deliberately.
+mkdocs-material>=9.5,<10
+pymdown-extensions>=10.7

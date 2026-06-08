@@ -1,0 +1,54 @@
+name: Deploy docs site
+
+# Builds the MkDocs site in website/ and publishes it to GitHub Pages.
+# One-time setup: repo Settings -> Pages -> Source -> "GitHub Actions".
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "website/**"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Allow one concurrent deployment; don't cancel an in-progress run.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: website/requirements.txt
+
+      - name: Install dependencies
+        run: pip install -r website/requirements.txt
+
+      - name: Build site (strict)
+        run: mkdocs build --strict --config-file website/mkdocs.yml
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: website/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

@@ -1,0 +1,201 @@
+/* ==========================================================================
+   Databricks Deep Research Agent — site theme
+   Databricks-inspired palette (navy / blue + warm accent). No Databricks logo.
+   ========================================================================== */
+
+:root {
+  --dr-navy: #1b3139;
+  --dr-navy-dark: #0e1a1f;
+  --dr-navy-light: #2d4550;
+  --dr-blue: #2272b4;
+  --dr-blue-light: #2d9cdb;
+  --dr-lava: #ff3621;
+  --dr-lava-dark: #d92f1c;
+}
+
+/* ---- Light scheme -------------------------------------------------------- */
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--dr-navy);
+  --md-primary-fg-color--light: var(--dr-navy-light);
+  --md-primary-fg-color--dark: var(--dr-navy-dark);
+  --md-accent-fg-color: var(--dr-blue);
+  --md-typeset-a-color: var(--dr-blue);
+}
+
+/* ---- Dark scheme --------------------------------------------------------- */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--dr-navy-dark);
+  --md-primary-fg-color--light: var(--dr-navy-light);
+  --md-primary-fg-color--dark: #0a1316;
+  --md-accent-fg-color: var(--dr-blue-light);
+  --md-typeset-a-color: var(--dr-blue-light);
+  --md-default-bg-color: #11181c;
+}
+
+/* ==========================================================================
+   Hero (landing page)
+   ========================================================================== */
+
+.dr-hero {
+  position: relative;
+  overflow: hidden;
+  padding: 5.5rem 1.2rem 4.5rem;
+  text-align: center;
+  color: #fff;
+  background:
+    radial-gradient(1100px 460px at 80% -10%, rgba(45, 156, 219, 0.45), transparent 60%),
+    radial-gradient(900px 420px at 8% 120%, rgba(255, 54, 33, 0.28), transparent 55%),
+    linear-gradient(135deg, var(--dr-navy) 0%, #1c4257 55%, var(--dr-blue) 130%);
+}
+
+.dr-hero__inner {
+  max-width: 52rem;
+  margin: 0 auto;
+}
+
+.dr-hero__eyebrow {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  padding: 0.35rem 0.8rem;
+  margin-bottom: 1.4rem;
+  border-radius: 999px;
+  color: #cfe8ff;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.dr-hero__title {
+  margin: 0 0 1rem;
+  font-size: 2.85rem;
+  line-height: 1.08;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.dr-hero__title .dr-accent {
+  background: linear-gradient(90deg, #ffd6cf, var(--dr-lava));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.dr-hero__subtitle {
+  margin: 0 auto 2rem;
+  max-width: 42rem;
+  font-size: 1.06rem;
+  line-height: 1.6;
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.dr-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.8rem;
+  justify-content: center;
+}
+
+.dr-hero .md-button {
+  margin: 0;
+  border-radius: 8px;
+  font-weight: 600;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.dr-hero .md-button:hover {
+  transform: translateY(-2px);
+}
+
+.dr-hero .md-button--primary {
+  background-color: var(--dr-lava);
+  border-color: var(--dr-lava);
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(255, 54, 33, 0.35);
+}
+
+.dr-hero .md-button--primary:hover {
+  background-color: var(--dr-lava-dark);
+  border-color: var(--dr-lava-dark);
+}
+
+.dr-hero .md-button:not(.md-button--primary) {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.6);
+}
+
+.dr-hero .md-button:not(.md-button--primary):hover {
+  background-color: #fff;
+  color: var(--dr-navy);
+  border-color: #fff;
+}
+
+/* ==========================================================================
+   Stat strip (benchmark numbers)
+   ========================================================================== */
+
+.dr-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 1rem;
+  margin: 2rem 0 1rem;
+}
+
+.dr-stat {
+  padding: 1.4rem 1rem;
+  border-radius: 12px;
+  text-align: center;
+  border: 1px solid var(--md-default-fg-color--lightest);
+  background: var(--md-code-bg-color);
+}
+
+.dr-stat__value {
+  font-size: 2.1rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--dr-blue);
+}
+
+[data-md-color-scheme="slate"] .dr-stat__value {
+  color: var(--dr-blue-light);
+}
+
+.dr-stat__label {
+  margin-top: 0.5rem;
+  font-size: 0.82rem;
+  color: var(--md-default-fg-color--light);
+}
+
+/* ==========================================================================
+   Grid cards polish
+   ========================================================================== */
+
+.md-typeset .grid.cards > ul > li {
+  border-radius: 12px;
+  transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+}
+
+.md-typeset .grid.cards > ul > li:hover {
+  border-color: var(--dr-blue);
+  box-shadow: 0 8px 24px rgba(27, 49, 57, 0.12);
+  transform: translateY(-2px);
+}
+
+.md-typeset .grid.cards .twemoji,
+.md-typeset .grid.cards .lg {
+  color: var(--dr-blue);
+}
+
+/* ==========================================================================
+   Responsive
+   ========================================================================== */
+
+@media screen and (max-width: 44.98em) {
+  .dr-hero {
+    padding: 3.5rem 1rem 3rem;
+  }
+  .dr-hero__title {
+    font-size: 2.1rem;
+  }
+}

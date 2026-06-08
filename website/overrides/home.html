@@ -1,0 +1,45 @@
+{% extends "main.html" %}
+
+<!--
+  Custom landing page: keep Material's header + nav tabs, then render a
+  full-width hero below them. The page body (index.md) renders normally
+  underneath via the default content block.
+-->
+
+{% block tabs %}
+  {{ super() }}
+  <section class="dr-hero">
+    <div class="dr-hero__inner">
+      <span class="dr-hero__eyebrow">Multi-agent research on Databricks</span>
+      <h1 class="dr-hero__title">
+        Turn your data platform into an<br />
+        <span class="dr-accent">AI research assistant</span>
+      </h1>
+      <p class="dr-hero__subtitle">
+        A production-ready, multi-agent deep-research app for Databricks. Five
+        collaborating agents and a 7-stage citation pipeline deliver verified,
+        cited answers over Vector Search, Genie, Delta tables, and the web —
+        and anyone can build a custom agent through the UI, no code required.
+      </p>
+      <div class="dr-hero__actions">
+        <a class="md-button md-button--primary" href="{{ 'getting-started/overview/' | url }}">
+          Get started
+        </a>
+        <a class="md-button" href="{{ 'concepts/architecture/' | url }}">
+          How it works
+        </a>
+        <a class="md-button" href="{{ config.repo_url }}">
+          View on GitHub
+        </a>
+      </div>
+    </div>
+  </section>
+{% endblock %}
+
+<!--
+  Render the page body without Material's auto-injected <h1> (the hero already
+  carries the title), and without the edit/tags/feedback chrome.
+-->
+{% block content %}
+  {{ page.content }}
+{% endblock %}
