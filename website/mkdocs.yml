@@ -98,8 +98,8 @@ nav:
   - Home: index.md
   - Getting Started:
       - Overview: getting-started/overview.md
-      - Installation: getting-started/installation.md
-      - Quickstart: getting-started/quickstart.md
+      - Deploy to Databricks: getting-started/deploy.md
+      - Using the App: getting-started/quickstart.md
   - Concepts:
       - Architecture: concepts/architecture.md
       - 5-Agent System: concepts/agents.md
@@ -108,5 +108,5 @@ nav:
   - Guides:
       - Web Search Providers: guides/web-search-providers.md
       - Configuration: guides/configuration.md
-  - Deploy: deploy.md
   - Benchmarks: benchmarks.md
+  - Contributing: contributing.md

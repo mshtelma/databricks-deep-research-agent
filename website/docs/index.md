@@ -67,7 +67,7 @@ governance and the whole process streamed live to the UI.
     One command provisions Lakebase, grants permissions, and starts the app —
     or consume the framework as a standalone Python package.
 
-    [:octicons-arrow-right-24: Deploy guide](deploy.md)
+    [:octicons-arrow-right-24: Deploy guide](getting-started/deploy.md)
 
 </div>
 
@@ -101,5 +101,5 @@ Treasury Bulletins (697 bulletins, 58,000+ tables). Across three full runs of th
 ## Start here
 
 [Get started](getting-started/overview.md){ .md-button .md-button--primary }
-[Installation](getting-started/installation.md){ .md-button }
-[Quickstart](getting-started/quickstart.md){ .md-button }
+[Deploy to Databricks](getting-started/deploy.md){ .md-button }
+[Using the app](getting-started/quickstart.md){ .md-button }

@@ -81,21 +81,21 @@ is built for environments where data security is non-negotiable.
 
 <div class="grid cards" markdown>
 
--   :material-download-outline:{ .lg .middle } __Install it__
+-   :material-rocket-launch-outline:{ .lg .middle } __Deploy it__
 
     ---
 
-    Prerequisites, dependencies, and environment setup for local development.
+    Point it at your workspace and deploy with a single command.
 
-    [:octicons-arrow-right-24: Installation](installation.md)
+    [:octicons-arrow-right-24: Deploy to Databricks](deploy.md)
 
 -   :material-flash-outline:{ .lg .middle } __Run your first query__
 
     ---
 
-    Start the dev servers and understand query modes and research depths.
+    Ask your first question and understand query modes and research depths.
 
-    [:octicons-arrow-right-24: Quickstart](quickstart.md)
+    [:octicons-arrow-right-24: Using the app](quickstart.md)
 
 -   :material-sitemap-outline:{ .lg .middle } __See the architecture__
 
@@ -105,12 +105,12 @@ is built for environments where data security is non-negotiable.
 
     [:octicons-arrow-right-24: Architecture](../concepts/architecture.md)
 
--   :material-rocket-launch-outline:{ .lg .middle } __Deploy to Databricks__
+-   :material-shield-check-outline:{ .lg .middle } __Verified citations__
 
     ---
 
-    A single command provisions Lakebase and starts the app.
+    How the 7-stage pipeline grounds every claim and assigns a verdict.
 
-    [:octicons-arrow-right-24: Deploy](../deploy.md)
+    [:octicons-arrow-right-24: Citation pipeline](../concepts/citation-pipeline.md)
 
 </div>
