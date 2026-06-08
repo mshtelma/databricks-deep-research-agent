@@ -1,26 +1,11 @@
-# Quickstart
+# Using the app
 
-Once you've [installed](installation.md) the project and configured `.env`, you can
-run the full app locally with hot reload.
-
-## Start the dev servers
-
-```bash
-make dev
-```
-
-This starts both servers with hot reload:
-
-- **Frontend** — <http://localhost:5173>
-- **Backend API** — <http://localhost:8000>
-
-Open the UI at <http://localhost:5173> and ask a question. To run the backend or
-frontend alone, use `make dev-backend` or `make dev-frontend`. To use a different
-port (e.g. alongside another worktree): `PORT=8001 make dev`.
+Once the app is [deployed to your workspace](deploy.md), open it and ask a question.
+Here's what to expect and how to steer it.
 
 ## Choose a query mode
 
-The app routes each question through one of three modes for progressive disclosure:
+Each question is routed through one of three modes for progressive disclosure:
 
 | Mode | Latency target | What happens |
 |------|----------------|--------------|
@@ -38,26 +23,23 @@ Within Deep Research, three depth profiles trade speed for thoroughness:
 | **Medium** | 3–6 | `react` (LLM controls tool calls) | 1,200–3,000 words |
 | **Extended** | 5–10 | `react`, up to 20 tool calls/step | 1,500–4,000 words |
 
-!!! info "Classic vs. ReAct researcher"
-    - **`classic`** runs a fixed set of searches/crawls per step — faster, predictable.
-    - **`react`** lets the LLM decide which tools to call within a budget — more
-      intelligent, better for open-ended questions.
+Depth can be selected automatically from query complexity, chosen by the user, or locked
+by a custom agent.
 
-## Watch it work
+## Watch research happen live
 
-Research streams to the UI in real time over Server-Sent Events: you see the planner
-form a strategy, each research step execute its tool calls, the reflector evaluate
-coverage, and the report materialize sentence by sentence — with citation verdicts
-appearing as claims are checked. Stream state survives a browser refresh.
+Research streams to the UI in real time over Server-Sent Events: you see the planner form
+a strategy, each step execute its tool calls, the reflector evaluate coverage, and the
+report materialize sentence by sentence — with citation verdicts appearing as claims are
+checked. Stream state survives a browser refresh.
 
-## Production build
+## Build a custom agent
 
-To serve the built UI from the backend (single server on `:8000`):
+Use the **Agent Designer** to turn a one-line prompt into a reusable, multi-agent
+research workflow — choosing data sources, models, depth, and prompts entirely through the
+UI. No code required.
 
-```bash
-make build      # build frontend into static/
-make prod       # run the unified production server
-```
+[:octicons-arrow-right-24: Agent Designer](../concepts/agent-designer.md)
 
 ## Next steps
 
@@ -71,20 +53,20 @@ make prod       # run the unified production server
 
     [:octicons-arrow-right-24: Configuration](../guides/configuration.md)
 
--   :material-auto-fix:{ .lg .middle } __Build a custom agent__
+-   :material-web:{ .lg .middle } __Web search providers__
 
     ---
 
-    Compose a multi-agent workflow from a prompt in the Agent Designer.
+    The default Databricks built-in search, plus optional Brave and Jina.
 
-    [:octicons-arrow-right-24: Agent Designer](../concepts/agent-designer.md)
+    [:octicons-arrow-right-24: Web Search Providers](../guides/web-search-providers.md)
 
--   :material-rocket-launch-outline:{ .lg .middle } __Deploy to Databricks__
+-   :material-code-braces:{ .lg .middle } __Contribute__
 
     ---
 
-    Ship it as a native Databricks App in one command.
+    Run it locally, make changes, and open a pull request.
 
-    [:octicons-arrow-right-24: Deploy](../deploy.md)
+    [:octicons-arrow-right-24: Contributing](../contributing.md)
 
 </div>

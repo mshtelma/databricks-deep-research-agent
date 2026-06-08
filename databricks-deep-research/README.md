@@ -154,4 +154,4 @@ uv run ruff check src/
 
 ## License
 
-Proprietary
+Licensed under the [Apache License 2.0](LICENSE). Copyright &copy; 2026 the Databricks Deep Research Agent contributors.

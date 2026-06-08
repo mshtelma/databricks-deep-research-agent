@@ -4,6 +4,9 @@ version = "0.1.0"
 description = "Deep Research application - FastAPI backend + React frontend for Databricks"
 readme = "README.md"
 requires-python = ">=3.11"
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+]
 dependencies = [
     "databricks-deep-research[all]",
     "fastapi>=0.109.0",
