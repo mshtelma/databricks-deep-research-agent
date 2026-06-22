@@ -124,6 +124,12 @@ class OrchestrationConfig:
     agent_id: str | None = None
     """Custom agent ID to use for this research job."""
 
+    turn_intent: str = "auto"
+    """Per-turn routing for custom-agent chats: 'auto' (classify intent),
+    'chat' (answer from already-gathered data, no workflow re-run), or
+    'research' (force a fresh agent run). Only consulted when ``agent_id`` is
+    set and the chat already has prior research; otherwise ignored."""
+
     # =========================================================================
     # Per-Agent Overrides (009-custom-agent-config)
     # =========================================================================

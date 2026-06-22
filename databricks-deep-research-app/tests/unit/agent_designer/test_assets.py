@@ -4,6 +4,7 @@ from typing import Any
 
 from deep_research.agent_designer.assets import (
     asset_context_payload,
+    assets_from_ast,
     detect_asset_contract,
     infer_assets_from_intent,
     inspect_assets,
@@ -11,6 +12,76 @@ from deep_research.agent_designer.assets import (
     recommend_tools_for_assets,
 )
 from deep_research.agent_designer.registry import source_kinds_payload, tool_kinds_payload
+
+# ---------------------------------------------------------------------------
+# assets_from_ast — reconstruct corpus assets from an existing workflow AST so
+# an EDIT preserves the data tools instead of rebuilding web-only (Issue #2).
+# ---------------------------------------------------------------------------
+
+
+def _edit_ast() -> dict[str, Any]:
+    return {
+        "tools": [
+            {"name": "vs1", "kind": "vector_search",
+             "config": {"index_name": "cat.sch.idx", "columns": ["a", "b"], "query_type": "ANN"}},
+            {"name": "ts1", "kind": "table_search",
+             "config": {"table_name": "cat.sch.tbl", "warehouse_id": "wh-custom-123"}},
+            {"name": "tr1", "kind": "table_read",
+             "config": {"table_name": "cat.sch.tbl", "warehouse_id": "wh-custom-123"}},
+            {"name": "gn1", "kind": "genie", "config": {"genie_space_id": "space-xyz"}},
+            {"name": "web", "kind": "web_research", "config": {}},
+            {"name": "wc", "kind": "web_crawl", "config": {}},
+        ]
+    }
+
+
+def test_assets_from_ast_maps_kinds_and_excludes_web() -> None:
+    assets = assets_from_ast(_edit_ast())
+    by_kind = {a.kind for a in assets}
+    # web_research / web_crawl are NOT assets.
+    assert by_kind == {"vector_index", "delta_table", "genie_space"}
+    # delta_table deduped across table_search + table_read on the same table.
+    assert sum(1 for a in assets if a.kind == "delta_table") == 1
+
+
+def test_assets_from_ast_preserves_nondefault_warehouse_and_columns() -> None:
+    assets = assets_from_ast(_edit_ast())
+    table = next(a for a in assets if a.kind == "delta_table")
+    assert table.full_name == "cat.sch.tbl"
+    assert table.metadata.get("warehouse_id") == "wh-custom-123"
+    vec = next(a for a in assets if a.kind == "vector_index")
+    assert vec.full_name == "cat.sch.idx"
+    assert vec.metadata.get("columns") == ["a", "b"]
+    assert vec.metadata.get("query_type") == "ANN"
+
+
+def test_assets_from_ast_genie_space_id_keys() -> None:
+    # Either space_id or genie_space_id resolves the genie identity (RC5).
+    for key in ("space_id", "genie_space_id"):
+        assets = assets_from_ast(
+            {"tools": [{"name": "g", "kind": "genie", "config": {key: "sp-1"}}]}
+        )
+        assert [(a.kind, a.full_name) for a in assets] == [("genie_space", "sp-1")]
+
+
+def test_assets_from_ast_round_trips_to_same_tools() -> None:
+    # The derived assets regenerate the SAME corpus tool kinds + identities,
+    # preserving the non-default warehouse through recommend_tools_for_assets.
+    assets = assets_from_ast(_edit_ast())
+    reco = recommend_tools_for_assets([a.model_dump(exclude_none=True) for a in assets])
+    tools = reco.get("recommended_tools") or []
+    kinds = {t["kind"] for t in tools}
+    assert "vector_search" in kinds and "genie" in kinds
+    assert any(t["kind"].startswith("table_") for t in tools)
+    table_tool = next(t for t in tools if t["kind"].startswith("table_"))
+    assert table_tool["config"]["warehouse_id"] == "wh-custom-123"
+
+
+def test_assets_from_ast_handles_empty_and_non_dict() -> None:
+    assert assets_from_ast(None) == []
+    assert assets_from_ast({}) == []
+    assert assets_from_ast({"tools": "nope"}) == []
+    assert assets_from_ast({"tools": [{"kind": "vector_search", "config": {}}]}) == []  # no identity
 
 
 def _office_like_assets() -> list[dict[str, Any]]:

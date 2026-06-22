@@ -46,6 +46,11 @@ def create_framework_llm_client(
     # Build model mapping from app config
     model_mapping = _build_model_mapping(app_llm, model_overrides)
 
+    # Build the optional model-family catalog (family -> endpoints). Empty when
+    # no families are configured; nodes only set model_family when the catalog is
+    # non-empty (the Designer reads the same catalog), so resolution never raises.
+    model_families = _build_family_mapping(app_llm)
+
     # Global endpoint → context-window registry built from ALL configured
     # endpoints (not just those referenced by a tier). This lets the framework
     # escalate an overflowing prompt to a large-window model — e.g. a 1M-token
@@ -79,6 +84,7 @@ def create_framework_llm_client(
         # 403-retry to loop with the same invalid bearer.
         client_provider=app_llm.force_refresh_client,
         endpoint_registry=endpoint_registry,
+        model_families=model_families,
     )
 
 
@@ -171,6 +177,49 @@ def _build_model_mapping(
         {k: (str(v)[:50] if isinstance(v, ModelTierConfig) else v[:30])
          for k, v in mapping.items()},
     )
+    return mapping
+
+
+def _build_family_mapping(app_llm: LLMClient) -> dict[str, str | ModelTierConfig]:
+    """Build the framework model-family catalog: family label -> ModelTierConfig.
+
+    Mirrors :func:`_build_model_mapping` but keyed by family label from
+    ``AppConfig.model_families`` (family -> endpoint ids), resolving each endpoint
+    via the app's ModelConfig. Returns ``{}`` when no families are configured —
+    family selection is then unavailable and the Designer assigns no
+    ``model_family`` (so the framework client never sees an unknown family).
+    """
+    from deep_research.core.app_config import get_app_config
+
+    families_cfg = get_app_config().model_families
+    if not families_cfg:
+        return {}
+    config = app_llm._config
+    mapping: dict[str, str | ModelTierConfig] = {}
+    for family_name, endpoint_ids in families_cfg.items():
+        resolved: list[str] = []
+        windows: dict[str, int] = {}
+        for ep_id in endpoint_ids:
+            try:
+                endpoint = config.get_endpoint(ep_id)
+            except (KeyError, AttributeError, ValueError):
+                logger.debug(
+                    "FAMILY_ENDPOINT_RESOLVE_SKIP family=%s ep=%s", family_name, ep_id
+                )
+                continue
+            if endpoint:
+                resolved.append(endpoint.endpoint_identifier)
+                windows[endpoint.endpoint_identifier] = endpoint.max_context_window
+        if resolved:
+            mapping[family_name] = ModelTierConfig(
+                endpoints=resolved,
+                fallback_on_429=True,
+                rotation_strategy="PRIORITY",
+                tokens_per_minute=0,
+                endpoint_context_windows=windows,
+            )
+    if mapping:
+        logger.info("LLM_ADAPTER_FAMILIES families=%s", sorted(mapping.keys()))
     return mapping
 
 

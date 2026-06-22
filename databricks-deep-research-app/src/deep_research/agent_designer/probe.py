@@ -40,10 +40,27 @@ Auditor's checklist requires ``probe_result.passed == True``.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from deep_research.agent_designer.ast_introspection import (
+    config_of as _config_of,
+)
+from deep_research.agent_designer.ast_introspection import (
+    is_lane_researcher as _is_lane_researcher,
+)
+from deep_research.agent_designer.ast_introspection import (
+    iter_agent_nodes as _iter_agent_nodes,
+)
+from deep_research.agent_designer.ast_introspection import (
+    iter_all_nodes as _iter_all_nodes,
+)
+from deep_research.agent_designer.ast_introspection import (
+    tool_kinds_for_lane as _tool_kinds_for_lane,
+)
+from deep_research.agent_designer.ast_introspection import (
+    topology_of_ast as _topology_of_ast,
+)
 from deep_research.agent_designer.task_signature import (
     TaskSignature,
     select_topology,
@@ -120,83 +137,22 @@ class ProbeResult:
         }
 
 
-def _config_of(node: Any) -> dict[str, Any]:
-    """Return ``node['config']`` when it's a dict; else an empty dict."""
-    if not isinstance(node, dict):
-        return {}
-    raw = node.get("config")
-    return raw if isinstance(raw, dict) else {}
-
-
-def _iter_agent_nodes(node: Any) -> Iterator[dict[str, Any]]:
-    """Yield every agent node under *node*. Walks ``children`` AND
-    ``config.body`` so plan_and_execute branches are covered."""
-    if not isinstance(node, dict):
-        return
-    if node.get("type") == "agent":
-        yield node
-    for child in node.get("children") or []:
-        yield from _iter_agent_nodes(child)
-    body = _config_of(node).get("body")
-    if isinstance(body, dict):
-        yield from _iter_agent_nodes(body)
-
-
-def _tool_kinds_for_lane(lane: dict[str, Any], ast_tools: list[dict[str, Any]]) -> set[str]:
-    """Return the set of tool kinds bound to *lane*, resolving by name."""
-    tool_names = _config_of(lane).get("tools") or []
-    name_to_kind: dict[str, str] = {}
-    for tool in ast_tools:
-        if not isinstance(tool, dict):
-            continue
-        name = tool.get("name")
-        kind = tool.get("kind")
-        if isinstance(name, str) and isinstance(kind, str):
-            name_to_kind[name] = kind
-    return {name_to_kind[name] for name in tool_names if name in name_to_kind}
-
-
 def _lane_user_prompt(lane: dict[str, Any]) -> str:
     return str(_config_of(lane).get("user_prompt_template") or "")
 
 
-def _is_lane_researcher(lane: dict[str, Any]) -> bool:
-    """Heuristic: a researcher lane is an agent whose role/subtype is
-    researcher OR whose id starts with ``lane_``."""
-    if not isinstance(lane, dict):
-        return False
-    subtype = _config_of(lane).get("subtype")
-    lane_id = str(lane.get("id") or "")
-    return subtype == "researcher" or lane_id.startswith("lane_")
+def _structural_family(topology: str) -> str:
+    """Structural family for the topology-match check (check 5).
 
+    Topologies that share a runtime shape map to the same family so the check
+    does not false-flag them (best_of_n is a parallel fan-out -> parallel_lanes
+    family); topology-specific structure is verified by dedicated invariants
+    (best_of_n check 10). Delegates to the TopologySpec registry (single source
+    of truth); imported lazily to avoid an import cycle.
+    """
+    from deep_research.agent_designer.topology_registry import structural_family
 
-def _topology_of_ast(ast: dict[str, Any]) -> str:
-    """Best-effort topology classification by walking the root node tree."""
-    root = ast.get("root")
-    if not isinstance(root, dict):
-        return "unknown"
-    return _topology_of_node(root)
-
-
-def _topology_of_node(node: dict[str, Any]) -> str:
-    if not isinstance(node, dict):
-        return "unknown"
-    if node.get("type") == "plan_and_execute":
-        return "plan_and_execute"
-    # parallel_lanes: a sequence that contains a parallel node
-    for child in node.get("children") or []:
-        if isinstance(child, dict) and child.get("type") == "parallel":
-            return "parallel_lanes"
-        nested = _topology_of_node(child)
-        if nested != "unknown":
-            return nested
-    # single_agent: root is sequence with exactly one agent child
-    if node.get("type") == "sequence":
-        children = node.get("children") or []
-        agents = [c for c in children if isinstance(c, dict) and c.get("type") == "agent"]
-        if len(agents) == len(children) and agents:
-            return "single_agent"
-    return "unknown"
+    return structural_family(topology)
 
 
 def _registered_tool_kinds() -> set[str]:
@@ -306,10 +262,15 @@ def run_behavioral_probe(
         sig = None
 
     if sig is not None:
-        # 5. AST topology must match select_topology(signature).
+        # 5. AST topology must match select_topology(signature) — compared by
+        #    STRUCTURAL FAMILY so topologies that share a runtime shape (e.g.
+        #    best_of_n is a parallel fan-out, like parallel_lanes) are not
+        #    false-flagged. best_of_n's specific shape is verified by check 10.
         expected_topology = select_topology(sig)
         actual_topology = _topology_of_ast(ast)
-        if actual_topology != "unknown" and actual_topology != expected_topology:
+        if actual_topology != "unknown" and _structural_family(
+            actual_topology
+        ) != _structural_family(expected_topology):
             result.gaps.append(
                 f"topology_signature_mismatch:expected={expected_topology},actual={actual_topology}"
             )
@@ -380,6 +341,231 @@ def run_behavioral_probe(
             else:
                 result.conditional_passed.append(
                     f"asset_signature_matches_tool_kinds:{sig_value}"
+                )
+
+        # 10. best_of_n structural invariants. The family-map (check 5)
+        #     intentionally treats best_of_n as a parallel fan-out, so these
+        #     targeted checks verify the best_of_n-specific shape it would
+        #     otherwise hide: a candidates pool, candidate synthesizers that
+        #     write it and inject the evidence pools, a judge that injects the
+        #     candidates pool and produces a terminal output key, and a
+        #     candidate count matching the signature.
+        if expected_topology == "best_of_n":
+            pool_names = {
+                str(p.get("name"))
+                for p in (ast.get("pools") or [])
+                if isinstance(p, dict)
+            }
+            if "candidates" not in pool_names:
+                result.gaps.append("best_of_n_missing_candidates_pool")
+            candidate_nodes = [
+                node
+                for node in _iter_agent_nodes(ast.get("root"))
+                if _config_of(node).get("subtype") == "synthesizer"
+                and any(
+                    isinstance(pw, dict) and pw.get("pool") == "candidates"
+                    for pw in (_config_of(node).get("pool_writes") or [])
+                )
+            ]
+            judge_nodes = [
+                node
+                for node in _iter_agent_nodes(ast.get("root"))
+                if _config_of(node).get("subtype") == "synthesizer"
+                and "candidates"
+                in {
+                    pj.get("pool")
+                    for pj in (_config_of(node).get("pool_inject") or [])
+                    if isinstance(pj, dict)
+                }
+            ]
+            if not candidate_nodes:
+                result.gaps.append("best_of_n_no_candidate_generators")
+            if not judge_nodes:
+                result.gaps.append("best_of_n_no_judge")
+            else:
+                judge_outputs = {
+                    str(_config_of(node).get("output_key")) for node in judge_nodes
+                }
+                if not (set(ast.get("output_keys") or []) & judge_outputs):
+                    result.gaps.append("best_of_n_judge_does_not_produce_output_key")
+            want = sig.coordination_candidate_count
+            if want is not None and candidate_nodes and len(candidate_nodes) != want:
+                result.gaps.append(
+                    f"best_of_n_candidate_count_mismatch:expected={want},"
+                    f"actual={len(candidate_nodes)}"
+                )
+            ungrounded = [
+                str(node.get("id") or "<unnamed>")
+                for node in candidate_nodes
+                if not (
+                    {"observations", "sources"}
+                    <= {
+                        pj.get("pool")
+                        for pj in (_config_of(node).get("pool_inject") or [])
+                        if isinstance(pj, dict)
+                    }
+                )
+            ]
+            if ungrounded:
+                result.gaps.append(
+                    f"best_of_n_candidates_not_grounded:{','.join(ungrounded)}"
+                )
+            if (
+                "candidates" in pool_names
+                and candidate_nodes
+                and judge_nodes
+                and not ungrounded
+            ):
+                result.conditional_passed.append(
+                    f"best_of_n_structure_ok:candidates={len(candidate_nodes)}"
+                )
+
+        # 11. iterative_refinement structural invariants. The family-map (check 5)
+        #     treats it as a parallel fan-out (its evidence parallel), so these
+        #     targeted checks verify the loop-specific shape: a loop whose body has
+        #     a draft synthesizer (writing draft_report) + a reflector (the until
+        #     operand), an until keyed on the reflector decision, a NON-skip
+        #     reflector, a terminal output, and — when participants>=2 — a
+        #     candidates pool fed by >=2 proposers plus a candidates-injecting
+        #     integrator.
+        if expected_topology == "iterative_refinement":
+            loop_nodes = [
+                n for n in _iter_all_nodes(ast.get("root")) if n.get("type") == "loop"
+            ]
+            if not loop_nodes:
+                result.gaps.append("iterative_refinement_missing_loop")
+            else:
+                loop = loop_nodes[0]
+                body_agents = list(_iter_agent_nodes(loop))
+                draft_writers = [
+                    n
+                    for n in body_agents
+                    if _config_of(n).get("subtype") == "synthesizer"
+                    and _config_of(n).get("output_key") == "draft_report"
+                ]
+                reflectors = [
+                    n for n in body_agents if _config_of(n).get("subtype") == "reflector"
+                ]
+                if not draft_writers:
+                    result.gaps.append("iterative_refinement_no_draft_synth")
+                if not reflectors:
+                    result.gaps.append("iterative_refinement_no_reflector")
+                until_key = str(
+                    (loop.get("config") or {}).get("until", {}).get("key", "")
+                )
+                if not until_key.endswith(".decision"):
+                    result.gaps.append("iterative_refinement_until_not_decision")
+                if any(
+                    (r.get("error_handling") or {}).get("on_error") == "skip"
+                    for r in reflectors
+                ):
+                    result.gaps.append("iterative_refinement_reflector_is_skip")
+            produced = {
+                _config_of(n).get("output_key")
+                for n in _iter_agent_nodes(ast.get("root"))
+            }
+            if not (set(ast.get("output_keys") or []) & produced):
+                result.gaps.append("iterative_refinement_no_terminal_output")
+            want_p = sig.refine_participants
+            if want_p is not None and want_p >= 2:
+                pool_names = {
+                    str(p.get("name"))
+                    for p in (ast.get("pools") or [])
+                    if isinstance(p, dict)
+                }
+                if "candidates" not in pool_names:
+                    result.gaps.append("iterative_refinement_missing_candidates_pool")
+                proposer_writers = [
+                    n
+                    for n in _iter_agent_nodes(ast.get("root"))
+                    if _config_of(n).get("subtype") == "synthesizer"
+                    and any(
+                        isinstance(pw, dict) and pw.get("pool") == "candidates"
+                        for pw in (_config_of(n).get("pool_writes") or [])
+                    )
+                ]
+                if len(proposer_writers) < 2:
+                    result.gaps.append("iterative_refinement_too_few_proposers")
+                integrators = [
+                    n
+                    for n in _iter_agent_nodes(ast.get("root"))
+                    if _config_of(n).get("subtype") == "synthesizer"
+                    and _config_of(n).get("output_key") == "draft_report"
+                    and "candidates"
+                    in {
+                        pj.get("pool")
+                        for pj in (_config_of(n).get("pool_inject") or [])
+                        if isinstance(pj, dict)
+                    }
+                ]
+                if not integrators:
+                    result.gaps.append("iterative_refinement_no_integrator")
+            if not any(
+                g.startswith("iterative_refinement_") for g in result.gaps
+            ):
+                result.conditional_passed.append(
+                    f"iterative_refinement_structure_ok:participants={want_p or 1}"
+                )
+
+        # 13. router structural invariants: a classifier emitting a TYPED route
+        #     discriminator (output_schema.route enum), a conditional with >=2
+        #     branches, every branch producing a workflow output_key, and >=1
+        #     researcher writing observations+sources (grounded branch synthesis).
+        if expected_topology == "router":
+            conditionals = [
+                n for n in _iter_all_nodes(ast.get("root")) if n.get("type") == "conditional"
+            ]
+            classifiers = [
+                n
+                for n in _iter_agent_nodes(ast.get("root"))
+                if _config_of(n).get("subtype") == "router_classifier"
+            ]
+            if not classifiers:
+                result.gaps.append("router_no_classifier")
+            else:
+                schema = _config_of(classifiers[0]).get("output_schema") or {}
+                props = schema.get("properties") if isinstance(schema, dict) else {}
+                route = props.get("route") if isinstance(props, dict) else None
+                if not (isinstance(route, dict) and route.get("enum")):
+                    result.gaps.append("router_classifier_no_typed_route")
+            if not conditionals:
+                result.gaps.append("router_no_conditional")
+            else:
+                branches = conditionals[0].get("children") or []
+                if len(branches) < 2:
+                    result.gaps.append("router_too_few_branches")
+                output_keys = set(ast.get("output_keys") or [])
+                branchless = [
+                    str(b.get("id") or "<unnamed>")
+                    for b in branches
+                    if not (
+                        {_config_of(n).get("output_key") for n in _iter_agent_nodes(b)}
+                        & output_keys
+                    )
+                ]
+                if branchless:
+                    result.gaps.append(
+                        f"router_branch_no_output:{','.join(branchless)}"
+                    )
+            researchers = [
+                n
+                for n in _iter_agent_nodes(ast.get("root"))
+                if _config_of(n).get("subtype") == "researcher"
+            ]
+            if not any(
+                {"observations", "sources"}
+                <= {
+                    pw.get("pool")
+                    for pw in (_config_of(r).get("pool_writes") or [])
+                    if isinstance(pw, dict)
+                }
+                for r in researchers
+            ):
+                result.gaps.append("router_no_grounded_researcher")
+            if not any(g.startswith("router_") for g in result.gaps):
+                branch_count = len(conditionals[0].get("children") or []) if conditionals else 0
+                result.conditional_passed.append(
+                    f"router_structure_ok:branches={branch_count}"
                 )
 
     # ----- Runtime-query check (opt-in) --------------------------------

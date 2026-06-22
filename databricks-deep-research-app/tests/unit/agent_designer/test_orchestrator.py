@@ -30,6 +30,7 @@ from deep_research.agent_designer.orchestrator import (
     MAX_AST_BYTES,
     MAX_DESIGNER_TOOL_ROUNDS,
     MAX_MESSAGES,
+    MAX_PAYLOAD_BYTES,
     DesignerChatOrchestrator,
     DoneEvent,
     ErrorEvent,
@@ -41,6 +42,8 @@ from deep_research.agent_designer.orchestrator import (
     ToolCallEvent,
     ToolResultEvent,
     _mutation_event_for_ast_change,
+    _payload_bytes,
+    _trim_conversation,
 )
 from deep_research.agent_designer.workflow_builder import build_web_research_workflow
 
@@ -600,17 +603,61 @@ async def test_message_event_passes_through() -> None:
     assert sum(isinstance(e, MessageEvent) for e in events) == 2
 
 
-async def test_oversized_messages_raises() -> None:
-    """Exceeding MAX_MESSAGES raises RequestTooLargeError before the LLM is called."""
-    orch = DesignerChatOrchestrator(_FakeLLM([]), _adapter())
-    with pytest.raises(RequestTooLargeError):
-        async for _ in orch.run_turn(
-            messages=[{"role": "user", "content": "x"}] * (MAX_MESSAGES + 1),
-            current_ast=None,
-            session_id=None,
-            user_token="t",
-        ):
-            pass
+def test_oversized_message_count_is_trimmed_not_raised() -> None:
+    """A conversation longer than MAX_MESSAGES is trimmed to the most recent
+    window (graceful) instead of hard-rejected, so a long/heavily-retried
+    session can never wedge. The current (final) user message is always kept."""
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": f"m{i}"} for i in range(MAX_MESSAGES + 10)
+    ]
+    messages[-1] = {"role": "user", "content": "CURRENT"}
+    trimmed = _trim_conversation(messages, current_ast=None, assets=None)
+    assert len(trimmed) <= MAX_MESSAGES
+    assert trimmed[-1]["content"] == "CURRENT"
+
+
+def test_trim_drops_leading_orphan_tool_messages() -> None:
+    """After trimming to the window, the kept list must not START on a ``tool``
+    message (its producing assistant tool_calls turn fell outside the window) —
+    that would trip the multi-turn gateway-400."""
+    pad: list[dict[str, Any]] = [{"role": "user", "content": "old"}]
+    orphan_tool: list[dict[str, Any]] = [
+        {"role": "tool", "content": "res", "tool_call_id": "c"}
+    ]
+    tail: list[dict[str, Any]] = [
+        {"role": "user", "content": f"u{i}"} for i in range(MAX_MESSAGES - 1)
+    ]
+    # len == MAX_MESSAGES + 1, so the kept window is orphan_tool + tail.
+    trimmed = _trim_conversation(pad + orphan_tool + tail)
+    assert trimmed[0]["role"] != "tool"
+    assert trimmed[-1]["content"] == f"u{MAX_MESSAGES - 2}"
+
+
+def test_trim_byte_budget_drops_oldest() -> None:
+    """When AST + messages exceed MAX_PAYLOAD_BYTES the oldest messages are
+    dropped until it fits (graceful), never raised; the latest is kept. Sized
+    relative to the (env-configurable) cap so it stays valid if the default
+    changes. Uses ``user`` messages so the summarize step does not apply."""
+    chunk = "x" * (MAX_PAYLOAD_BYTES // 4)  # each ~1/4 of the cap
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": chunk} for _ in range(5)
+    ]  # ~1.25x the cap in messages alone
+    messages.append({"role": "user", "content": "CURRENT"})
+    ast: dict[str, Any] = {"root": {"label": "a" * (MAX_PAYLOAD_BYTES // 8)}}
+    trimmed = _trim_conversation(messages, current_ast=ast, assets=None)
+    assert _payload_bytes(ast) + _payload_bytes(trimmed) <= MAX_PAYLOAD_BYTES
+    assert trimmed[-1]["content"] == "CURRENT"
+    assert len(trimmed) < len(messages)
+
+
+def test_trim_is_noop_under_caps_and_idempotent() -> None:
+    """Under the caps nothing is trimmed, and trimming is idempotent."""
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": f"m{i}"} for i in range(5)
+    ]
+    once = _trim_conversation(messages, current_ast={"root": {}}, assets=[])
+    assert once == messages
+    assert _trim_conversation(once, current_ast={"root": {}}, assets=[]) == once
 
 
 async def test_oversized_ast_raises() -> None:
@@ -625,6 +672,45 @@ async def test_oversized_ast_raises() -> None:
             user_token="t",
         ):
             pass
+
+
+def test_trim_summarizes_large_historical_tool_results() -> None:
+    """OLD oversized tool results (beyond the recent window) are summarized so
+    the request fits the budget and the LLM context stays lean, while a RECENT
+    oversized tool result is preserved verbatim. role/tool_call_id are kept and
+    nothing is raised (the live AST is sent separately as current_ast)."""
+    big = "R" * 20_000  # well above the per-message summarize threshold (~2 KB)
+    messages: list[dict[str, Any]] = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": "ok", "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "content": big, "tool_call_id": "c1"},  # OLD + oversized
+    ]
+    messages += [{"role": "user", "content": f"u{i}"} for i in range(5)]
+    # A RECENT oversized tool result (inside the keep-window) must survive whole.
+    messages.append(
+        {"role": "assistant", "content": "ok2", "tool_calls": [{"id": "c2"}]}
+    )
+    messages.append({"role": "tool", "content": big, "tool_call_id": "c2"})
+    messages.append({"role": "user", "content": "CURRENT"})
+
+    trimmed = _trim_conversation(messages, current_ast=None, assets=None)
+
+    old_tool = trimmed[2]
+    assert old_tool["role"] == "tool"
+    assert old_tool["tool_call_id"] == "c1"  # wire-shape pairing preserved
+    assert old_tool["content"].startswith("[tool content summarized")
+    assert len(old_tool["content"]) < 200
+    recent_tool = next(m for m in trimmed if m.get("tool_call_id") == "c2")
+    assert recent_tool["content"] == big  # recent window untouched
+    assert trimmed[-1]["content"] == "CURRENT"
+
+
+def test_designer_chat_byte_caps_defaults() -> None:
+    """The byte caps default higher (512 KB total / 256 KB AST) and are
+    overridable via DESIGNER_CHAT_MAX_PAYLOAD_BYTES / DESIGNER_CHAT_MAX_AST_BYTES
+    (read from the environment at import time)."""
+    assert MAX_PAYLOAD_BYTES == 512 * 1024
+    assert MAX_AST_BYTES == 256 * 1024
 
 
 @_LEGACY_LOOP_SKIP

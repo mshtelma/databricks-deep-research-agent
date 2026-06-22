@@ -100,6 +100,11 @@ class AgentNodeConfig(BaseModel):
 
     subtype: str  # coordinator, planner, researcher, reflector, synthesizer, evaluator
     model_tier: str = "analytical"
+    # Optional model FAMILY (orthogonal to model_tier): pins this node's LLM to a
+    # configured family (e.g. "claude"/"llama") regardless of tier. Resolved by
+    # FrameworkLLMClient against its model_families catalog; None => tier routing.
+    # Used for multi-model ensembles (e.g. iterative_refinement proposers).
+    model_family: str | None = None
     system_prompt: str = ""
     user_prompt_template: str = ""
     input_keys: list[str] = Field(default_factory=list)

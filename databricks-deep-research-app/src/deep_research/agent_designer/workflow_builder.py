@@ -333,6 +333,39 @@ def make_conditional(
     }
 
 
+def make_loop(
+    *,
+    node_id: str,
+    label: str,
+    children: list[dict[str, Any]],
+    until: dict[str, Any],
+    min_iterations: int = 1,
+    max_iterations: int = 3,
+) -> dict[str, Any]:
+    """Build a loop WorkflowNode.
+
+    ``until`` is a serialized framework ``Condition`` (typically a
+    ``StateCondition`` dict ``{"type": "state", "key": ..., "operator": ...,
+    "value": ...}``). The framework runs the children in order each iteration
+    and, once ``iteration >= min_iterations``, evaluates ``until`` against
+    workflow state — exiting when it holds (executor ``_exec_loop``). The
+    ``until`` key MUST be produced by an in-body node every iteration or the
+    runtime hard-raises ``WorkflowConditionEvaluationError``; the static
+    condition-contract validator enforces this at load time.
+    """
+    return {
+        "id": node_id,
+        "type": NodeType.loop.value,
+        "label": label,
+        "config": {
+            "until": until,
+            "min_iterations": min_iterations,
+            "max_iterations": max_iterations,
+        },
+        "children": children,
+    }
+
+
 def make_plan_and_execute(
     *,
     node_id: str,
@@ -1731,6 +1764,16 @@ def build_web_research_workflow(
     compiled_brief = compile_workflow_design_brief(intent, design_brief)
     topology = compiled_brief.topology
     ambiguity_axes: list[str] | None = None
+    # best_of_n coordination params — resolved from the signature when present,
+    # defaulted in the builder otherwise (the legacy brief path has no signature).
+    coordination_candidate_count: int | None = None
+    coordination_judge_tier: str | None = None
+    # iterative_refinement coordination params (same signature-or-default pattern).
+    refine_participants: int | None = None
+    refine_max_iterations: int | None = None
+    proposer_families: list[str] | None = None
+    # router coordination params (same pattern).
+    router_cases: list[str] | None = None
     if task_signature is not None:
         # Plan v2.1 M11: failure-closed on invalid TaskSignature payloads.
         # Previously this catch silently fell back to brief topology — the
@@ -1753,26 +1796,37 @@ def build_web_research_workflow(
         topology = select_topology(sig)
         compiled_brief = compiled_brief.model_copy(update={"topology": topology})
         ambiguity_axes = list(sig.question_ambiguity)
-    if topology == "plan_and_execute":
-        return _build_plan_and_execute_workflow(
-            intent,
-            name or compiled_brief.workflow_name or intent,
-            compiled_brief,
-            assets=assets,
-            ambiguity_axes=ambiguity_axes,
-        )
-    if topology == "single_agent":
-        return _build_single_agent_workflow(
-            intent, name or compiled_brief.workflow_name or intent, compiled_brief
-        )
-    # Default: parallel_lanes
-    return _build_parallel_lanes_workflow(
-        intent,
-        name or compiled_brief.workflow_name or intent,
-        compiled_brief,
+        coordination_candidate_count = sig.coordination_candidate_count
+        coordination_judge_tier = sig.coordination_judge_tier
+        refine_participants = sig.refine_participants
+        refine_max_iterations = sig.refine_max_iterations
+        proposer_families = sig.proposer_families
+        router_cases = sig.router_cases
+    # Phase 3: dispatch through the TopologySpec registry. The registry is the
+    # single source of truth for name -> builder; ``get_topology_spec`` fails
+    # CLOSED on an unknown topology (no silent default to parallel_lanes). The
+    # enum-parity test keeps TopologyKind / TOPOLOGIES / the registry in sync.
+    # Imported lazily to avoid an import cycle (the registry imports the builders
+    # defined in this module).
+    from deep_research.agent_designer.topology_registry import (
+        TopologyBuildContext,
+        get_topology_spec,
+    )
+
+    build_context = TopologyBuildContext(
+        intent=intent,
+        name=name or compiled_brief.workflow_name or intent,
+        brief=compiled_brief,
         assets=assets,
         ambiguity_axes=ambiguity_axes,
+        candidate_count=coordination_candidate_count,
+        judge_tier=coordination_judge_tier,
+        refine_participants=refine_participants,
+        refine_max_iterations=refine_max_iterations,
+        proposer_families=proposer_families,
+        router_cases=router_cases,
     )
+    return get_topology_spec(topology).build(build_context)
 
 
 def _require_authored_lane_specs(
@@ -2302,6 +2356,1090 @@ def _reflector_workflow_directive(compiled_brief: WorkflowDesignBrief) -> str:
         "planner described a plausible next step. Mark incomplete when evidence "
         "is missing, metadata-only, or too generic for the requested output."
     )
+
+
+_DEFAULT_CANDIDATE_COUNT = 4
+_MIN_CANDIDATE_COUNT = 2
+_MAX_CANDIDATE_COUNT = 10
+
+# Domain-AGNOSTIC epistemic stances cycled across the N candidates so they are
+# genuinely diverse rather than temperature-identical. These name *how to think*
+# (recency vs authority, breadth vs depth, ...), never *what domain* — keeping
+# best_of_n generalizable across arbitrary research tasks.
+FRAMING_DIRECTIVES: tuple[str, ...] = (
+    "Prioritize the most recent evidence and emerging signals; lead with what changed most recently.",
+    "Prioritize the highest-authority primary sources; weight credibility and provenance over volume.",
+    "Maximize breadth: cover the full range of relevant angles, even those only briefly supported.",
+    "Maximize depth: concentrate on the few most decision-relevant aspects and analyze them thoroughly.",
+    "Adopt a skeptical, contrarian stance: stress-test each claim and actively surface counter-evidence.",
+    "Adopt a consensus-synthesis stance: reconcile the sources into the single best-supported overall view.",
+    "Lead with risks, caveats, limitations, and failure modes.",
+    "Lead with mechanisms and causal structure: explain how and why, not only what.",
+)
+
+
+def _best_of_n_contract_terms(compiled_brief: WorkflowDesignBrief) -> list[str]:
+    """Required prompt terms from the resolved tool contract, if any."""
+    contract = compiled_brief.tool_contract
+    if contract is None:
+        return []
+    try:
+        terms = list(contract.prompt_obligations.required_terms)
+    except AttributeError:  # pragma: no cover - defensive
+        return []
+    return [t for t in terms if isinstance(t, str) and t.strip()][:12]
+
+
+def _best_of_n_candidate_directive(compiled_brief: WorkflowDesignBrief) -> str:
+    """Core directive for a best_of_n candidate synthesizer.
+
+    Embeds the user goal + required outputs (and resolved-contract terms when
+    present) VERBATIM and BEFORE the appended ``## Designer Goal`` block, so the
+    candidate's core prompt still references the workflow's required-domain terms
+    after ``_strip_designer_goal`` removes that block. That is what keeps every
+    candidate past the BLOCKING generic-synthesizer coverage gate
+    (``semantic_validation.detect_generic_synthesizer_prompt``). Domain-agnostic
+    structure; the task's own terms are the only task-specific content.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    contract_terms = _best_of_n_contract_terms(compiled_brief)
+    terms_line = (
+        f"Anchor the report in these required terms: {', '.join(contract_terms)}.\n"
+        if contract_terms
+        else ""
+    )
+    return (
+        "## Candidate Report Contract\n\n"
+        "You are producing ONE complete, self-contained candidate report that "
+        "answers the user's goal:\n"
+        f"{goal}\n\n"
+        f"The report MUST cover these required outputs: {required_outputs}.\n"
+        f"{terms_line}"
+        "Ground every claim in the injected observations and sources pools. If "
+        "evidence for part of the goal is missing, say so explicitly rather than "
+        "improvising figures, dates, quotations, or citations."
+    )
+
+
+def _best_of_n_judge_directive(
+    compiled_brief: WorkflowDesignBrief, candidate_count: int
+) -> str:
+    """Core directive for the best_of_n judge synthesizer.
+
+    Like the candidate directive, embeds the goal + required outputs + quality
+    gates verbatim (before the strippable Designer-Goal block) so the judge
+    clears the generic-synthesizer coverage gate, and instructs it to SELECT the
+    strongest candidate and emit it as the final report.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    quality_gates = _brief_list(
+        compiled_brief.quality_gates,
+        fallback="evidence-backed claims with no fabrication",
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    return (
+        "## Best-of-N Judge Contract\n\n"
+        f"You are given up to {candidate_count} candidate reports in the "
+        "`candidates` pool, each an independent attempt at the user's goal:\n"
+        f"{goal}\n\n"
+        f"The final report must cover these required outputs: {required_outputs}.\n"
+        f"Quality gates: {quality_gates}.\n\n"
+        "Score each candidate on coverage of the required outputs, grounding in "
+        "the observations/sources pools, internal coherence, and directness "
+        "against the goal. Select the single strongest candidate and emit it as "
+        "the FINAL report, editing only to correct grounding against the injected "
+        "pools (never adding unsupported claims)."
+    )
+
+
+def _build_best_of_n_workflow(
+    intent: str,
+    name: str,
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
+    candidate_count: int | None = None,
+    judge_tier: str | None = None,
+) -> dict[str, Any]:
+    """Best-of-N topology: K evidence lane(s) + N diverse syntheses + a judge.
+
+    Shape: ``sequence(coordinator, parallel(evidence lanes), parallel(N candidate
+    synthesizers), judge)``.
+
+    The evidence layer is built EXACTLY like ``parallel_lanes`` lanes (same
+    coordinator, same lane researchers writing observations+sources, same
+    placeholder/architect-authored prompt contract), so it inherits the
+    tool-access and researcher-prompt gates unchanged. The N candidate
+    synthesizers each produce a full report from the SHARED evidence pools under
+    a distinct generic *epistemic stance* (so the candidates are genuinely
+    diverse, not temperature-identical) and write it to the ``candidates`` pool.
+    A complex-tier judge reads all candidates plus the evidence pools, selects
+    the strongest, and emits it as the final ``report``.
+
+    Gate-clean by construction: the evidence lane is a normal researcher
+    (tool-access + researcher-prompt contracts); every candidate and the judge is
+    a grounded synthesizer injecting observations+sources (grounding contract);
+    candidate/judge cores embed the brief's user_goal + required outputs so they
+    pass the generic-synthesizer coverage check after the appended Designer-Goal
+    block is stripped.
+    """
+    n = candidate_count if candidate_count is not None else _DEFAULT_CANDIDATE_COUNT
+    n = max(_MIN_CANDIDATE_COUNT, min(_MAX_CANDIDATE_COUNT, n))
+
+    domain_label = _workflow_domain_label(compiled_brief)
+    coordinator_system, _ = _default_prompts("coordinator")
+    researcher_system, _ = _default_prompts("researcher")
+    synthesizer_system, _ = _default_prompts("synthesizer")
+    synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
+
+    # --- Evidence front (identical construction to parallel_lanes lanes) -----
+    lane_specs = _lane_specs(
+        compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
+    )
+    _require_authored_lane_specs(lane_specs, topology="best_of_n")
+    default_researcher_tools = ["web_research"]
+    tools = _tool_plan_declarations(compiled_brief)
+    if tools is None:
+        tools = _default_web_tool_decls(max_results=10)
+
+    coordinator = make_agent_node(
+        node_id="coordinator",
+        label="Coordinator",
+        subtype="coordinator",
+        input_keys=["query"],
+        output_key="coordination",
+        model_tier="simple",
+        output_format="json",
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                coordinator_system,
+                intent,
+                role="coordinator",
+                design_brief=compiled_brief,
+            ),
+        },
+    )
+    base_researcher_prompt = _with_designer_goal(
+        researcher_system,
+        intent,
+        role="researcher",
+        design_brief=compiled_brief,
+    )
+    lane_researchers: list[dict[str, Any]] = []
+    for spec in lane_specs:
+        agent_node = make_agent_node(
+            node_id=f"{spec['id']}-researcher",
+            label=spec["label"],
+            subtype="researcher",
+            input_keys=["query", "coordination"],
+            output_key=f"findings_{spec['id']}",
+            model_tier="analytical",
+            output_format="json",
+            tools=_tool_plan_bindings(
+                compiled_brief,
+                node_id=f"{spec['id']}-researcher",
+                default=default_researcher_tools,
+                researcher=True,
+            ),
+            pool_writes=[
+                {"pool": "observations", "extract": f"findings_{spec['id']}"},
+                {"pool": "sources", "extract": "sources"},
+            ],
+            max_tool_calls=12,
+            extra_config=_lane_extra_config(
+                system_prompt=_assemble_lane_system_prompt(
+                    base_researcher_prompt=base_researcher_prompt,
+                    spec=spec,
+                    include_scope_block=True,
+                ),
+                spec=spec,
+            ),
+        )
+        agent_node["error_handling"] = {
+            "on_error": "skip",
+            "max_retries": 1,
+            "retry_delay_seconds": 1.0,
+        }
+        lane_researchers.append(agent_node)
+    evidence_parallel = make_parallel(
+        node_id="evidence-lanes",
+        label=f"{domain_label} Evidence Lanes",
+        children=lane_researchers,
+    )
+
+    # --- Candidate synthesizers (N diverse syntheses of the shared evidence) -
+    candidate_directive = _best_of_n_candidate_directive(compiled_brief)
+    candidate_synths: list[dict[str, Any]] = []
+    for i in range(1, n + 1):
+        framing = FRAMING_DIRECTIVES[(i - 1) % len(FRAMING_DIRECTIVES)]
+        candidate_core = (
+            candidate_directive
+            + "\n\n## Drafting stance for this candidate\n"
+            + framing
+            + "\n\n"
+            + synthesizer_system
+        )
+        candidate = make_agent_node(
+            node_id=f"candidate-{i}",
+            label=f"{domain_label} Candidate {i}",
+            subtype="synthesizer",
+            input_keys=["query", "coordination"],
+            # Unique per child — parallel children require non-overlapping
+            # output_keys (workflow.validation), and extract==output_key keeps
+            # the candidates pool write warning-free.
+            output_key=f"candidate_{i}",
+            model_tier="analytical",
+            output_format="markdown",
+            pool_inject=[
+                {"pool": "observations", "threshold": 0},
+                {"pool": "sources", "threshold": 0},
+            ],
+            pool_writes=[{"pool": "candidates", "extract": f"candidate_{i}"}],
+            max_tool_calls=0,
+            extra_config={
+                "system_prompt": _with_designer_goal(
+                    candidate_core,
+                    intent,
+                    role="synthesizer",
+                    design_brief=compiled_brief,
+                ),
+                "grounding_mode": compiled_brief.grounding_mode,
+                "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+                "user_prompt_template": (
+                    "Produce your candidate report for {query}.\n\n"
+                    "Follow your assigned drafting stance above. Use ONLY the "
+                    "observations and sources in the injected evidence pools; "
+                    "never invent figures, dates, quotations, or citations."
+                ),
+            },
+        )
+        # A single failed candidate must not sink the whole fan-out.
+        candidate["error_handling"] = {
+            "on_error": "skip",
+            "max_retries": 1,
+            "retry_delay_seconds": 1.0,
+        }
+        candidate_synths.append(candidate)
+    candidate_parallel = make_parallel(
+        node_id="candidate-generators",
+        label=f"{domain_label} Candidate Generators (Best of {n})",
+        children=candidate_synths,
+    )
+
+    # --- Judge ---------------------------------------------------------------
+    judge = make_agent_node(
+        node_id="judge",
+        label=f"{domain_label} Best-of-N Judge",
+        subtype="synthesizer",
+        input_keys=["query", "coordination"],
+        output_key="report",
+        model_tier=(judge_tier or "complex"),
+        output_format="markdown",
+        pool_inject=[
+            {"pool": "observations", "threshold": 0},
+            {"pool": "sources", "threshold": 0},
+            {"pool": "candidates", "threshold": 0},
+        ],
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                _best_of_n_judge_directive(compiled_brief, n)
+                + "\n\n"
+                + synthesizer_system,
+                intent,
+                role="synthesizer",
+                design_brief=compiled_brief,
+            ),
+            "grounding_mode": compiled_brief.grounding_mode,
+            "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+            "user_prompt_template": (
+                "Select the best candidate report for {query} from the candidates "
+                "pool and emit it as the final report.\n\n"
+                "Verify and lightly repair grounding using ONLY the injected "
+                "observations and sources pools — never add unsupported claims. "
+                "Begin with one sentence naming the selected candidate and why it won."
+            ),
+        },
+    )
+
+    workflow = {
+        "id": "designer-draft",
+        "name": compiled_brief.workflow_name or name,
+        "description": intent,
+        "version": 1,
+        "tools": tools,
+        "pools": [
+            make_pool_decl(
+                name="sources",
+                dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan),
+                max_items=100,
+            ),
+            make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
+            make_pool_decl(name="candidates", dedup_key="content_hash", max_items=n),
+        ],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "token_budget": 0,
+        "timeout_seconds": 1800,
+        "root": make_sequence(
+            node_id="main",
+            label=f"{domain_label} Best-of-N Pipeline",
+            children=[coordinator, evidence_parallel, candidate_parallel, judge],
+        ),
+    }
+    _inject_tool_catalogs_into_workflow(workflow)
+    validate_generated_workflow(workflow)
+    return workflow
+
+
+# ---------------------------------------------------------------------------
+# Shared evidence front (coordinator + parallel lane researchers)
+# ---------------------------------------------------------------------------
+
+
+def _build_evidence_front(
+    intent: str,
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
+    id_prefix: str = "",
+    topology: str = "parallel_lanes",
+) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]], list[dict[str, Any]]]:
+    """Build the shared evidence front: coordinator + parallel lane researchers.
+
+    Returns ``(coordinator_node, evidence_parallel_node, lane_specs, tool_decls)``.
+
+    Node ids are prefixed by ``id_prefix`` so the front can be embedded more than
+    once in a single workflow (e.g. one per router branch) without colliding on
+    the global duplicate-node-id rule (``workflow.validation``). Output keys and
+    pool names are intentionally left unprefixed: at most one front runs per
+    conditional branch, and pool contents are shared by design.
+
+    This is the coordinator + lane construction the ``parallel_lanes`` and
+    ``best_of_n`` builders use; centralizing it keeps the evidence contract
+    (researchers write observations+sources; tool-access + lane-prompt gates) in
+    one place. (Behavior with ``id_prefix=""`` is identical to the inline
+    parallel_lanes front.)
+    """
+    domain_label = _workflow_domain_label(compiled_brief)
+    coordinator_system, _ = _default_prompts("coordinator")
+    researcher_system, _ = _default_prompts("researcher")
+    lane_specs = _lane_specs(
+        compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
+    )
+    _require_authored_lane_specs(lane_specs, topology=topology)
+    default_researcher_tools = ["web_research"]
+    tools = _tool_plan_declarations(compiled_brief)
+    if tools is None:
+        tools = _default_web_tool_decls(max_results=10)
+    coordinator = make_agent_node(
+        node_id=f"{id_prefix}coordinator",
+        label="Coordinator",
+        subtype="coordinator",
+        input_keys=["query"],
+        output_key="coordination",
+        model_tier="simple",
+        output_format="json",
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                coordinator_system,
+                intent,
+                role="coordinator",
+                design_brief=compiled_brief,
+            ),
+        },
+    )
+    base_researcher_prompt = _with_designer_goal(
+        researcher_system,
+        intent,
+        role="researcher",
+        design_brief=compiled_brief,
+    )
+    lane_researchers: list[dict[str, Any]] = []
+    for spec in lane_specs:
+        agent_node = make_agent_node(
+            node_id=f"{id_prefix}{spec['id']}-researcher",
+            label=spec["label"],
+            subtype="researcher",
+            input_keys=["query", "coordination"],
+            output_key=f"findings_{spec['id']}",
+            model_tier="analytical",
+            output_format="json",
+            tools=_tool_plan_bindings(
+                compiled_brief,
+                node_id=f"{id_prefix}{spec['id']}-researcher",
+                default=default_researcher_tools,
+                researcher=True,
+            ),
+            pool_writes=[
+                {"pool": "observations", "extract": f"findings_{spec['id']}"},
+                {"pool": "sources", "extract": "sources"},
+            ],
+            max_tool_calls=12,
+            extra_config=_lane_extra_config(
+                system_prompt=_assemble_lane_system_prompt(
+                    base_researcher_prompt=base_researcher_prompt,
+                    spec=spec,
+                    include_scope_block=True,
+                ),
+                spec=spec,
+            ),
+        )
+        agent_node["error_handling"] = {
+            "on_error": "skip",
+            "max_retries": 1,
+            "retry_delay_seconds": 1.0,
+        }
+        lane_researchers.append(agent_node)
+    evidence_parallel = make_parallel(
+        node_id=f"{id_prefix}parallel-lanes",
+        label=f"{domain_label} Parallel Research Lanes",
+        children=lane_researchers,
+    )
+    return coordinator, evidence_parallel, lane_specs, tools
+
+
+# ---------------------------------------------------------------------------
+# iterative_refinement topology
+# ---------------------------------------------------------------------------
+
+_DEFAULT_REFINE_PARTICIPANTS = 1
+_MIN_REFINE_PARTICIPANTS = 1
+_MAX_REFINE_PARTICIPANTS = 4
+_DEFAULT_REFINE_ITERATIONS = 3
+_MIN_REFINE_ITERATIONS = 1
+_MAX_REFINE_ITERATIONS = 6
+
+
+def _resolve_proposer_families(
+    requested: list[str] | None, count: int
+) -> list[str | None]:
+    """Resolve per-proposer model families against the configured catalog.
+
+    Returns a list of length ``count`` of family labels (or ``None`` to use plain
+    model_tier routing). The pool is the user-requested families validated against
+    the workspace ``AppConfig.model_families`` catalog (unknown labels dropped +
+    logged), or the full catalog when nothing specific was requested. When the
+    catalog is empty, returns all-``None`` — proposers then diversify by
+    model_tier + drafting stance only. Because the builder only ever assigns
+    families drawn FROM this catalog and the runtime ``FrameworkLLMClient`` is
+    built from the SAME catalog, resolution can never raise UnknownModelFamilyError.
+    """
+    from deep_research.core.app_config import get_app_config
+
+    try:
+        catalog = list(get_app_config().model_families.keys())
+    except Exception:  # pragma: no cover - config singleton unavailable in some paths
+        catalog = []
+    if not catalog:
+        return [None] * count
+    pool: list[str] = catalog
+    if requested:
+        validated = [f for f in requested if f in catalog]
+        dropped = [f for f in requested if f not in catalog]
+        if dropped:
+            logger.info(
+                "PROPOSER_FAMILY_DROPPED_UNKNOWN dropped=%s catalog=%s",
+                dropped,
+                catalog,
+            )
+        if validated:
+            pool = validated
+    return [pool[i % len(pool)] for i in range(count)]
+
+
+def _iter_refine_proposer_directive(compiled_brief: WorkflowDesignBrief) -> str:
+    """Core directive for an iterative_refinement proposer synthesizer.
+
+    Embeds user_goal + required_outputs (+ contract terms) BEFORE the strippable
+    ``## Designer Goal`` block so the proposer clears the generic-synthesizer
+    coverage gate (``detect_generic_synthesizer_prompt``). Domain-agnostic.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    contract_terms = _best_of_n_contract_terms(compiled_brief)
+    terms_line = (
+        f"Anchor the report in these required terms: {', '.join(contract_terms)}.\n"
+        if contract_terms
+        else ""
+    )
+    return (
+        "## Proposal Contract\n\n"
+        "You are producing ONE complete, self-contained candidate report that "
+        "answers the user's goal:\n"
+        f"{goal}\n\n"
+        f"The report MUST cover these required outputs: {required_outputs}.\n"
+        f"{terms_line}"
+        "Ground every claim in the injected observations and sources pools. If a "
+        "prior-round revision note is present, address each of its points. If "
+        "evidence for part of the goal is missing, say so explicitly rather than "
+        "improvising figures, dates, quotations, or citations."
+    )
+
+
+def _iter_refine_integrator_directive(
+    compiled_brief: WorkflowDesignBrief, participant_count: int
+) -> str:
+    """Core directive for the iterative_refinement integrator synthesizer.
+
+    Embeds goal + required_outputs verbatim (before the strippable Designer-Goal
+    block) so the integrator clears the generic-synthesizer gate; instructs it to
+    MERGE the proposals into one improved, grounded draft.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    return (
+        "## Integration Contract\n\n"
+        f"You are given up to {participant_count} candidate proposals in the "
+        "`candidates` pool, each an independent attempt at the user's goal:\n"
+        f"{goal}\n\n"
+        f"The integrated report MUST cover these required outputs: {required_outputs}.\n\n"
+        "Merge the strongest, best-grounded elements of the proposals into ONE "
+        "coherent report. Resolve conflicts in favor of the injected "
+        "observations/sources. If a prior-round revision note is present, address "
+        "each of its points. Never add claims unsupported by the evidence pools."
+    )
+
+
+def _build_iterative_refinement_workflow(
+    intent: str,
+    name: str,
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
+    participants: int | None = None,
+    max_iterations: int | None = None,
+    proposer_families: list[str] | None = None,
+) -> dict[str, Any]:
+    """Iterative-refinement topology: a critic-gated improvement loop.
+
+    Shape: ``sequence(coordinator, parallel(evidence lanes),
+    loop(draft-producer -> critic), finalizer)``.
+
+    The loop body produces a ``draft_report`` — one synthesizer when
+    ``participants == 1`` (single-voice self-critique), or
+    ``parallel(P proposers) -> integrator`` when ``participants >= 2`` (multi-model
+    ensemble) — and a ``coverage_review`` (reflector). The loop exits when
+    ``coverage_review.decision == "complete"`` (or ``max_iterations``). Each
+    round's critique is folded into the next via the harness-injected
+    ``{revision_block_md}`` channel (built from ``draft_report`` + ``coverage_review``
+    when the reflector decides ``adjust`` — ``harness._build_input``). The finalizer
+    emits the grounded ``report``.
+
+    Gate-clean by construction: evidence lanes satisfy the tool-access +
+    grounded-researcher contracts; the draft producer / integrator / finalizer are
+    grounded synthesizers injecting observations+sources whose cores embed the
+    brief's goal + required outputs (generic-synthesizer coverage gate); the
+    reflector reuses the domain-anchored coverage directive (generic-reflector
+    gate). No prompt references a non-whitelisted template var (only ``{query}``,
+    ``{revision_block_md}``, ``{draft_report}``, ``{coverage_review}``).
+    """
+    p = participants if participants is not None else _DEFAULT_REFINE_PARTICIPANTS
+    p = max(_MIN_REFINE_PARTICIPANTS, min(_MAX_REFINE_PARTICIPANTS, p))
+    iters = (
+        max_iterations if max_iterations is not None else _DEFAULT_REFINE_ITERATIONS
+    )
+    iters = max(_MIN_REFINE_ITERATIONS, min(_MAX_REFINE_ITERATIONS, iters))
+
+    domain_label = _workflow_domain_label(compiled_brief)
+    synthesizer_system, _ = _default_prompts("synthesizer")
+    synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
+    reflector_system, _ = _default_prompts("reflector")
+
+    coordinator, evidence_parallel, lane_specs, tools = _build_evidence_front(
+        intent,
+        compiled_brief,
+        assets=assets,
+        ambiguity_axes=ambiguity_axes,
+        topology="iterative_refinement",
+    )
+
+    pools = [
+        make_pool_decl(
+            name="sources",
+            dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan),
+            max_items=100,
+        ),
+        make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
+    ]
+
+    # --- draft producer: writes draft_report, reads the prior round's critique --
+    if p == 1:
+        draft_producer = make_agent_node(
+            node_id="refine-draft",
+            label=f"{domain_label} Draft Synthesizer",
+            subtype="synthesizer",
+            input_keys=["query", "coordination"],
+            output_key="draft_report",
+            model_tier="complex",
+            output_format="markdown",
+            pool_inject=[
+                {"pool": "observations", "threshold": 0},
+                {"pool": "sources", "threshold": 0},
+            ],
+            max_tool_calls=0,
+            extra_config={
+                "system_prompt": _with_designer_goal(
+                    _synthesizer_lane_coverage_directive(lane_specs)
+                    + "\n\n"
+                    + synthesizer_system,
+                    intent,
+                    role="synthesizer",
+                    design_brief=compiled_brief,
+                ),
+                "grounding_mode": compiled_brief.grounding_mode,
+                "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+                "user_prompt_template": (
+                    "Produce the report for {query}.\n\n"
+                    "{revision_block_md}\n\n"
+                    "Ground every claim ONLY in the injected observations and "
+                    "sources pools; never invent figures, dates, quotations, or "
+                    "citations."
+                ),
+            },
+        )
+        loop_body: list[dict[str, Any]] = [draft_producer]
+    else:
+        families = _resolve_proposer_families(proposer_families, p)
+        proposer_directive = _iter_refine_proposer_directive(compiled_brief)
+        proposers: list[dict[str, Any]] = []
+        for i in range(1, p + 1):
+            framing = FRAMING_DIRECTIVES[(i - 1) % len(FRAMING_DIRECTIVES)]
+            family = families[i - 1]
+            proposer_extra: dict[str, Any] = {
+                "system_prompt": _with_designer_goal(
+                    proposer_directive
+                    + "\n\n## Drafting stance for this proposer\n"
+                    + framing
+                    + "\n\n"
+                    + synthesizer_system,
+                    intent,
+                    role="synthesizer",
+                    design_brief=compiled_brief,
+                ),
+                "grounding_mode": compiled_brief.grounding_mode,
+                "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+                "user_prompt_template": (
+                    "Produce your proposal for {query}.\n\n"
+                    "{revision_block_md}\n\n"
+                    "Follow your assigned drafting stance. Use ONLY the injected "
+                    "observations and sources pools; never invent figures, dates, "
+                    "quotations, or citations."
+                ),
+            }
+            # FW-1: a resolved family pins the proposer's model family. v1 leaves
+            # this unset (AgentNodeConfig has no model_family field yet), so
+            # proposers diversify via model_tier + stance only.
+            if family is not None:
+                proposer_extra["model_family"] = family
+            proposer = make_agent_node(
+                node_id=f"proposer-{i}",
+                label=f"{domain_label} Proposer {i}",
+                subtype="synthesizer",
+                input_keys=["query", "coordination"],
+                output_key=f"proposal_{i}",
+                # Alternate tiers for capability diversity even without families.
+                model_tier=("complex" if i % 2 == 1 else "analytical"),
+                output_format="markdown",
+                pool_inject=[
+                    {"pool": "observations", "threshold": 0},
+                    {"pool": "sources", "threshold": 0},
+                ],
+                pool_writes=[{"pool": "candidates", "extract": f"proposal_{i}"}],
+                max_tool_calls=0,
+                extra_config=proposer_extra,
+            )
+            proposer["error_handling"] = {
+                "on_error": "skip",
+                "max_retries": 1,
+                "retry_delay_seconds": 1.0,
+            }
+            proposers.append(proposer)
+        proposer_parallel = make_parallel(
+            node_id="refine-proposers",
+            label=f"{domain_label} Proposers (x{p})",
+            children=proposers,
+        )
+        integrator = make_agent_node(
+            node_id="refine-integrate",
+            label=f"{domain_label} Integrator",
+            subtype="synthesizer",
+            input_keys=["query", "coordination"],
+            output_key="draft_report",
+            model_tier="complex",
+            output_format="markdown",
+            pool_inject=[
+                {"pool": "observations", "threshold": 0},
+                {"pool": "sources", "threshold": 0},
+                {"pool": "candidates", "threshold": 0},
+            ],
+            max_tool_calls=0,
+            extra_config={
+                "system_prompt": _with_designer_goal(
+                    _iter_refine_integrator_directive(compiled_brief, p)
+                    + "\n\n"
+                    + synthesizer_system,
+                    intent,
+                    role="synthesizer",
+                    design_brief=compiled_brief,
+                ),
+                "grounding_mode": compiled_brief.grounding_mode,
+                "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+                "user_prompt_template": (
+                    "Integrate the proposals in the candidates pool into ONE "
+                    "improved report for {query}.\n\n"
+                    "{revision_block_md}\n\n"
+                    "Use ONLY the injected observations and sources; never add "
+                    "unsupported claims."
+                ),
+            },
+        )
+        loop_body = [proposer_parallel, integrator]
+        # candidates holds the CURRENT round's proposals for the integrator.
+        pools.append(
+            make_pool_decl(name="candidates", dedup_key="content_hash", max_items=p)
+        )
+
+    # --- critic: reflector; produces coverage_review (the loop's until operand) -
+    critic = make_agent_node(
+        node_id="refine-critic",
+        label=f"{domain_label} Coverage Critic",
+        subtype="reflector",
+        input_keys=["query", "coordination", "draft_report"],
+        output_key="coverage_review",
+        model_tier="analytical",
+        output_format="json",
+        pool_inject=[
+            {"pool": "observations", "threshold": 0},
+            {"pool": "sources", "threshold": 0},
+        ],
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                _final_coverage_reflector_directive(compiled_brief, lane_specs)
+                + "\n\nEmit decision='complete' only when the draft fully covers "
+                "every required output and is grounded; otherwise decision='adjust' "
+                "with concrete, integratable directives. Never emit 'continue'."
+                + "\n\n"
+                + reflector_system,
+                intent,
+                role="reflector",
+                design_brief=compiled_brief,
+            ),
+            "user_prompt_template": (
+                "Review the draft report for {query}.\n\n"
+                "## Draft Report\n{draft_report}\n\n"
+                "Return reflector JSON with decision, reasoning, suggested_changes, "
+                "directives, evidence_sufficiency, and failure_mode."
+            ),
+        },
+    )
+    # NOTE: the critic MUST NOT be error_handling=skip — its coverage_review output
+    # is the loop's `until` operand; a skipped/missing output would hard-raise.
+
+    refine_loop = make_loop(
+        node_id="refine-loop",
+        label=f"{domain_label} Refinement Loop",
+        children=[*loop_body, critic],
+        until={
+            "type": "state",
+            "key": "coverage_review.decision",
+            "operator": "eq",
+            "value": "complete",
+        },
+        min_iterations=1,
+        max_iterations=iters,
+    )
+
+    finalizer = make_agent_node(
+        node_id="final-report-synthesizer",
+        label=f"{domain_label} Final Report Synthesizer",
+        subtype="synthesizer",
+        input_keys=["query", "coordination", "draft_report", "coverage_review"],
+        output_key="report",
+        model_tier="complex",
+        output_format="markdown",
+        pool_inject=[
+            {"pool": "observations", "threshold": 0},
+            {"pool": "sources", "threshold": 0},
+        ],
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                _final_report_repair_directive(compiled_brief, lane_specs)
+                + "\n\n"
+                + synthesizer_system,
+                intent,
+                role="synthesizer",
+                design_brief=compiled_brief,
+            ),
+            "user_prompt_template": (
+                "Produce the final report for {query}.\n\n"
+                "## Draft Report\n{draft_report}\n\n"
+                "## Coverage Review\n{coverage_review}\n\n"
+                "Use only observations and sources available in the injected "
+                "evidence pools."
+            ),
+            "grounding_mode": compiled_brief.grounding_mode,
+            "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+        },
+    )
+
+    workflow = {
+        "id": "designer-draft",
+        "name": compiled_brief.workflow_name or name,
+        "description": intent,
+        "version": 1,
+        "tools": tools,
+        "pools": pools,
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "token_budget": 0,
+        "timeout_seconds": 1800,
+        "root": make_sequence(
+            node_id="main",
+            label=f"{domain_label} Iterative Refinement Pipeline",
+            children=[coordinator, evidence_parallel, refine_loop, finalizer],
+        ),
+    }
+    _inject_tool_catalogs_into_workflow(workflow)
+    validate_generated_workflow(workflow)
+    return workflow
+
+
+# ---------------------------------------------------------------------------
+# router topology
+# ---------------------------------------------------------------------------
+
+_DEFAULT_ROUTER_CASES: tuple[str, ...] = ("primary path", "fallback path")
+_MIN_ROUTER_CASES = 2
+_MAX_ROUTER_CASES = 6
+
+
+def _slug(text: str, index: int) -> str:
+    """Deterministic, collision-free node-id namespace from a route label.
+
+    Lowercases, collapses non-alphanumerics to single hyphens, truncates, and
+    appends the branch index so two near-identical labels never collide on the
+    global duplicate-node-id rule (``workflow.validation``).
+    """
+    cleaned = "".join(ch if ch.isalnum() else "-" for ch in text.lower())
+    base = "-".join(p for p in cleaned.split("-") if p)[:24].strip("-") or "case"
+    return f"{base}-{index}"
+
+
+def _router_branch_directive(compiled_brief: WorkflowDesignBrief, case: str) -> str:
+    """Core directive for a router branch synthesizer.
+
+    Embeds the route case + user_goal + required_outputs BEFORE the strippable
+    ``## Designer Goal`` block so each branch synthesizer clears the
+    generic-synthesizer coverage gate.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    return (
+        "## Routed Branch Contract\n\n"
+        f"This branch handles queries of type: {case}.\n"
+        "Produce the report answering the user's goal:\n"
+        f"{goal}\n\n"
+        f"The report MUST cover these required outputs: {required_outputs}.\n"
+        "Ground every claim ONLY in the injected observations and sources pools; "
+        "never invent figures, dates, quotations, or citations."
+    )
+
+
+def _build_router_workflow(
+    intent: str,
+    name: str,
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
+    router_cases: list[str] | None = None,
+) -> dict[str, Any]:
+    """Router topology: classify the query, branch to one of N research sub-pipelines.
+
+    Shape: ``sequence(router-classifier, conditional(branch_1..branch_M, default))``.
+
+    The classifier (``router_classifier`` subtype, FW-2) emits a typed
+    ``routing.route`` enum — FORCED via the output_model its enrich synthesizes
+    from the declared ``output_schema`` — so the conditional discriminator is both
+    statically valid AND reliably present at runtime (a naive coordinator-based
+    router would pass save-validation then hard-crash). Each branch is a
+    self-contained evidence front + grounded synthesizer writing the SAME
+    ``report`` output_key (so every path produces the workflow output and
+    ``_merge_branch_outputs`` marks it always-available). All branch node ids are
+    namespaced by a route slug to satisfy the global unique-node-id rule. The LAST
+    case is the default/fallback branch (no explicit condition).
+
+    Gate-clean by construction: the classifier is exempt from the tool-access gate
+    (not a researcher); each branch carries its own evidence front (researcher
+    contract) + a grounded synthesizer injecting observations+sources whose core
+    embeds the goal + required outputs (generic-synthesizer gate).
+    """
+    cases = [c.strip() for c in (router_cases or []) if isinstance(c, str) and c.strip()]
+    if len(cases) < _MIN_ROUTER_CASES:
+        cases = list(_DEFAULT_ROUTER_CASES)
+    cases = cases[:_MAX_ROUTER_CASES]
+
+    domain_label = _workflow_domain_label(compiled_brief)
+    synthesizer_system, _ = _default_prompts("synthesizer")
+    synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
+
+    # --- classifier (typed route discriminator) ------------------------------
+    classifier_core = (
+        "## Query Router\n\n"
+        "Classify the user's query into exactly ONE of these route cases: "
+        f"{', '.join(cases)}.\n"
+        f"If the query does not clearly fit a specific case, choose {cases[-1]!r} "
+        "(the default). Emit JSON {route, reason}: route is exactly one of the "
+        "cases (verbatim); reason is one sentence."
+    )
+    classifier = make_agent_node(
+        node_id="router-classifier",
+        label=f"{domain_label} Query Router",
+        subtype="router_classifier",
+        input_keys=["query"],
+        output_key="routing",
+        model_tier="simple",
+        output_format="json",
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                classifier_core,
+                intent,
+                role="coordinator",
+                design_brief=compiled_brief,
+            ),
+            "output_schema": {
+                "type": "object",
+                "properties": {
+                    "route": {"enum": cases},
+                    "reason": {"type": "string"},
+                },
+                "required": ["route"],
+            },
+            "user_prompt_template": (
+                "Classify this query into one of the route cases: {query}"
+            ),
+        },
+    )
+
+    # --- branches (one self-contained research sub-pipeline per case) ---------
+    tools: list[dict[str, Any]] | None = None
+    branches: list[dict[str, Any]] = []
+    for index, case in enumerate(cases):
+        slug = _slug(case, index)
+        coordinator, evidence_parallel, _lane_specs_b, branch_tools = _build_evidence_front(
+            intent,
+            compiled_brief,
+            assets=assets,
+            ambiguity_axes=ambiguity_axes,
+            id_prefix=f"{slug}_",
+            topology="router",
+        )
+        if tools is None:
+            tools = branch_tools
+        branch_synth = make_agent_node(
+            node_id=f"{slug}_synthesizer",
+            label=f"{domain_label} Synthesizer ({case})",
+            subtype="synthesizer",
+            input_keys=["query", "coordination"],
+            output_key="report",
+            model_tier="complex",
+            output_format="markdown",
+            pool_inject=[
+                {"pool": "observations", "threshold": 0},
+                {"pool": "sources", "threshold": 0},
+            ],
+            max_tool_calls=0,
+            extra_config={
+                "system_prompt": _with_designer_goal(
+                    _router_branch_directive(compiled_brief, case)
+                    + "\n\n"
+                    + synthesizer_system,
+                    intent,
+                    role="synthesizer",
+                    design_brief=compiled_brief,
+                ),
+                "grounding_mode": compiled_brief.grounding_mode,
+                "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+                "user_prompt_template": (
+                    "Produce the report for {query} using ONLY the injected "
+                    "observations and sources pools."
+                ),
+            },
+        )
+        branches.append(
+            make_sequence(
+                node_id=f"{slug}-branch",
+                label=f"{domain_label} Branch ({case})",
+                children=[coordinator, evidence_parallel, branch_synth],
+            )
+        )
+
+    # conditions cover all but the last case; the last case is the default branch.
+    conditions = [
+        {"key": "routing.route", "operator": "eq", "value": case}
+        for case in cases[:-1]
+    ]
+    route_branch = make_conditional(
+        node_id="route-branch",
+        label=f"{domain_label} Route",
+        conditions=conditions,
+        default_branch=len(cases) - 1,
+        children=branches,
+    )
+
+    workflow = {
+        "id": "designer-draft",
+        "name": compiled_brief.workflow_name or name,
+        "description": intent,
+        "version": 1,
+        "tools": tools if tools is not None else _default_web_tool_decls(max_results=10),
+        "pools": [
+            make_pool_decl(
+                name="sources",
+                dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan),
+                max_items=100,
+            ),
+            make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
+        ],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "token_budget": 0,
+        "timeout_seconds": 1800,
+        "root": make_sequence(
+            node_id="main",
+            label=f"{domain_label} Router Pipeline",
+            children=[classifier, route_branch],
+        ),
+    }
+    _inject_tool_catalogs_into_workflow(workflow)
+    validate_generated_workflow(workflow)
+    return workflow
 
 
 def _build_parallel_lanes_workflow(

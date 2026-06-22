@@ -3,12 +3,21 @@ from __future__ import annotations
 from typing import Any
 
 from databricks_deep_research.pools.pool_state import PoolState
-from databricks_deep_research.workflow.runtime_core.selectors import select_discovered_sources
+from databricks_deep_research.workflow.runtime_core.selectors import (
+    select_discovered_sources,
+    select_prior_sources,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 
 def coerce_discovered_sources(state: WorkflowState) -> list[dict[str, Any]]:
     raw = select_discovered_sources(state)
+    return [item for item in raw if isinstance(item, dict)]
+
+
+def coerce_prior_sources(state: WorkflowState) -> list[dict[str, Any]]:
+    """Dict-filtered prior-turn sources staged under ``prior_sources_for_seed``."""
+    raw = select_prior_sources(state)
     return [item for item in raw if isinstance(item, dict)]
 
 

@@ -86,6 +86,33 @@ class _EntityRegistry:
         return cls(by_id={}, by_name={})
 
 
+APPENDIX_AGENT_TYPE = "researcher"
+"""Agent type used to render the single shared system-prompt appendix.
+
+The harness injects ONE reserved appendix key into every node (it has no
+per-node appendix channel), so the orchestrator must render for the agent type
+whose ``render()`` emits the UNION of useful blocks — findings + coverage +
+entities. ``researcher`` is that type (coverage is gated away from
+``coordinator``). Both the orchestrator and the appendix-contract test import
+this constant so they cannot drift."""
+
+
+_CONFIDENCE_RANK: dict[str, int] = {"high": 3, "medium": 2, "low": 1}
+
+
+def _confidence_rank(confidence: str | None) -> int:
+    """Order findings high→low for the appendix; unknown labels sort last."""
+    return _CONFIDENCE_RANK.get((confidence or "").lower(), 0)
+
+
+def _finding_sort_key(finding: ChatMemoryFinding) -> tuple[int, float]:
+    """Sort key: confidence first, then recency. ``.timestamp()`` keeps the
+    comparison numeric so a tz-aware ``created_at`` (legacy path) and a
+    ``None`` (cached path omits it) never compare naive-vs-aware."""
+    created = finding.created_at
+    return (_confidence_rank(finding.confidence), created.timestamp() if created else 0.0)
+
+
 class ChatMemoryService:
     """Chat-scoped research memory store.
 
@@ -498,6 +525,80 @@ class ChatMemoryService:
         await self._session.flush()
         return row
 
+    async def consolidate_from_pool(
+        self,
+        chat_id: UUID,
+        *,
+        claims: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        research_session_id: UUID | None,
+        source_step: int,
+        origin: str = FindingOrigin.WEB.value,
+        coverage_topics: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Persist a finished turn's knowledge as durable findings (legacy/SQL).
+
+        Two tiers: verified *claims* (confidence from the claim) and quarantined
+        *observations* (``low``). Idempotent via the ``(chat_id, content_hash)``
+        upsert in ``_upsert_finding``. The cached subclass overrides this with a
+        ChatState-backed implementation; both honor the same signature.
+
+        Returns the number of findings written.
+        """
+        if self._chat_id is None or self._chat_id != chat_id:
+            raise RuntimeError(
+                "hydrate() must be called for this chat before consolidate_from_pool()"
+            )
+        try:
+            origin_enum = FindingOrigin(origin)
+        except ValueError:
+            origin_enum = FindingOrigin.WEB
+
+        written = 0
+        for claim in claims:
+            text = str(claim.get("claim_text") or claim.get("text") or "").strip()
+            if not text:
+                continue
+            await self._upsert_finding(
+                chat_id=chat_id,
+                content=text,
+                research_session_id=research_session_id,
+                confidence=str(claim.get("confidence") or "high"),
+                entity_ids=[],
+                source_step=source_step,
+                origin=origin_enum,
+                category="claim",
+            )
+            written += 1
+        for obs in observations:
+            text = str(
+                obs.get("text") or obs.get("summary") or obs.get("snippet") or ""
+            ).strip()
+            if not text:
+                continue
+            await self._upsert_finding(
+                chat_id=chat_id,
+                content=text,
+                research_session_id=research_session_id,
+                confidence="low",
+                entity_ids=[],
+                source_step=source_step,
+                origin=origin_enum,
+                category="observation",
+            )
+            written += 1
+        if coverage_topics:
+            # Coverage writing is implemented on the cached (production) path,
+            # which overrides this method. The legacy SQL path has no coverage
+            # upsert; surface that rather than silently dropping the rows.
+            logger.info(
+                "CHAT_MEMORY_COVERAGE_SKIPPED_LEGACY chat_id=%s topics=%d "
+                "(coverage write is a cached-path feature)",
+                chat_id,
+                len(coverage_topics),
+            )
+        return written
+
     async def _upsert_file(
         self,
         chat_id: UUID,
@@ -644,10 +745,19 @@ class ChatMemoryService:
             for c in self._coverage[:20]:
                 parts.append(f"- {c.topic} — status={c.status}, depth={c.depth}")
 
-        if self._findings and agent_type == "synthesizer":
+        # Findings surface to every research-driving agent (Phase 2a) so a
+        # follow-up turn reuses prior verified knowledge instead of re-deriving
+        # it. Ordered confidence-then-recency; the untrusted-context framing in
+        # render_appendix_block + the "re-verify before citing" header keep the
+        # synthesizer grounding in sources, not paraphrasing these.
+        if self._findings and agent_type in {
+            "coordinator", "planner", "researcher", "reflector", "synthesizer"
+        }:
             parts.append("")
-            parts.append("## Consolidated findings")
-            for fi in self._findings[:30]:
+            parts.append(
+                "## Consolidated findings (prior turns — context only; re-verify before citing)"
+            )
+            for fi in sorted(self._findings, key=_finding_sort_key, reverse=True)[:30]:
                 parts.append(f"- [{fi.confidence}] {fi.content}")
 
         # Plugin-contributed structured briefs (e.g. sapresalesbot's AccountBrief).

@@ -309,12 +309,37 @@ export interface DoneSSEEvent {
   type: 'done'
 }
 
+/**
+ * Transient progress heartbeat emitted while a long designer turn streams
+ * (current agent node, or architect-critic loop iteration). Rendered as a
+ * transient status line and never persisted to the transcript.
+ */
+export interface ProgressSSEEvent {
+  type: 'progress'
+  label: string
+  iteration?: number | null
+  total?: number | null
+}
+
+/**
+ * First frame of a chat turn: carries the server-assigned turn_id so the client
+ * can reconnect (GET /chat/{turn_id}/events?since=N) and resume after the
+ * gateway's absolute connection cap severs the stream. Not part of the buffered
+ * event sequence (carries no id), so it is never replayed on resume.
+ */
+export interface TurnStartedSSEEvent {
+  type: 'turn_started'
+  turn_id: string
+}
+
 /** Discriminated union of all SSE events emitted by the agent-designer chat endpoint. */
 export type DesignerSSEEvent =
+  | TurnStartedSSEEvent
   | MessageSSEEvent
   | ToolCallSSEEvent
   | MutationProposedSSEEvent
   | ToolResultSSEEvent
+  | ProgressSSEEvent
   | ErrorSSEEvent
   | DoneSSEEvent
 

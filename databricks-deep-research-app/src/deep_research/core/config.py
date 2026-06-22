@@ -98,6 +98,20 @@ class Settings(BaseSettings):
     storage_backend: Literal["lakebase", "sql_warehouse", "fake"] = "lakebase"
     storage_service_impl: Literal["sqlalchemy_legacy", "cached"] = "cached"
 
+    # Unified chat memory (env CHAT_MEMORY_UNIFIED). When true, each completed
+    # research turn consolidates its VERIFIED claims into durable per-chat
+    # findings (ChatState.memory.findings) so later turns can read/cite them.
+    # Default off — flag-gated rollout of the cross-turn memory write path.
+    chat_memory_unified: bool = False
+
+    # Follow-up chat gate (env FOLLOWUP_CHAT_GATE_ENABLED). When true, a new
+    # message in a custom-agent chat that already has gathered research is
+    # routed by intent: a conversational follow-up answerable from the data
+    # already gathered is answered directly (no re-run of the agent workflow),
+    # while a genuinely new research request still runs the agent. Flag-off is
+    # byte-identical to the legacy "always re-run the workflow" behavior.
+    followup_chat_gate_enabled: bool = True
+
     # SQL Warehouse parameters (required when storage_backend=sql_warehouse).
     storage_warehouse_id: str | None = None
     storage_catalog: str = "main"

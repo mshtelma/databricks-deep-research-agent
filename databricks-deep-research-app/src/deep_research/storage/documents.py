@@ -112,6 +112,11 @@ class Coverage(BaseModel):
     topic: str
     status: str = CoverageStatus.GAP.value
     depth: str | None = None
+    # Freshness stamps (Phase 2e) — the memory-aware routing gate (Phase 3a)
+    # reads these to decide answer-from-memory vs re-research. Default-safe:
+    # old documents without these keys validate to (0, None) via extra="ignore".
+    as_of_turn: int = 0
+    updated_at: datetime | None = None
 
 
 class FileMemo(BaseModel):

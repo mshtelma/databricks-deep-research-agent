@@ -912,10 +912,12 @@ deploy: build requirements
 # Skips: DB migrations, Lakebase provisioning, permission grants, frontend build.
 # Use for Python/yaml/databricks.yml-only changes after a successful `make deploy`.
 # Usage: make app-deploy TARGET=dev
-#        make app-deploy TARGET=dev BUILD=1          # Also rebuild frontend + requirements.txt
+#        make app-deploy TARGET=dev BUILD=0          # Skip rebuild (config-only; wheel/UI unchanged)
 #        make app-deploy TARGET=dev BRAVE_SCOPE=msh  # Override Brave secret scope
-BUILD ?=
-app-deploy: $(if $(BUILD),build requirements,)
+# Rebuilds wheels + UI by DEFAULT; the app runs from the installed wheel, so a
+# stale wheel ships stale code. Pass BUILD=0 (or no/false/off) to skip the rebuild.
+BUILD ?= 1
+app-deploy: $(if $(filter-out 0 no false off,$(BUILD)),build requirements,)
 	@if [ ! -f $(ROOT_DIR)/.env.$(TARGET) ]; then \
 		echo "ERROR: $(ROOT_DIR)/.env.$(TARGET) not found. Run 'make deploy TARGET=$(TARGET)' first."; \
 		exit 1; \

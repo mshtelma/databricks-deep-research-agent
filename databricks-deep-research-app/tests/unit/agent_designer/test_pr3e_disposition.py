@@ -6,8 +6,6 @@ import os
 from typing import Any
 from unittest.mock import patch
 
-import pytest
-
 from databricks_deep_research.citation.claim_classifier import (
     classify_negative_existence,
 )
@@ -16,7 +14,6 @@ from databricks_deep_research.citation.types import ClaimInfo
 from deep_research.agent_designer.disposition_applier import (
     claim_disposition_applier,
 )
-
 
 # ---------------------------------------------------------------------------
 # is_negative_existence classifier — happy paths and verdict scope

@@ -54,9 +54,15 @@ from deep_research.agent.adapters.domain_context import (
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
 from deep_research.agent.chat_title import derive_chat_title_from_query
+from deep_research.agent.followup import (
+    TurnIntent,
+    decide_turn_intent,
+    stream_chat_about_results,
+)
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
+from deep_research.agent.tools.search_chat_memory import SearchChatMemoryTool
 from deep_research.agent.workflow_runner_factory import build_app_workflow_runner
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.plugins.base import ContextEnricher
@@ -73,6 +79,7 @@ from deep_research.schemas.streaming import (
 )
 from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
 from deep_research.services._protocols import IChatMemoryService
+from deep_research.services.chat_memory_service import APPENDIX_AGENT_TYPE
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.services.research_event_buffer import EventBuffer
@@ -114,6 +121,24 @@ class MissingOBOTokenError(RuntimeError):
 # Regex matching [N] numeric citation markers produced by the framework synthesizer.
 # Captures the integer N.  Matches [1], [12], [1][2], etc.
 _NUMERIC_CITATION_RE = __import__("re").compile(r"\[(\d+)\]")
+
+
+def _resolve_turn_intent(config: OrchestrationConfig) -> TurnIntent:
+    """Resolve the requested per-turn routing for a custom-agent chat.
+
+    Back-compat: the legacy ``query_mode == "simple"`` selection on a
+    custom-agent chat historically meant "answer directly, don't run the full
+    workflow" — which the custom-agent path silently ignored. Treat it as an
+    explicit chat turn so that selection regains meaning. Otherwise honor the
+    explicit ``turn_intent`` (defaulting to AUTO on any unknown value).
+    """
+    if config.query_mode == "simple" and config.agent_id:
+        return TurnIntent.CHAT
+    raw = (getattr(config, "turn_intent", "auto") or "auto").lower()
+    try:
+        return TurnIntent(raw)
+    except ValueError:
+        return TurnIntent.AUTO
 
 
 def _resolve_workflow(
@@ -565,8 +590,14 @@ async def stream_workflow_via_framework(
     from deep_research.agent.orchestration_config import (
         get_default_orchestration_config,
     )
+    from deep_research.agent.utils.conversation import normalize_history_roles
 
     config = config or get_default_orchestration_config()
+    # Translate the app's internal "agent" role to OpenAI's "assistant" at the
+    # app→framework boundary (source-side prevention; the framework also
+    # normalizes at message assembly). Covers main-chat and ChatAgent serving,
+    # since both funnel through this entry point. Idempotent.
+    conversation_history = normalize_history_roles(conversation_history)
     start_time = time.perf_counter()
     event_buffer: EventBuffer | None = None
     steps_executed = 0
@@ -758,6 +789,95 @@ async def stream_workflow_via_framework(
                                     plugin_label,
                                 )
 
+                # -- Follow-up chat gate (custom-agent chats with prior research) --
+                # Route a new message in a custom-agent chat by intent: a
+                # conversational follow-up answerable from data already gathered
+                # is answered directly (no expensive re-run of the agent's
+                # workflow). Runs BEFORE workflow resolution + the OBO fail-closed
+                # check, so a chat turn needs neither the agent's Databricks tools
+                # nor an OBO token. Flag-off / no agent_id / no prior research all
+                # fall through unchanged to the workflow path below.
+                from deep_research.core.config import (
+                    get_settings as _get_settings_followup,
+                )
+
+                # Cheap guards first so non-agent / non-chat turns short-circuit
+                # BEFORE constructing Settings() (which can raise without env).
+                if (
+                    config.agent_id
+                    and chat_id is not None
+                    and _get_settings_followup().followup_chat_gate_enabled
+                ):
+                    _existing_for_gate = await _load_existing_sources(
+                        storage_stack, db, chat_id,
+                    )
+                    if _existing_for_gate:
+                        _followup_findings = ""
+                        if chat_memory is not None:
+                            _followup_findings = (
+                                chat_memory.render_appendix_block(
+                                    agent_type=APPENDIX_AGENT_TYPE,
+                                )
+                                or ""
+                            )
+                        _turn_decision = await decide_turn_intent(
+                            query=query,
+                            conversation_history=conversation_history,
+                            prior_findings_summary=_followup_findings,
+                            has_prior_research=True,
+                            requested=_resolve_turn_intent(config),
+                            llm=llm,
+                        )
+                        logger.info(
+                            "FWK_FOLLOWUP_GATE route=%s turn_intent=%s "
+                            "query_mode=%s agent_id=%s reason=%s",
+                            _turn_decision.route,
+                            config.turn_intent,
+                            config.query_mode,
+                            config.agent_id,
+                            _turn_decision.reasoning[:200],
+                        )
+                        if _turn_decision.route == "chat":
+                            _followup_chunks: list[str] = []
+                            async for _followup_evt in stream_chat_about_results(
+                                query=query,
+                                conversation_history=conversation_history,
+                                chat_id=chat_id,
+                                db=db,
+                                llm=llm,
+                                prior_findings_summary=_followup_findings,
+                            ):
+                                if isinstance(_followup_evt, SynthesisProgressEvent):
+                                    _followup_chunks.append(
+                                        _followup_evt.content_chunk
+                                    )
+                                yield _followup_evt
+                            _followup_answer = "".join(_followup_chunks)
+                            await _persist_simple_response(
+                                config,
+                                db,
+                                chat_id,
+                                user_id,
+                                query,
+                                _followup_answer,
+                                event_buffer,
+                                storage_stack=storage_stack,
+                            )
+                            if config.message_id is not None:
+                                yield PersistenceCompletedEvent(
+                                    chat_id=str(chat_id),
+                                    message_id=str(config.message_id),
+                                    research_session_id=None,
+                                    chat_title=derive_chat_title_from_query(query),
+                                    was_draft=config.is_draft,
+                                )
+                            logger.info(
+                                "FWK_FOLLOWUP_CHAT_DONE chat_id=%s answer_len=%d",
+                                chat_id,
+                                len(_followup_answer),
+                            )
+                            return
+
                 logger.info(
                     "FWK_TOOL_CREATION domain_filter=%s domain_filter_type=%s",
                     config.domain_filter,
@@ -792,17 +912,19 @@ async def stream_workflow_via_framework(
                 # Silent no-op when nothing is attached — preserves baseline
                 # tool list for workflows without files.
                 if chat_memory is not None and not chat_memory.snapshot().empty:
+                    from deep_research.core.config import get_settings as _gs2
+
                     _existing_tool_names = {t.definition.name for t in framework_tools}
-                    _chat_mem_tools: list[Any] = [
-                        ListAttachedFilesTool(chat_memory),
-                        GetFileEntitiesTool(chat_memory),
-                    ]
+                    _rfus = None
                     if db is not None or storage_stack is not None:
-                        from deep_research.core.config import get_settings as _gs2
                         _rfus = make_file_upload_service(_gs2(), storage_stack, session=db)
-                        _chat_mem_tools.append(
-                            ReadAttachedFileTool(chat_memory, _rfus)
-                        )
+                    # search_chat_memory exposed only under CHAT_MEMORY_UNIFIED
+                    # (Phase 2c) — flag-off keeps the baseline tool list.
+                    _chat_mem_tools: list[Any] = _build_chat_memory_tools(
+                        chat_memory,
+                        file_service=_rfus,
+                        include_search=_gs2().chat_memory_unified,
+                    )
                     for _cmt in _chat_mem_tools:
                         if _cmt.definition.name not in _existing_tool_names:
                             framework_tools.append(_cmt)
@@ -1014,14 +1136,36 @@ async def stream_workflow_via_framework(
                     storage_stack, db, chat_id,
                 )
                 if existing_sources:
+                    # Durable history (feeds appendix/retrieval) — unchanged.
                     wf_state.append("init", "existing_sources", existing_sources)
+                    # Read-path (Phase 2b): stage a bounded, canonical, citable
+                    # seed under a DEDICATED key and flip the framework's
+                    # run-start seed flag. Gated by CHAT_MEMORY_UNIFIED so
+                    # flag-off behaviour is byte-identical.
+                    from deep_research.core.config import get_settings as _gs_seed
+
+                    if _gs_seed().chat_memory_unified:
+                        _seed = _build_prior_source_seed(existing_sources, query, top_k=20)
+                        if _seed:
+                            wf_state.append("init", "prior_sources_for_seed", _seed)
+                            wf_state.append("init", "seed_prior_sources", True)
+                            logger.info(
+                                "PRIOR_SOURCES_SEED_STAGED chat_id=%s seed=%d of %d",
+                                chat_id,
+                                len(_seed),
+                                len(existing_sources),
+                            )
 
                 # Seed chat-memory appendix for universal system-prompt
                 # injection (reserved key consumed by harness._build_input).
                 # Empty when memory is empty → no-op, backward-compat
                 # preserved (golden-file regression test covers this).
                 if chat_memory is not None:
-                    _appendix = chat_memory.render_appendix_block(agent_type="coordinator")
+                    # Render for the union agent type so the single shared
+                    # appendix key (injected into every node by the harness)
+                    # carries findings + coverage + entities, not just the
+                    # coordinator subset. See APPENDIX_AGENT_TYPE.
+                    _appendix = chat_memory.render_appendix_block(agent_type=APPENDIX_AGENT_TYPE)
                     if _appendix:
                         wf_state.append(
                             "init",
@@ -1706,6 +1850,80 @@ async def _load_file_search_tool(
     return None
 
 
+def _build_chat_memory_tools(
+    chat_memory: Any,
+    *,
+    file_service: Any = None,
+    include_search: bool = False,
+) -> list[Any]:
+    """Build the chat-memory tool set exposed to agents.
+
+    Always includes the attached-file tools (list/entities). Adds
+    ``read_attached_file`` when a file service is available, and
+    ``search_chat_memory`` (Phase 2c) when ``include_search`` is set (the
+    orchestrator passes ``CHAT_MEMORY_UNIFIED``). Pure + side-effect-free so the
+    registration policy is unit-testable without the full orchestrator.
+    """
+    tools: list[Any] = [
+        ListAttachedFilesTool(chat_memory),
+        GetFileEntitiesTool(chat_memory),
+    ]
+    if file_service is not None:
+        tools.append(ReadAttachedFileTool(chat_memory, file_service))
+    if include_search:
+        tools.append(SearchChatMemoryTool(chat_memory))
+    return tools
+
+
+def _build_prior_source_seed(
+    sources: list[dict[str, Any]],
+    query: str,
+    *,
+    top_k: int = 20,
+) -> list[dict[str, Any]]:
+    """Bounded, canonical, citable, query-ranked seed for follow-up pool seeding.
+
+    Distinct from ``existing_sources`` (full durable history). Per Codex review:
+    - canonicalizes + dedups by canonical URL (Phase-1 ``canonicalize_url``) so
+      tracking-param variants don't crowd the pool (§7);
+    - requires an evidence body (``content``/``snippet``) — citable-snapshot
+      guard (§2);
+    - ADAPTIVE K: when any record overlaps the current query, keep only those
+      (a weakly-related follow-up seeds fewer); else fall back to all citable
+      records so the follow-up isn't starved; bounded by ``top_k``.
+
+    Stamps ``evidence_quality="cached"`` on every record (2b-0 gate result): a
+    bare record is normalized to ``evidence_quality=""`` and rejected by the
+    synthesizer's ``source_is_substantive`` despite carrying text; ``"cached"``
+    is in the substantive set and is semantically exact for a prior-turn source.
+    The pool's hybrid index re-ranks downstream; this is a coarse pre-filter.
+    """
+    from deep_research.agent.url_canonical import canonicalize_url
+
+    q_terms = {t for t in query.casefold().split() if len(t) > 2}
+
+    def _overlap(s: dict[str, Any]) -> int:
+        text = f"{s.get('title') or ''} {s.get('snippet') or ''}".casefold()
+        return sum(1 for t in q_terms if t in text) if q_terms else 0
+
+    seen: set[str] = set()
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for s in sources:
+        url = str(s.get("url") or "")
+        if not url or not (s.get("content") or s.get("snippet")):
+            continue
+        canon = canonicalize_url(url)
+        if canon in seen:
+            continue
+        seen.add(canon)
+        scored.append((_overlap(s), {**s, "url": canon, "evidence_quality": "cached"}))
+
+    positives = [item for score, item in scored if score > 0]
+    candidates = positives if positives else [item for _score, item in scored]
+    candidates.sort(key=_overlap, reverse=True)
+    return candidates[:top_k]
+
+
 async def _load_existing_sources(
     storage_stack: Any,
     db: Any,
@@ -2039,13 +2257,14 @@ async def _persist_simple_response(
         return
 
     from deep_research.agent.persistence import (
+        persist_research_session_completed_independent,
         persist_simple_message_independent,
         persist_simple_message_update_independent,
     )
 
-    try:
-        chat_id_uuid = _to_uuid(chat_id)
+    chat_id_uuid = _to_uuid(chat_id)
 
+    try:
         if config.session_pre_created:
             await asyncio.shield(
                 persist_simple_message_update_independent(
@@ -2078,6 +2297,34 @@ async def _persist_simple_response(
             "FWK_SIMPLE_PERSISTENCE_FAILED error=%s",
             str(e)[:200],
         )
+
+    # Transition the pre-created research session to COMPLETED. JobManager
+    # creates the session at submit time (status=in_progress) for *every* job;
+    # without this, a simple-classified query persists its answer but leaves the
+    # session in_progress, so JobManager's end-of-stream check force-fails it
+    # ("persistence_transition_missing") and the UI shows "research failed".
+    # Kept in its own try so a status-transition failure never masks the
+    # already-persisted answer message above.
+    if config.research_session_id is not None:
+        try:
+            await asyncio.shield(
+                persist_research_session_completed_independent(
+                    research_session_id=config.research_session_id,
+                    storage_stack=storage_stack,
+                    chat_id=chat_id_uuid,
+                )
+            )
+            logger.info(
+                "FWK_SIMPLE_SESSION_COMPLETED research_session_id=%s",
+                str(config.research_session_id)[:8],
+            )
+        except asyncio.CancelledError:
+            logger.warning("FWK_SIMPLE_SESSION_COMPLETE_CANCELLED")
+        except Exception as e:
+            logger.warning(
+                "FWK_SIMPLE_SESSION_COMPLETE_FAILED error=%s",
+                str(e)[:200],
+            )
 
 
 async def _persist_delta(

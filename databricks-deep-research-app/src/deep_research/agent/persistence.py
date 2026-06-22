@@ -748,6 +748,36 @@ async def _persist_session_complete_cached(
     await stack.cache.get(chat_id)
     await stack.cache.mutate(chat_id, _apply, dirty="both")
     await stack.queue.flush_chat_now(chat_id)
+
+    # Cross-turn memory (flag-gated, fail-open): consolidate this turn's VERIFIED
+    # claims into durable per-chat findings so later turns can read/cite them.
+    # A consolidation error must never fail the already-persisted research turn.
+    from deep_research.core.config import get_settings as _get_settings
+
+    if _get_settings().chat_memory_unified and verification_data:
+        try:
+            from deep_research.agent.turn_consolidation import (
+                consolidate_turn_knowledge,
+            )
+            from deep_research.services.cached.chat_memory import (
+                CachedChatMemoryService,
+            )
+
+            _mem = CachedChatMemoryService(stack)
+            await _mem.hydrate(chat_id)
+            _written = await consolidate_turn_knowledge(
+                _mem, chat_id, research_session_id, verification_data
+            )
+            logger.info(
+                "CHAT_MEMORY_CONSOLIDATED_CACHED chat=%s session=%s findings=%d",
+                str(chat_id)[:8], str(research_session_id)[:8], _written,
+            )
+        except Exception:
+            logger.exception(
+                "CHAT_MEMORY_CONSOLIDATION_FAILED chat=%s session=%s",
+                str(chat_id)[:8], str(research_session_id)[:8],
+            )
+
     logger.info(
         "RESEARCH_SESSION_COMPLETED_CACHED session=%s sources=%d claims=%d",
         str(research_session_id)[:8], counts["sources"], counts["claims"],
@@ -817,6 +847,39 @@ async def _persist_session_cancelled_cached(
     await stack.queue.flush_chat_now(chat_id)
     logger.info(
         "RESEARCH_SESSION_CANCELLED_CACHED session=%s",
+        str(research_session_id)[:8],
+    )
+
+
+async def _persist_session_completed_cached(
+    *,
+    stack: Any,
+    chat_id: UUID,
+    research_session_id: UUID,
+) -> None:
+    """Cached-path status-only COMPLETED transition.
+
+    Counterpart to ``_persist_session_complete_cached`` (which also writes the
+    final report + sources + claims). Simple-mode runs persist their answer
+    message separately, so here we only flip the session status so the
+    JobManager's end-of-stream check sees a terminal state instead of force-
+    failing a successfully-answered session.
+    """
+    now = datetime.now(UTC)
+
+    def _apply(doc: Any) -> None:
+        for rs in doc.state.research_sessions:
+            if rs.id == research_session_id and rs.status == "in_progress":
+                rs.status = "completed"
+                rs.completed_at = now
+                break
+        doc.meta.updated_at = now
+
+    await stack.cache.get(chat_id)
+    await stack.cache.mutate(chat_id, _apply, dirty="both")
+    await stack.queue.flush_chat_now(chat_id)
+    logger.info(
+        "RESEARCH_SESSION_COMPLETED_SIMPLE_CACHED session=%s",
         str(research_session_id)[:8],
     )
 
@@ -1374,6 +1437,67 @@ async def persist_research_session_cancelled_independent(
             await db.commit()
             logger.info(
                 f"RESEARCH_SESSION_CANCELLED session={research_session_id}"
+            )
+        except Exception:
+            await db.rollback()
+            raise
+
+
+async def persist_research_session_completed_independent(
+    research_session_id: UUID,
+    *,
+    storage_stack: Any | None = None,
+    chat_id: UUID | None = None,
+) -> None:
+    """Status-only COMPLETED transition for a research session.
+
+    Used by simple-query mode: the answer message is persisted by the
+    ``persist_simple_message_*`` helpers, but the pre-created session is left
+    ``in_progress`` — which the JobManager's end-of-stream check treats as a
+    stuck/failed run and force-fails (``persistence_transition_missing``). This
+    flips the session to COMPLETED without touching the (already-saved) message.
+    Only transitions a session still ``IN_PROGRESS`` so it never clobbers a
+    session already marked failed/cancelled. When storage_stack is provided and
+    impl==cached, skips session_maker.
+
+    Args:
+        research_session_id: UUID of the research session to complete.
+        storage_stack: Optional StorageStack; when provided and impl==cached,
+            skips session_maker entirely.
+        chat_id: Required when storage_stack is provided (chat-scoped storage).
+    """
+    from deep_research.core.config import get_settings
+
+    settings = get_settings()
+    if (
+        settings.storage_service_impl == "cached"
+        and storage_stack is not None
+        and chat_id is not None
+    ):
+        await _persist_session_completed_cached(
+            stack=storage_stack,
+            chat_id=chat_id,
+            research_session_id=research_session_id,
+        )
+        return
+
+    from deep_research.db.session import get_session_maker
+
+    session_maker = get_session_maker()
+    async with session_maker() as db:
+        try:
+            await db.execute(
+                update(ResearchSession)
+                .where(ResearchSession.id == research_session_id)
+                .where(ResearchSession.status == ResearchStatus.IN_PROGRESS)
+                .values(
+                    status=ResearchStatus.COMPLETED,
+                    completed_at=datetime.now(UTC),
+                )
+            )
+            await db.commit()
+            logger.info(
+                f"RESEARCH_SESSION_COMPLETED_SIMPLE session={research_session_id}"
             )
         except Exception:
             await db.rollback()

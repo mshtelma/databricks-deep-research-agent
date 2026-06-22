@@ -93,3 +93,81 @@ def test_build_input_populates_agent_input_history() -> None:
     from databricks_deep_research.agents.isolation import AgentInput
 
     assert "conversation_history" in AgentInput.__dataclass_fields__
+
+
+# ---------------------------------------------------------------------------
+# Test 5: _build_messages normalizes history roles to the OpenAI-valid set
+# (regression for the AIS "Invalid role" 400 — app stores assistant turns
+# as role="agent", which the gateway rejects).
+# ---------------------------------------------------------------------------
+
+
+def test_build_messages_normalizes_agent_role() -> None:
+    from databricks_deep_research.agents.harness import _build_messages
+    from databricks_deep_research.agents.isolation import AgentInput
+    from databricks_deep_research.llm.roles import OPENAI_CHAT_ROLES
+
+    agent_input = AgentInput(
+        query="who is CEO of Depop now?",
+        system_prompt="You are a parser.",
+        user_prompt="Parse the target account.",
+        conversation_history=[
+            {"role": "user", "content": "prior question"},
+            {"role": "agent", "content": "a 36KB prior report"},
+        ],
+    )
+
+    messages = _build_messages(agent_input)
+
+    roles = [m["role"] for m in messages]
+    # system, prior-user, prior-assistant(was "agent"), current-user
+    assert roles == ["system", "user", "assistant", "user"]
+    assert all(r in OPENAI_CHAT_ROLES for r in roles)
+    # The injected history dict was not mutated in place.
+    assert agent_input.conversation_history[1] == {
+        "role": "agent",
+        "content": "a 36KB prior report",
+    }
+
+
+# ---------------------------------------------------------------------------
+# Test 6: _build_messages flattens cross-turn tool mechanics (shared harness).
+# Regression for the AIS designer multi-turn 400
+# "messages.1.tool_calls: Extra inputs are not permitted" — and the same
+# load-bearing backstop covers the main-chat path (both route through
+# _build_messages). The app-side conversation normalizer does NOT strip tool
+# mechanics, so this framework choke point must.
+# ---------------------------------------------------------------------------
+
+
+def test_build_messages_flattens_cross_turn_tool_mechanics() -> None:
+    from databricks_deep_research.agents.harness import _build_messages
+    from databricks_deep_research.agents.isolation import AgentInput
+
+    agent_input = AgentInput(
+        query="use the same tools as before",
+        system_prompt="You are the architect.",
+        user_prompt="use the same tools as before",
+        conversation_history=[
+            {"role": "user", "content": "build best-of-n", "tool_calls": []},
+            {"role": "assistant", "content": "designed it", "tool_calls": [{"id": "a1"}]},
+            {"role": "tool", "content": "discover result", "tool_call_id": "a1"},
+            {"role": "tool", "content": "more", "tool_call_id": "a2"},
+        ],
+    )
+
+    messages = _build_messages(agent_input)
+
+    # No tool mechanics reach the gateway payload.
+    assert all(
+        ("tool_calls" not in m and "tool_call_id" not in m and "name" not in m)
+        for m in messages
+    )
+    # tool-role messages dropped; only system + flattened history + current user.
+    assert [m["role"] for m in messages] == ["system", "user", "assistant", "user"]
+    # Input history dicts untouched.
+    assert agent_input.conversation_history[0] == {
+        "role": "user",
+        "content": "build best-of-n",
+        "tool_calls": [],
+    }

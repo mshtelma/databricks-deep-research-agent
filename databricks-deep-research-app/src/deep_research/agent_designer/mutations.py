@@ -78,6 +78,47 @@ _FORBIDDEN_CONFIG_PATCH_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# The EDIT lane's default config-patch allow-list. Broader than the build-path
+# ``_ALLOWED_CONFIG_PATCH_KEYS`` (which is intentionally prompt-only so the
+# architect cannot drift the immutable blueprint), because an explicit edit may
+# legitimately touch any non-structural node-config field. ``edit_update_block``
+# accepts a per-call allow-list (derived from the EditScope) and falls back to
+# this set; ``_FORBIDDEN_CONFIG_PATCH_KEYS`` is ALWAYS rejected (structural keys
+# never become field patches — use clone/add/delete/move or a topology rebuild).
+# Tool BINDINGS are excluded on purpose: use ``bind_tool_to_block`` so the bound
+# name is validated against ``ast['tools']`` rather than written blindly.
+_EDIT_DEFAULT_CONFIG_PATCH_KEYS: frozenset[str] = frozenset(
+    {
+        "system_prompt",
+        "user_prompt_template",
+        "model_tier",
+        "error_handling",
+        "max_tool_calls",
+        "budget_seconds",
+        "output_format",
+        "provider",
+        "model",
+        "model_family",
+        "timeout_seconds",
+        "max_results",
+        "resolve_redirects",
+    }
+)
+
+# Top-level workflow metadata fields patchable via ``update_workflow_meta``.
+# These are AST siblings of ``root`` (not node config), so ``update_block``
+# cannot reach them. ``id``/``version``/``root``/``tools``/``pools`` and the
+# designer metadata keys are intentionally excluded (identity / structural).
+_ALLOWED_WORKFLOW_META_KEYS: frozenset[str] = frozenset(
+    {
+        "name",
+        "description",
+        "run_as",
+        "required_inputs",
+        "output_keys",
+    }
+)
+
 
 # ---------------------------------------------------------------------------
 # Internal path helpers
@@ -508,34 +549,8 @@ def update_block(
                     f"{sorted(_ALLOWED_CONFIG_PATCH_KEYS)})"
                 )
 
-    # Resolve the user-supplied reference (id OR dot-path) to an indexed path.
-    path = _resolve_node_ref(ast, path)
-
-    # Verify path exists
-    node = _get_at(ast, path)
-    if not isinstance(node, dict):
-        raise BlockPathError(f"Path '{path}' does not point to a node dict")
-
-    new_ast = copy.deepcopy(ast)
-    target = _get_at(new_ast, path)
-    for key, val in patches.items():
-        # Deep-merge for dict-valued patch keys (specifically `config`) so
-        # callers can patch a single subfield without having to re-emit the
-        # entire config. Otherwise patches={'config': {'system_prompt': X}}
-        # would wipe out subtype/model_tier/tools and break validation.
-        if (
-            key == "config"
-            and isinstance(val, dict)
-            and isinstance(target.get(key), dict)
-        ):
-            existing_config = target[key]
-            merged_config: dict[str, Any] = {**existing_config}
-            for cfg_key, cfg_val in val.items():
-                merged_config[cfg_key] = copy.deepcopy(cfg_val)
-            target[key] = merged_config
-        else:
-            target[key] = copy.deepcopy(val)
-    return new_ast
+    # Resolve the reference and apply (shared with edit_update_block).
+    return _apply_validated_patches(ast, path, patches)
 
 
 # Patch keys that callers are allowed to supply to update_pool. The framework
@@ -902,4 +917,215 @@ def set_model_tier(
     target = _get_at(new_ast, node_path)
     target.setdefault("config", {})
     target["config"]["model_tier"] = tier
+    return new_ast
+
+
+# ---------------------------------------------------------------------------
+# Edit-lane primitives (Plan: full-surface, level-aware editing)
+# ---------------------------------------------------------------------------
+
+
+def _apply_validated_patches(
+    ast: dict[str, Any], ref: str, patches: dict[str, Any]
+) -> dict[str, Any]:
+    """Resolve *ref* to an indexed path and apply *patches* to the node there.
+
+    Shallow-merges top-level node keys and DEEP-merges the ``config`` sub-dict
+    (so a caller can patch a single config subfield without wiping the rest).
+    Shared by :func:`update_block` and :func:`edit_update_block`; each validates
+    its allowed patch keys BEFORE calling this.
+    """
+    path = _resolve_node_ref(ast, ref)
+    node = _get_at(ast, path)
+    if not isinstance(node, dict):
+        raise BlockPathError(f"Path '{path}' does not point to a node dict")
+    new_ast = copy.deepcopy(ast)
+    target = _get_at(new_ast, path)
+    for key, val in patches.items():
+        if (
+            key == "config"
+            and isinstance(val, dict)
+            and isinstance(target.get(key), dict)
+        ):
+            merged_config: dict[str, Any] = {**target[key]}
+            for cfg_key, cfg_val in val.items():
+                merged_config[cfg_key] = copy.deepcopy(cfg_val)
+            target[key] = merged_config
+        else:
+            target[key] = copy.deepcopy(val)
+    return new_ast
+
+
+def edit_update_block(
+    ast: dict[str, Any],
+    path: str,
+    patches: dict[str, Any],
+    *,
+    allowed_config_fields: frozenset[str] | set[str] | None = None,
+) -> dict[str, Any]:
+    """EDIT-lane variant of :func:`update_block` with an explicit config
+    allow-list (decoupled from the global deterministic-blueprint guard).
+
+    The build-path ``update_block`` restricts config patches to prompt-only
+    fields when ``DESIGNER_DETERMINISTIC_BLUEPRINT`` is on. An explicit user
+    edit may legitimately touch ANY non-structural config field, so the edit
+    lane validates against *allowed_config_fields* (typically derived from the
+    EditScope), falling back to :data:`_EDIT_DEFAULT_CONFIG_PATCH_KEYS`, while
+    still ALWAYS rejecting :data:`_FORBIDDEN_CONFIG_PATCH_KEYS` (structural).
+    """
+    if "type" in patches:
+        raise BlockMutationError("'type' is not patchable")
+    if "children" in patches:
+        raise BlockMutationError(
+            "'children' is not patchable — use add/move/delete/clone instead"
+        )
+    forbidden = set(patches.keys()) - _ALLOWED_PATCH_KEYS
+    if forbidden:
+        raise BlockMutationError(f"Disallowed patch keys: {sorted(forbidden)}")
+
+    config_patch = patches.get("config")
+    if isinstance(config_patch, dict):
+        structural = set(config_patch.keys()) & _FORBIDDEN_CONFIG_PATCH_KEYS
+        if structural:
+            raise BlockMutationError(
+                f"Structural config keys cannot be edited as field patches: "
+                f"{sorted(structural)} (use clone/add/delete/move or a topology "
+                "rebuild)"
+            )
+        allow = (
+            frozenset(allowed_config_fields)
+            if allowed_config_fields is not None
+            else _EDIT_DEFAULT_CONFIG_PATCH_KEYS
+        )
+        unknown = set(config_patch.keys()) - allow
+        if unknown:
+            raise BlockMutationError(
+                f"Config keys not in the edit allow-list: {sorted(unknown)} "
+                f"(allowed: {sorted(allow)})"
+            )
+    return _apply_validated_patches(ast, path, patches)
+
+
+def _reassign_ids(node: dict[str, Any], used: set[str]) -> None:
+    """Assign a fresh unique id to every node in *node*'s subtree (in place),
+    recording each into *used* so a clone never collides with an existing id."""
+    if not isinstance(node, dict):
+        return
+    new_id = _new_id()
+    while new_id in used:
+        new_id = _new_id()
+    node["id"] = new_id
+    used.add(new_id)
+    for child in node.get("children") or []:
+        _reassign_ids(child, used)
+    config = node.get("config")
+    if isinstance(config, dict):
+        body = config.get("body")
+        if isinstance(body, dict):
+            _reassign_ids(body, used)
+        evaluator = config.get("evaluator")
+        if isinstance(evaluator, dict):
+            _reassign_ids(evaluator, used)
+
+
+def clone_block(
+    ast: dict[str, Any],
+    source_ref: str,
+    parent_ref: str | None = None,
+    overrides: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], str]:
+    """Deep-copy an existing node (and its subtree) as a new child with fresh
+    unique ids, then apply *overrides* (top-level keys shallow, ``config``
+    deep-merged).
+
+    The robust path for "add another candidate/lane" in best_of_n / parallel
+    topologies: the LLM names a sibling to copy instead of synthesizing a full
+    node config from scratch. *parent_ref* defaults to the source's parent
+    (clone-as-sibling). A top-level ``config.output_key`` is auto-suffixed with
+    the new id (unless overridden) to avoid a duplicate output key. Returns
+    ``(new_ast, new_id)``.
+    """
+    overrides = overrides or {}
+    source_path = _resolve_node_ref(ast, source_ref)
+    source = _get_at(ast, source_path)
+    if not isinstance(source, dict):
+        raise BlockPathError(
+            f"Path '{source_path}' does not point to a node dict"
+        )
+
+    if parent_ref is None:
+        if ".children." not in source_path:
+            raise BlockMutationError(
+                f"Cannot derive a parent for '{source_ref}' (not a list child); "
+                "pass parent_ref explicitly."
+            )
+        parent_path = source_path.rsplit(".children.", 1)[0]
+    else:
+        parent_path = _resolve_node_ref(ast, parent_ref)
+
+    parent = _get_at(ast, parent_path)
+    if not isinstance(parent, dict):
+        raise BlockPathError(
+            f"Path '{parent_path}' does not point to a node dict"
+        )
+    children = parent.get("children")
+    if not isinstance(children, list):
+        raise BlockMutationError(
+            f"Parent at '{parent_path}' has no 'children' list to clone into"
+        )
+
+    clone = copy.deepcopy(source)
+    used = set(_collect_id_index(ast).keys())
+    _reassign_ids(clone, used)
+
+    override_config = overrides.get("config")
+    for key, val in overrides.items():
+        if (
+            key == "config"
+            and isinstance(val, dict)
+            and isinstance(clone.get("config"), dict)
+        ):
+            clone["config"] = {**clone["config"], **copy.deepcopy(val)}
+        else:
+            clone[key] = copy.deepcopy(val)
+
+    new_id = str(clone.get("id") or "")
+    clone_cfg = clone.get("config")
+    if (
+        isinstance(clone_cfg, dict)
+        and isinstance(clone_cfg.get("output_key"), str)
+        and clone_cfg["output_key"]
+        and not (isinstance(override_config, dict) and "output_key" in override_config)
+    ):
+        clone_cfg["output_key"] = f"{clone_cfg['output_key']}_{new_id}"
+
+    new_children = list(children) + [clone]
+    new_ast = _set_at(ast, parent_path + ".children", new_children)
+    return new_ast, new_id
+
+
+def update_workflow_meta(
+    ast: dict[str, Any], patches: dict[str, Any]
+) -> dict[str, Any]:
+    """Patch top-level workflow metadata fields.
+
+    Allowed keys: :data:`_ALLOWED_WORKFLOW_META_KEYS`
+    (``name``/``description``/``run_as``/``required_inputs``/``output_keys``).
+    These are AST siblings of ``root`` — ``update_block`` only reaches the root
+    *node*, not these top-level keys. Identity/structural keys
+    (``id``/``version``/``root``/``tools``/``pools``) are rejected.
+    """
+    if not isinstance(patches, dict) or not patches:
+        raise BlockMutationError(
+            "update_workflow_meta requires a non-empty patches dict"
+        )
+    unknown = set(patches.keys()) - _ALLOWED_WORKFLOW_META_KEYS
+    if unknown:
+        raise BlockMutationError(
+            f"Disallowed workflow-meta keys: {sorted(unknown)} "
+            f"(allowed: {sorted(_ALLOWED_WORKFLOW_META_KEYS)})"
+        )
+    new_ast = copy.deepcopy(ast)
+    for key, val in patches.items():
+        new_ast[key] = copy.deepcopy(val)
     return new_ast

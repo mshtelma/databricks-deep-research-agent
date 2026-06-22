@@ -732,6 +732,7 @@ export function useStreamingQuery(
         fileIds,
         agentId,
         enablePlanReview,
+        turnIntent,
       } = submission;
 
       stopRequestedRef.current = false;
@@ -798,6 +799,7 @@ export function useStreamingQuery(
           fileIds: fileIds,
           agentId: agentId,
           enablePlanReview: enablePlanReview,
+          turnIntent: turnIntent,
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);

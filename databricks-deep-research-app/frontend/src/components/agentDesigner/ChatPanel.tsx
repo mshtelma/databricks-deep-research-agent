@@ -34,11 +34,15 @@ import {
   AlertCircle,
   AlertTriangle,
   Database,
+  Trash2,
 } from 'lucide-react';
 import { useChatSession } from '@/hooks/useChatSession';
 import { useDesignerSettings } from '@/hooks/useDesignerSettings';
 import { PendingMutationCard } from './PendingMutationCard';
+import { MutationConflictModal } from './MutationConflictModal';
+import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import type { ChatMessage, DesignerAsset } from '@/types/agentDesigner';
+import type { AST } from '@/types/ast';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -844,6 +848,47 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
   const [collapsed, setCollapsed] = React.useState<boolean>(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Fix #3 — surface the result of an apply instead of silently no-op-ing.
+  const [conflict, setConflict] = React.useState<{
+    mutationId: string;
+    localAst: AST;
+    serverAst: AST;
+  } | null>(null);
+  const [noOpNotice, setNoOpNotice] = React.useState<string | null>(null);
+  const [applyingId, setApplyingId] = React.useState<string | null>(null);
+
+  const handleApply = React.useCallback(
+    async (id: string): Promise<void> => {
+      if (applyingId) return; // prevent double-click races now that apply is async
+      setApplyingId(id);
+      setNoOpNotice(null);
+      try {
+        const result = await session.applyPendingMutation(id);
+        if (result?.kind === 'conflict') {
+          setConflict({ mutationId: id, localAst: result.localAst, serverAst: result.serverAst });
+        } else if (result?.kind === 'no_op') {
+          setNoOpNotice('That change is no longer available — ask again to regenerate it.');
+        }
+        // 'applied' → the hook already removed the card.
+      } finally {
+        setApplyingId(null);
+      }
+    },
+    [applyingId, session],
+  );
+
+  function resolveConflict(action: 'proposed' | 'canvas' | { merged: AST }): void {
+    if (!conflict) return;
+    if (action === 'proposed') {
+      useAgentEditorStore.getState().setAst(conflict.serverAst);
+    } else if (typeof action === 'object') {
+      useAgentEditorStore.getState().setAst(action.merged);
+    }
+    // In all three cases the pending card is resolved — remove it.
+    session.rejectPendingMutation(conflict.mutationId);
+    setConflict(null);
+  }
   const latestActivity = React.useMemo(
     () => latestDesignerActivityTitle(session.messages),
     [session.messages],
@@ -935,7 +980,13 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
               aria-label="Streaming"
               data-testid="streaming-indicator"
             />
-            <span className="max-w-[92px] truncate">{latestActivity ?? 'Working'}</span>
+            <span className="max-w-[92px] truncate">
+              {session.progress
+                ? session.progress.iteration && session.progress.total
+                  ? `${session.progress.label} ${session.progress.iteration}/${session.progress.total}`
+                  : session.progress.label
+                : (latestActivity ?? 'Working')}
+            </span>
           </span>
         )}
         <button
@@ -959,6 +1010,17 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
           }
         >
           <Wrench size={13} />
+        </button>
+        <button
+          type="button"
+          aria-label="Clear chat"
+          title="Clear chat"
+          data-testid="clear-chat-button"
+          disabled={session.messages.length === 0 && session.pendingMutations.length === 0}
+          onClick={() => session.clearChat()}
+          className="rounded p-1 text-db-gray-text hover:bg-db-oat-medium hover:text-db-navy-800 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          <Trash2 size={13} />
         </button>
         <button
           type="button"
@@ -997,16 +1059,54 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
             </div>
           )}
 
+          {noOpNotice && (
+            <div
+              role="status"
+              data-testid="apply-noop-notice"
+              className="flex items-start gap-2 rounded-db-md border border-db-gray-lines bg-db-oat-light px-3 py-2 text-[12px] text-db-gray-text"
+            >
+              <AlertTriangle size={13} className="mt-0.5 shrink-0 text-db-yellow-700" />
+              <span className="flex-1">{noOpNotice}</span>
+              <button
+                type="button"
+                onClick={() => setNoOpNotice(null)}
+                aria-label="Dismiss notice"
+                className="text-db-gray-text hover:text-db-navy-800"
+              >
+                ✕
+              </button>
+            </div>
+          )}
+
           {session.messages.map((msg, idx) => (
             <MessageRow key={idx} message={msg} messages={session.messages} />
           ))}
+
+          {/* Live progress while a long turn streams — keeps the panel from
+              looking frozen during the multi-minute Best-of-N architect/critic
+              calls. Transient: cleared when the turn ends (never persisted). */}
+          {session.isStreaming && session.progress && (
+            <div
+              className="flex items-center gap-2 text-[12px] text-db-blue-700"
+              data-testid="progress-indicator"
+              role="status"
+            >
+              <span className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-db-blue-700" />
+              <span className="min-w-0 truncate">
+                {session.progress.iteration && session.progress.total
+                  ? `${session.progress.label} · ${session.progress.iteration}/${session.progress.total}`
+                  : session.progress.label}
+              </span>
+            </div>
+          )}
 
           {session.pendingMutations.map((mutation) => (
             <PendingMutationCard
               key={mutation.id}
               mutation={mutation}
-              onApply={session.applyPendingMutation}
+              onApply={handleApply}
               onReject={session.rejectPendingMutation}
+              applyInFlight={applyingId === mutation.id}
               showAutoRepairDetails={settings.showAutoRepairDetails}
             />
           ))}
@@ -1069,6 +1169,18 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
           Mutations are previewed before they touch the workflow.
         </div>
       </div>
+
+      <MutationConflictModal
+        open={conflict !== null}
+        onOpenChange={(o) => {
+          if (!o) setConflict(null);
+        }}
+        localAst={conflict?.localAst}
+        serverAst={conflict?.serverAst}
+        onApplyProposed={() => resolveConflict('proposed')}
+        onKeepCanvas={() => resolveConflict('canvas')}
+        onSaveMerge={(merged) => resolveConflict({ merged })}
+      />
     </aside>
   );
 }

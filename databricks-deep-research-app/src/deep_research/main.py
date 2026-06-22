@@ -356,6 +356,28 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         APPROVAL_CLEANUP_INTERVAL_SECONDS,
     )
 
+    # Designer turn registry: periodic sweep of terminal, reader-less turns past
+    # their TTL. The registry is in-memory + per-process (single uvicorn worker on
+    # Apps) — see agent_designer/turn_registry.py. CancelledError (BaseException)
+    # is not caught by `except Exception`, so it exits the loop on shutdown.
+    DESIGNER_TURN_SWEEP_INTERVAL_SECONDS = 60
+
+    async def _designer_turn_sweep_loop() -> None:
+        from deep_research.agent_designer.turn_registry import designer_turn_registry
+
+        while True:
+            try:
+                await asyncio.sleep(DESIGNER_TURN_SWEEP_INTERVAL_SECONDS)
+                designer_turn_registry.sweep()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Designer turn sweep tick failed: %s", exc)
+
+    app.state.designer_turn_sweep_task = asyncio.create_task(_designer_turn_sweep_loop())
+    logger.info(
+        "Designer turn registry sweep started (runs every %d seconds)",
+        DESIGNER_TURN_SWEEP_INTERVAL_SECONDS,
+    )
+
     if settings.is_databricks_app and not settings.is_production:
         logger.warning(
             "DEBUG_ENDPOINTS_EXPOSED: Databricks App with APP_ENV=%s. "
@@ -388,6 +410,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         with contextlib.suppress(asyncio.CancelledError):
             await app.state.approval_cleanup_task
         logger.info("Approval broker cleanup task stopped")
+
+    # Cancel designer turn registry sweep task
+    if hasattr(app.state, "designer_turn_sweep_task") and app.state.designer_turn_sweep_task:
+        app.state.designer_turn_sweep_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await app.state.designer_turn_sweep_task
+        logger.info("Designer turn sweep task stopped")
 
     # Stop job manager first (cancels running jobs)
     if hasattr(app.state, "job_manager") and app.state.job_manager:

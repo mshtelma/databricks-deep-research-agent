@@ -274,8 +274,9 @@ deploy-unchecked:
 	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
 
 # Fast app-only redeploy (Python/yaml/vars, no DB migrate, no grants).
-# Set BUILD=1 to also rebuild frontend + requirements.txt.
-BUILD ?=
+# Rebuilds frontend + wheels by DEFAULT (the app runs from an installed wheel,
+# so a stale wheel ships stale code). Pass BUILD=0 for a config-only redeploy.
+BUILD ?= 1
 app-deploy: typecheck-framework
 	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
 

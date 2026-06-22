@@ -97,6 +97,10 @@ _KNOWN_SUBTYPES: frozenset[str] = frozenset(
         "synthesizer",
         "background",
         "custom",
+        # Router topology classifier: a builtin subtype whose enrich synthesizes a
+        # typed route discriminator. Must be preserved by the normalizer (never
+        # remapped to coordinator) so the conditional router resolves at runtime.
+        "router_classifier",
     }
 )
 

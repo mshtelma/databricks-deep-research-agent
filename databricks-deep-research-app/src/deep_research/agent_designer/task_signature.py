@@ -101,7 +101,14 @@ OutputAggregationKind = Literal[
     "per_concern_report",
 ]
 
-TopologyName = Literal["single_agent", "parallel_lanes", "plan_and_execute"]
+TopologyName = Literal[
+    "single_agent",
+    "parallel_lanes",
+    "plan_and_execute",
+    "best_of_n",
+    "iterative_refinement",
+    "router",
+]
 
 # Framework topology names. Kept as a tuple so ``select_topology`` and the
 # probe-side conditional checks can verify topology strings consistently.
@@ -109,7 +116,17 @@ TOPOLOGIES: tuple[TopologyName, ...] = (
     "single_agent",
     "parallel_lanes",
     "plan_and_execute",
+    "best_of_n",
+    "iterative_refinement",
+    "router",
 )
+
+# Coordination patterns. Kept as a type alias so it stays INLINED in
+# ``TaskSignature.tool_schema`` (no $defs/$ref) — the Databricks Claude tool API
+# rejects $ref in parameter schemas. ``iterative_refinement`` is the critic-gated
+# improvement loop (participants=1 self-critique / >=2 ensemble); ``router``
+# classifies the query and branches to one of N research sub-pipelines.
+CoordinationPattern = Literal["best_of_n", "iterative_refinement", "router"]
 
 
 def _collapse_optional_anyof(prop: dict[str, Any]) -> None:
@@ -249,6 +266,88 @@ class TaskSignature(BaseModel):
         ),
     )
 
+    # Phase 2 coordination axis. FLAT optional fields (NOT a nested model) so
+    # ``tool_schema`` stays $ref-free. When ``coordination_pattern`` is set it
+    # wins topology selection (``select_topology`` rule 0).
+    # ``coordination_candidate_count`` drives the best_of_n candidate fan-out and
+    # is ORTHOGONAL to ``independent_workstreams_count`` (which still drives the
+    # evidence-lane count). All optional so legacy payloads load unchanged.
+    coordination_pattern: CoordinationPattern | None = Field(
+        default=None,
+        description=(
+            "Explicit multi-candidate coordination pattern. Set 'best_of_n' ONLY "
+            "when the user asks to generate multiple candidate answers and pick "
+            "the best (e.g. 'generate N and choose the best', 'best of N'). Derive "
+            "from the request's structure, never from domain vocabulary. Omit "
+            "when no such pattern is requested."
+        ),
+    )
+    coordination_candidate_count: int | None = Field(
+        default=None,
+        ge=2,
+        le=10,
+        description=(
+            "For coordination_pattern='best_of_n': how many candidate reports to "
+            "generate (2-10). Map an explicit count in the request here (e.g. "
+            "'generate 8' -> 8). Omit when there is no best_of_n pattern; the "
+            "builder defaults it."
+        ),
+    )
+    coordination_judge_tier: Literal["analytical", "complex"] | None = Field(
+        default=None,
+        description=(
+            "For coordination_pattern='best_of_n': model tier for the judge that "
+            "validates candidates and selects the best. Defaults to 'complex' "
+            "when omitted."
+        ),
+    )
+
+    # iterative_refinement coordination axis. FLAT optional fields (NOT a nested
+    # model) so ``tool_schema`` stays $ref-free. ``refine_participants`` is the
+    # voices-per-round knob: 1 = single-voice self-critique; 2-4 = multi-model
+    # ensemble. ``proposer_families`` (optional) names model families the user
+    # explicitly requested — validated against the workspace catalog; unknown or
+    # absent => the builder uses the configured diversity pool / tier+framing.
+    refine_participants: int | None = Field(
+        default=None,
+        ge=1,
+        le=4,
+        description=(
+            "For coordination_pattern='iterative_refinement': distinct proposer "
+            "voices per round. 1 = single-voice self-critique; 2-4 = multi-model "
+            "ensemble. Omit to default (1)."
+        ),
+    )
+    refine_max_iterations: int | None = Field(
+        default=None,
+        ge=1,
+        le=6,
+        description=(
+            "For coordination_pattern='iterative_refinement': max critic-gated "
+            "improvement rounds (1-6). Omit to default (3)."
+        ),
+    )
+    proposer_families: list[str] | None = Field(
+        default=None,
+        description=(
+            "For coordination_pattern='iterative_refinement' (optional): EXTRACTIVE "
+            "model-family labels the user named for the proposers (verbatim, e.g. "
+            "from 'use Claude and Llama'). Validated against the workspace's "
+            "configured model families; unknown/absent => the builder falls back to "
+            "the configured diversity pool. Never invented from domain vocabulary."
+        ),
+    )
+    router_cases: list[str] | None = Field(
+        default=None,
+        description=(
+            "For coordination_pattern='router': 2-6 EXTRACTIVE route labels naming "
+            "the distinct query classes to branch on (verbatim from the request, "
+            "e.g. 'pricing questions', 'technical deep-dives'). The LAST case is the "
+            "default/fallback branch. Never invented from domain vocabulary; omit "
+            "when no routing is requested."
+        ),
+    )
+
     # Defaults applied ONLY by ``load_from_storage`` for legacy payloads
     # that predate the structural-axis extension. Kept as a class-level
     # constant so the migration surface is auditable from one place.
@@ -259,6 +358,13 @@ class TaskSignature(BaseModel):
         "output_aggregation_kind": "single_answer",
         "lane_descriptions": [],
         "axis_reasoning": None,
+        "coordination_pattern": None,
+        "coordination_candidate_count": None,
+        "coordination_judge_tier": None,
+        "refine_participants": None,
+        "refine_max_iterations": None,
+        "proposer_families": None,
+        "router_cases": None,
     }
 
     @classmethod
@@ -279,12 +385,18 @@ class TaskSignature(BaseModel):
         All other call sites should use :meth:`load_from_storage`.
         """
         sig = cls.model_validate(payload)
-        expected = max(sig.independent_workstreams_count, 1)
-        if len(sig.lane_descriptions) != expected:
-            raise ValueError(
-                f"lane_descriptions length {len(sig.lane_descriptions)} "
-                f"does not match max(independent_workstreams_count, 1)={expected}"
-            )
+        # Coordination patterns (e.g. best_of_n) use lane_descriptions for the
+        # EVIDENCE layer; the number of candidates is a separate axis
+        # (coordination_candidate_count). Skip the 1:1 lane-count cross-check for
+        # them — the builder resolves the evidence lane(s) from
+        # independent_workstreams_count (>=1) and fans candidates out separately.
+        if sig.coordination_pattern is None:
+            expected = max(sig.independent_workstreams_count, 1)
+            if len(sig.lane_descriptions) != expected:
+                raise ValueError(
+                    f"lane_descriptions length {len(sig.lane_descriptions)} "
+                    f"does not match max(independent_workstreams_count, 1)={expected}"
+                )
         return sig
 
     @classmethod
@@ -365,6 +477,7 @@ def _has_explicit_structural_axes(sig: TaskSignature) -> bool:
         or sig.iteration_required
         or sig.output_aggregation_kind != "single_answer"
         or bool(sig.lane_descriptions)
+        or sig.coordination_pattern is not None
     )
 
 
@@ -425,6 +538,11 @@ def select_topology(sig: TaskSignature) -> TopologyName:
     The fallback preserves behavior for existing serialized signatures
     and any test fixtures authored before the structural-axis extension.
     """
+    # Rule 0: an explicit coordination pattern wins outright — the user named a
+    # specific coordination shape, so it takes precedence over lane/iteration
+    # signals. Every CoordinationPattern member is also a TopologyName.
+    if sig.coordination_pattern is not None:
+        return sig.coordination_pattern
     if _has_explicit_structural_axes(sig):
         return _select_topology_from_structural_axes(sig)
     return _select_topology_from_retrieval_pattern(sig)

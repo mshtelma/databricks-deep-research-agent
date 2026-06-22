@@ -219,6 +219,15 @@ async def run_plan_execute(
             [list(group) for group in required_tool_kind_groups],
         )
 
+    # Read-path: seed prior-turn sources into the working pool at run start
+    # (bounded top-K, gated by the app's ``seed_prior_sources`` state flag).
+    # No-op unless the app set the flag — behaviour is otherwise unchanged.
+    from databricks_deep_research.workflow.runtime.prior_source_seed import (
+        seed_prior_sources_at_run_start,
+    )
+
+    seed_prior_sources_at_run_start(state, pools, logger=deps.logger)
+
     items: list[Any] = []
     for cycle in range(config.max_replan_cycles + 1):
         cycle_ctx.cycle = cycle

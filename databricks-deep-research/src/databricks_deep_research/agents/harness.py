@@ -68,6 +68,7 @@ from databricks_deep_research.events.types import (
 )
 from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient
+from databricks_deep_research.llm.roles import sanitize_history_messages
 from databricks_deep_research.memory import (
     CHAT_MEMORY_APPENDIX_STATE_KEY,
     inject_attached_context_block,
@@ -640,6 +641,7 @@ async def execute_agent(
                 structured_output=config.output_model,
                 event_sink=events.append,
                 node_id=node_id,
+                family=config.model_family,
             )
             content = response.content
             token_usage = merge_token_usage(token_usage, response.usage)
@@ -1327,9 +1329,15 @@ def _build_messages(agent_input: AgentInput) -> list[dict[str, Any]]:
         if section.rendered_text:
             parts.append(f"\n## {pool_name}\n{section.rendered_text}")
 
-    # Add conversation history if present
-    for msg in agent_input.conversation_history:
-        messages.append(msg)
+    # Add conversation history if present. History is sanitized here (the
+    # framework's contract is to emit OpenAI-format messages): roles are coerced
+    # to the OpenAI-valid set (so an app's "agent" role can't trigger a 400
+    # "Invalid role") AND cross-turn tool mechanics are flattened (tool/function
+    # messages dropped, assistant tool_calls stripped) so a replayed
+    # ``tool_calls`` key or orphan ``tool`` message can't trigger a 400
+    # "Extra inputs are not permitted" / tool-call-pairing error. In-turn tool
+    # calling is unaffected — it is appended later inside the ReAct loop.
+    messages.extend(sanitize_history_messages(agent_input.conversation_history))
 
     if parts:
         messages.append({"role": "user", "content": "\n\n".join(parts)})

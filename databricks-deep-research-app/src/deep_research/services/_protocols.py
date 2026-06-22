@@ -521,6 +521,21 @@ class IChatMemoryService(Protocol):
     `search_findings`.
     """
 
+    async def consolidate_from_pool(
+        self,
+        chat_id: UUID,
+        *,
+        claims: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        research_session_id: UUID | None,
+        source_step: int,
+        origin: str = "web",
+        coverage_topics: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Persist a finished turn's verified knowledge as durable findings
+        (and per-topic coverage rows, on the cached path)."""
+        ...
+
 
 @runtime_checkable
 class ISessionService(Protocol):

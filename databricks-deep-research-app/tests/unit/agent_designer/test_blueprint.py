@@ -529,6 +529,49 @@ def test_blueprint_dedup_key_url_for_web_only_signature_empty_assets() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Issue #2: no_assets-signature floor preserves corpus tools on edit.
+# ---------------------------------------------------------------------------
+
+
+def test_blueprint_no_assets_floor_builds_corpus_tools() -> None:
+    """The classifier emitted ``no_assets`` but corpus assets ARE present (e.g.
+    seeded from an edited workflow's existing tools). The deterministic floor
+    coerces to ``corpus_only`` and builds corpus tools — never silently
+    rebuilding web-only — and preserves the non-default warehouse."""
+    sig = _investment_signature()
+    sig["asset_signature"] = "no_assets"  # under-classification
+    assets = [
+        {"kind": "vector_index", "full_name": "cat.sch.idx"},
+        {
+            "kind": "delta_table",
+            "full_name": "cat.sch.tbl",
+            "metadata": {"warehouse_id": "wh-custom-123"},
+        },
+    ]
+    ast = build_blueprint(sig, "use best of n over my data", assets)
+    tool_kinds = {str(t.get("kind")) for t in (ast.get("tools") or [])}
+    assert "vector_search" in tool_kinds
+    assert any(k.startswith("table_") for k in tool_kinds)
+    # corpus_only forbids the silent web fallback that caused the bug.
+    assert "web_research" not in tool_kinds
+    table_tool = next(
+        t for t in ast["tools"] if str(t.get("kind")).startswith("table_")
+    )
+    assert table_tool["config"]["warehouse_id"] == "wh-custom-123"
+
+
+def test_blueprint_no_assets_empty_assets_unchanged_web_fallback() -> None:
+    """No regression: ``no_assets`` + NO assets still uses the web default path
+    (the floor only fires when corpus assets are actually present)."""
+    sig = _investment_signature()
+    sig["asset_signature"] = "no_assets"
+    ast = build_blueprint(sig, "research the open web", [])
+    tool_kinds = {str(t.get("kind")) for t in (ast.get("tools") or [])}
+    assert "web_research" in tool_kinds
+    assert "vector_search" not in tool_kinds
+
+
+# ---------------------------------------------------------------------------
 # Idempotency / determinism
 # ---------------------------------------------------------------------------
 

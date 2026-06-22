@@ -274,6 +274,10 @@ export function MessageInput({
 
   // Plan review toggle state
   const [enablePlanReview, setEnablePlanReview] = React.useState(false);
+  // Per-turn routing for custom-agent chats (auto-detect by default). Only sent
+  // when an agent is selected; the backend ignores it on first turns (no prior
+  // research) and for non-agent chats.
+  const [turnIntent, setTurnIntent] = React.useState<'auto' | 'chat' | 'research'>('auto');
 
   // Fetch discovered data sources for the source toggle UI
   const {
@@ -416,6 +420,7 @@ export function MessageInput({
         fileIds: readyFiles.length > 0 ? readyFiles.map(f => f.id) : undefined,
         agentId: selectedAgent?.id ?? undefined,
         enablePlanReview: enablePlanReview || undefined,
+        turnIntent: selectedAgent ? turnIntent : undefined,
       };
 
       onSubmit(submission);
@@ -596,6 +601,24 @@ export function MessageInput({
               />
             )}
           </div>
+        )}
+        {/* Follow-up routing (custom-agent chats): converse vs re-run */}
+        {queryMode === 'deep_research' && effectiveShowModeSelector && selectedAgent && (
+          <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
+            <span>Follow-up</span>
+            <select
+              data-testid="turn-intent-select"
+              value={turnIntent}
+              onChange={(e) => setTurnIntent(e.target.value as 'auto' | 'chat' | 'research')}
+              disabled={disabled || isLoading}
+              className="rounded border bg-background px-1 py-0.5 text-xs"
+              title="How to handle this message: auto-detect, chat about already-gathered data, or re-run the agent"
+            >
+              <option value="auto">Auto</option>
+              <option value="chat">Chat about results</option>
+              <option value="research">Re-run research</option>
+            </select>
+          </label>
         )}
         {/* Plan review toggle (deep_research mode) */}
         {queryMode === 'deep_research' && effectiveShowModeSelector && (

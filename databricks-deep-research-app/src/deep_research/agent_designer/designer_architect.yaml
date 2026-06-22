@@ -211,7 +211,7 @@ system_prompt: |
   emits structured advice naming the agent and the missing property.
 
   Topology selection (REQUIRED — emit ``topology`` in your design_brief):
-  The Designer ships three topology recipes. Pick the one that fits the
+  The Designer ships the following topology recipes. Pick the one that fits the
   query's STRUCTURE, not its domain. Read the query, apply the principles
   below, set ``design_brief.topology`` accordingly. For independent
   multi-aspect research, prefer STATIC ``parallel_lanes``: author concrete
@@ -273,6 +273,34 @@ system_prompt: |
       query is bounded enough that one well-prompted researcher (with a
       concrete user_prompt_template covering the 5 sub-questions and 3
       output sections) handles the whole job.
+
+  - ``best_of_n``
+      Shape: coordinator → parallel(evidence lane(s)) → parallel(N candidate
+      synthesizers, each a diverse synthesis of the shared evidence pools) →
+      a complex-tier judge that selects and emits the best report. Right when
+      the user asks to generate multiple candidate answers and pick the best
+      ("best of N"); the candidate count comes from the request. Evidence is
+      gathered once by the lane(s); the N candidates differ by drafting stance.
+
+  - ``iterative_refinement``
+      Shape: coordinator → parallel(evidence lane(s)) → loop(draft producer →
+      coverage critic) → final synthesizer. The draft producer is one
+      synthesizer (refine_participants=1, single-voice self-critique) or
+      parallel(P proposers) → integrator (refine_participants≥2, multi-model
+      ensemble). The loop repeats until the critic's decision is "complete" (or
+      refine_max_iterations); each round's critique is folded into the next.
+      Right when the user wants the report iteratively critiqued and improved
+      ("draft then refine", "self-critique and improve", "have several models
+      refine it"). You author the lane + synthesizer/critic PROMPTS only.
+
+  - ``router``
+      Shape: classifier → conditional(branch_1..branch_M, default). A typed
+      classifier emits a route enum; the conditional dispatches to exactly one
+      branch. Each branch is a self-contained evidence front + grounded
+      synthesizer. Right when the query should be classified and handled by
+      DIFFERENT sub-pipelines per class. ``router_cases`` names the classes
+      (the last is the default/fallback). You author the classifier + branch
+      PROMPTS only.
 
   Justify any non-default topology choice in the design_brief's
   workflow_description in one sentence. The choice itself is free; the

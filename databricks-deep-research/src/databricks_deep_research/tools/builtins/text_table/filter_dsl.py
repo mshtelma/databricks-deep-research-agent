@@ -32,6 +32,7 @@ aliased to ``FlatTableFilter`` so the Pydantic discriminator rejects them.
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from typing import Any, TypeAlias
 
 from pydantic import BaseModel, Field
@@ -243,8 +244,15 @@ def compile_filter(
     *,
     depth: int = 0,
     _leaf_budget: list[int] | None = None,
+    column_quoter: Callable[[str], str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Compile a filter tree into a parameterized SQL fragment.
+
+    ``column_quoter`` (when supplied) validates + quotes every column identifier.
+    The SQL execution path (``sql_compiler.compile_select``) always passes one
+    that checks the column against the table schema and backtick-quotes it,
+    closing the WHERE-key injection vector. ``None`` preserves the raw identifier
+    for direct DSL-level callers and unit tests.
 
     Parameters
     ----------
@@ -289,7 +297,12 @@ def compile_filter(
         parts: list[str] = []
         params: list[dict[str, Any]] = []
         for sub in sub_filters:
-            sql, p = compile_filter(sub, depth=depth + 1, _leaf_budget=_leaf_budget)
+            sql, p = compile_filter(
+                sub,
+                depth=depth + 1,
+                _leaf_budget=_leaf_budget,
+                column_quoter=column_quoter,
+            )
             parts.append(f"({sql})")
             params.extend(p)
         return " AND ".join(parts), params
@@ -301,29 +314,49 @@ def compile_filter(
         parts_or: list[str] = []
         params_or: list[dict[str, Any]] = []
         for sub in sub_filters_or:
-            sql, p = compile_filter(sub, depth=depth + 1, _leaf_budget=_leaf_budget)
+            sql, p = compile_filter(
+                sub,
+                depth=depth + 1,
+                _leaf_budget=_leaf_budget,
+                column_quoter=column_quoter,
+            )
             parts_or.append(f"({sql})")
             params_or.extend(p)
         return " OR ".join(parts_or), params_or
 
     if isinstance(filter_obj, NotFilter):
-        sql, p = compile_filter(filter_obj.not_, depth=depth + 1, _leaf_budget=_leaf_budget)
+        sql, p = compile_filter(
+            filter_obj.not_,
+            depth=depth + 1,
+            _leaf_budget=_leaf_budget,
+            column_quoter=column_quoter,
+        )
         return f"NOT ({sql})", p
 
     # FlatTableFilter (V1 leaf)
-    return _compile_flat(filter_obj)
+    return _compile_flat(filter_obj, column_quoter=column_quoter)
 
 
 def _compile_flat(
     f: FlatTableFilter,
+    column_quoter: Callable[[str], str] | None = None,
 ) -> tuple[str, list[dict[str, Any]]]:
     """Compile a V1 flat filter into parameterized SQL.
 
     All user-provided values are bound as parameters — never concatenated.
+    Column identifiers are passed through ``column_quoter`` when supplied; the
+    SQL execution path always supplies one that validates the column against the
+    table schema and backtick-quotes it (so a filter key like ``"x = 1 OR 1=1 --"``
+    is rejected, and a legitimate column with spaces / reserved words is quoted
+    rather than breaking the statement). ``column_quoter=None`` keeps the raw
+    identifier for direct DSL-level callers and unit tests.
     """
     parts: list[str] = []
     params: list[dict[str, Any]] = []
     _counter: list[int] = [0]
+
+    def _qcol(col: str) -> str:
+        return column_quoter(col) if column_quoter is not None else col
 
     def _next_name(col: str) -> str:
         _counter[0] += 1
@@ -333,23 +366,22 @@ def _compile_flat(
 
     def _add(col: str, op: str, value: Any, sql_type: str = "STRING") -> None:
         name = _next_name(col)
-        # Column name is NOT parameterized — it comes from the schema definition,
-        # not from user input at the filter value level.  In real usage callers
-        # should validate column names against an allowlist.
-        parts.append(f"{col} {op} :{name}")
+        # Value is always a bound parameter; the column identifier is validated +
+        # quoted by ``_qcol`` (never interpolated raw on the execution path).
+        parts.append(f"{_qcol(col)} {op} :{name}")
         params.append({"name": name, "value": str(value), "type": sql_type})
 
     if f.eq:
         for col, val in f.eq.items():
             if val is None:
-                parts.append(f"{col} IS NULL")
+                parts.append(f"{_qcol(col)} IS NULL")
             else:
                 _add(col, "=", val)
 
     if f.ne:
         for col, val in f.ne.items():
             if val is None:
-                parts.append(f"{col} IS NOT NULL")
+                parts.append(f"{_qcol(col)} IS NOT NULL")
             else:
                 _add(col, "<>", val)
 
@@ -371,11 +403,11 @@ def _compile_flat(
 
     if f.is_null:
         for col in f.is_null:
-            parts.append(f"{col} IS NULL")
+            parts.append(f"{_qcol(col)} IS NULL")
 
     if f.is_not_null:
         for col in f.is_not_null:
-            parts.append(f"{col} IS NOT NULL")
+            parts.append(f"{_qcol(col)} IS NOT NULL")
 
     if not parts:
         return "TRUE", []

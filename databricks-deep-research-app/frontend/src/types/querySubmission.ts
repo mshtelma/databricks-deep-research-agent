@@ -22,4 +22,12 @@ export interface QuerySubmission {
   fileIds?: string[];
   agentId?: string;
   enablePlanReview?: boolean;
+  /**
+   * Per-turn routing for custom-agent chats:
+   * - 'auto' (default): classify intent — answer a follow-up from gathered data, else re-run.
+   * - 'chat': answer from already-gathered data (no workflow re-run).
+   * - 'research': force a fresh agent run.
+   * Ignored unless an agent is selected and the chat has prior research.
+   */
+  turnIntent?: 'auto' | 'chat' | 'research';
 }

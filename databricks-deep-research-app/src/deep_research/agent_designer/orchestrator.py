@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any, Protocol
 
@@ -22,17 +23,27 @@ from deep_research.agent_designer import mutations
 from deep_research.agent_designer.assets import (
     DesignerAsset,
     asset_context_payload,
+    assets_from_ast,
     inspect_assets,
     normalize_assets,
     recommend_tools_for_assets,
     resolve_default_table_warehouse_id,
 )
+from deep_research.agent_designer.ast_introspection import config_of, iter_all_nodes
 from deep_research.agent_designer.ast_normalizer import normalize_ast
 from deep_research.agent_designer.designer_architect import (
     WorkflowDesignBrief,
     designer_system_prompt,
 )
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter, SourceKind
+from deep_research.agent_designer.edit_planning import (
+    EditScope,
+    apply_signature_delta,
+    carry_over_prompts,
+    classify_edit_scope,
+    edit_diff_guard,
+    stored_signature,
+)
 from deep_research.agent_designer.prompt_grounding import (
     ground_prompt,
     prompt_grounding_sse_result,
@@ -104,6 +115,9 @@ from .sse_events import (
     MutationProposedEvent as MutationProposedEvent,
 )
 from .sse_events import (
+    ProgressEvent as ProgressEvent,
+)
+from .sse_events import (
     ToolCallEvent as ToolCallEvent,
 )
 from .sse_events import (
@@ -137,10 +151,106 @@ logger = logging.getLogger(__name__)
 
 # ---- Limits ----
 
-MAX_MESSAGES = 20
-MAX_AST_BYTES = 100 * 1024
-MAX_PAYLOAD_BYTES = 200 * 1024
+# Frontend persists/resends up to designerChatPersistence.MAX_MESSAGES (60).
+# Keep this aligned so a normal session never exceeds the cap; any overflow is
+# trimmed oldest-first by _trim_conversation (graceful), NOT hard-rejected, so a
+# Designer chat can never wedge on a long/heavily-retried conversation.
+MAX_MESSAGES = 60
+# Byte caps are env-overridable (per-workspace ops headroom) with higher defaults
+# than the original 100 KB / 200 KB: a real corpus agent's AST is already ~71 KB
+# and an 8-lane Best-of-N edit grows it further. Kept *modest* on purpose — the
+# transcript becomes LLM context, so an oversized cap just defers failure to a
+# context-window overflow downstream. Mirrors the AGENT_DESIGNER_YAML_MAX_BYTES
+# env knob used by the import-yaml endpoint.
+MAX_AST_BYTES = int(os.environ.get("DESIGNER_CHAT_MAX_AST_BYTES", str(256 * 1024)))
+MAX_PAYLOAD_BYTES = int(
+    os.environ.get("DESIGNER_CHAT_MAX_PAYLOAD_BYTES", str(512 * 1024))
+)
 MAX_DESIGNER_TOOL_ROUNDS = 4
+
+
+def _payload_bytes(obj: Any) -> int:
+    """UTF-8 byte length of a JSON-encoded payload (size-limit accounting)."""
+    return len(json.dumps(obj, default=str).encode("utf-8"))
+
+
+def _drop_leading_orphan_tools(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Never let a trimmed window START on a ``tool`` message: its producing
+    ``assistant`` tool_calls turn was trimmed away, and the gateway rejects a
+    ``tool_call_id`` with no preceding ``tool_calls`` (the multi-turn-400 class).
+    Drop leading tool messages until the window opens on a user/assistant turn.
+    """
+    start = 0
+    while start < len(messages) and messages[start].get("role") == "tool":
+        start += 1
+    return messages[start:]
+
+
+# Keep the most recent messages verbatim (the current + immediately-prior turn);
+# older tool/assistant payloads are LLM context only (run_turn consumes ONLY
+# current_ast, never message history as a runtime input), so summarizing their
+# oversized content keeps the request under budget without losing actionable
+# detail. Threshold is per-message content bytes, not the whole payload.
+_WIRE_KEEP_RECENT = 6
+_TOOL_CONTENT_MAX_BYTES = 2 * 1024
+
+
+def _summarize_oversized_tool_results(
+    messages: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Shrink the ``content`` of OLD oversized ``tool``/``assistant`` messages
+    (beyond the recent window) to a compact placeholder. Preserves ``role``,
+    ``tool_call_id`` and ``tool_calls`` so the wire shape (and the gateway's
+    tool_call pairing) is untouched. Stale embedded AST snapshots / discovery
+    dumps carry no runtime information (the live AST is sent separately as
+    ``current_ast``). Idempotent — a summarized message is already small.
+    """
+    n = len(messages)
+    out: list[dict[str, Any]] = []
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if (
+            i < n - _WIRE_KEEP_RECENT
+            and msg.get("role") in ("tool", "assistant")
+            and isinstance(content, str)
+            and len(content.encode("utf-8")) > _TOOL_CONTENT_MAX_BYTES
+        ):
+            summarized = dict(msg)
+            summarized["content"] = (
+                f"[{msg.get('role')} content summarized: "
+                f"{len(content)} chars omitted to fit the request budget]"
+            )
+            out.append(summarized)
+        else:
+            out.append(msg)
+    return out
+
+
+def _trim_conversation(
+    messages: list[dict[str, Any]],
+    current_ast: dict[str, Any] | None = None,
+    assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """Bound the conversation to the size budgets by trimming the OLDEST
+    messages (graceful — never raises). Keep the last ``MAX_MESSAGES`` (the
+    current user turn is last, so always retained), repair the wire shape, then
+    drop further oldest messages until the whole payload fits
+    ``MAX_PAYLOAD_BYTES``. The AST is a separate hard cap (:meth:`check_limits`),
+    so only messages are trimmed here. Idempotent.
+    """
+    kept = (
+        list(messages)
+        if len(messages) <= MAX_MESSAGES
+        else list(messages[-MAX_MESSAGES:])
+    )
+    kept = _drop_leading_orphan_tools(kept)
+    kept = _summarize_oversized_tool_results(kept)
+    budget = MAX_PAYLOAD_BYTES - _payload_bytes(current_ast or {}) - _payload_bytes(assets or [])
+    while len(kept) > 1 and _payload_bytes(kept) > budget:
+        kept = _drop_leading_orphan_tools(kept[1:])
+    return kept
 
 _READ_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
     {
@@ -253,6 +363,101 @@ def _coerce_ast_snapshot(raw: Any) -> dict[str, Any] | None:
     return None
 
 
+def _safe_state_get(state: Any, key: str) -> Any:
+    """Read a state key, swallowing any backend error (best-effort)."""
+    try:
+        return state.get(key)
+    except Exception:  # pragma: no cover - defensive
+        return None
+
+
+def _coerce_jsonish(value: Any) -> dict[str, Any] | None:
+    """Coerce a state value (dict or JSON string) into a dict, else None."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            decoded = json.loads(value)
+        except (ValueError, TypeError):
+            return None
+        if isinstance(decoded, dict):
+            return decoded
+    return None
+
+
+# Generic, topology-agnostic fallback shown when a designer turn produced no
+# AST change. Best-of-N is named only as an *example* of a structural request,
+# never as a hardcoded special case — keep this generic across topologies.
+_GENERIC_NO_CHANGE_MESSAGE = (
+    "I wasn't able to change the workflow for this request. It may need a "
+    "structural change the designer can't express yet (for example a custom "
+    "topology such as Best-of-N). Try rephrasing the request, or describe the "
+    "change in terms of the existing building blocks (parallel lanes, "
+    "plan-and-execute, or a single agent)."
+)
+
+
+def _terminal_feedback_message(state: Any) -> str:
+    """Explain, in user-facing prose, why a designer turn produced no mutation.
+
+    Pure and defensive: every source may be absent, a dict, or a JSON string.
+    Priority — the architect's signature-revision reason, then the critic's
+    rejection directives, then the structural-gate failures, then a generic
+    capability message. The designer agents suppress their own prose
+    (``suppress_planning_final_output``), so this is the only place a no-op turn
+    can surface an explanation to the user.
+    """
+    revision = _coerce_jsonish(_safe_state_get(state, "revision_request"))
+    if revision:
+        reason = revision.get("reason") or revision.get("message")
+        if isinstance(reason, str) and reason.strip():
+            fields = revision.get("fields_to_reconsider") or revision.get("fields")
+            suffix = (
+                f" (revisiting: {', '.join(str(f) for f in fields)})"
+                if isinstance(fields, list) and fields
+                else ""
+            )
+            return (
+                "I couldn't apply this change automatically — the designer needs "
+                f"to reconsider the workflow structure: {reason.strip()}{suffix}"
+            )
+
+    verdict = _coerce_jsonish(_safe_state_get(state, "critic_verdict"))
+    if verdict:
+        directives = verdict.get("directives")
+        issues = (
+            [
+                str(d.get("issue")).strip()
+                for d in directives
+                if isinstance(d, dict) and str(d.get("issue") or "").strip()
+            ]
+            if isinstance(directives, list)
+            else []
+        )
+        if issues:
+            return (
+                "I reviewed the change but did not apply it — unresolved issues: "
+                f"{'; '.join(issues[:3])}."
+            )
+
+    gate = _coerce_jsonish(_safe_state_get(state, "gate_result"))
+    if gate and str(gate.get("status") or "").lower() == "fail":
+        failures = gate.get("failures")
+        items = (
+            [str(f.get("message") or f).strip() for f in failures]
+            if isinstance(failures, list)
+            else []
+        )
+        items = [i for i in items if i]
+        if items:
+            return (
+                "The proposed workflow didn't pass structural checks, so no "
+                f"change was applied: {'; '.join(items[:3])}."
+            )
+
+    return _GENERIC_NO_CHANGE_MESSAGE
+
+
 def _normalize_model_tiers(ast: dict[str, Any]) -> dict[str, Any]:
     """Walk the AST and replace any unknown ``model_tier`` value with a valid
     fallback. Lane researchers / coordinator default to analytical;
@@ -286,6 +491,27 @@ def _normalize_model_tiers(ast: dict[str, Any]) -> dict[str, Any]:
     root = normalized.get("root") or normalized
     walk(root)
     return normalized
+
+
+def _progress_event_for(event: Any) -> ProgressEvent | None:
+    """Map a framework stream event to a transient UI ProgressEvent, or None.
+
+    Only AGENT node starts (the slow Opus/GPT-5 steps that make the wire go
+    silent for ~50s) and architect-critic loop iterations are surfaced — the
+    many fast tool/gate/extract nodes are skipped to stay low-noise. Filtering
+    by node *type* (not an id/topology allowlist) keeps this generic across
+    every designer topology; the framework's own ``label`` is used verbatim.
+    """
+    evt_type = getattr(event, "event_type", None)
+    if evt_type == "node_started" and getattr(event, "node_type", "") == "agent":
+        return ProgressEvent(label=str(getattr(event, "label", "") or "Working"))
+    if evt_type == "loop_iteration":
+        return ProgressEvent(
+            label="Refining",
+            iteration=int(getattr(event, "iteration", 0) or 0),
+            total=int(getattr(event, "max_iterations", 0) or 0),
+        )
+    return None
 
 
 def _mutation_event_for_ast_change(
@@ -629,6 +855,84 @@ def _patch_node_output_models(
 # ---- Orchestrator ----
 
 
+def _edit_stream_error_message(exc: Exception, *, lane: str) -> str:
+    """Friendly, actionable failure text for a designer stream error.
+
+    The edit lane previously surfaced the raw gateway exception (a wall of 400
+    JSON) which reads to the user as "nothing happened, no error". For the known
+    oversized / tool-transcript failure classes we explain it plainly and state
+    the workflow was left unchanged; anything else gets a clean generic message.
+    The build lane keeps the original (it has different recovery wording)."""
+    detail = str(exc).lower()
+    oversized = any(
+        token in detail
+        for token in (
+            "thought_signature",
+            "context_length",
+            "context window",
+            "maximum context",
+            "too many tokens",
+            "max_tokens",
+            "badrequest",
+            "bad_request",
+            " 400",
+            "code: 400",
+        )
+    )
+    if lane == "edit" and oversized:
+        return (
+            "I couldn't apply that edit in a single pass — it touched too many "
+            "nodes at once for the model to handle reliably. Your workflow was "
+            "left unchanged. Try a narrower request (one tool, or a few nodes at "
+            "a time) and I'll apply it cleanly."
+        )
+    if lane == "edit":
+        return (
+            "I hit an unexpected problem applying that edit, so I left the "
+            "workflow unchanged. Please try rephrasing the change."
+        )
+    return (
+        "The designer hit an unexpected error and couldn't update the "
+        f"workflow: {exc}"
+    )
+
+
+def _is_meaningful_ast(current_ast: dict[str, Any] | None) -> bool:
+    """True when *current_ast* is a real existing workflow (an EDIT context),
+    not an empty/new canvas. Mirrors the frontend ``isWorkflowEmpty`` check: a
+    root node with at least one child, OR a lone agent root (single_agent)."""
+    if not isinstance(current_ast, dict):
+        return False
+    root = current_ast.get("root")
+    if not isinstance(root, dict) or not root.get("type"):
+        return False
+    if root.get("children"):
+        return True
+    return root.get("type") == "agent"
+
+
+def _compact_ast_summary(current_ast: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Compact, token-light projection of the workflow for the edit-scope
+    classifier and the edit agent: one row per node with id/type/subtype/label
+    and bound tool names. Never includes prompts (kept small + prompt-safe)."""
+    out: list[dict[str, Any]] = []
+    root = (current_ast or {}).get("root") if isinstance(current_ast, dict) else None
+    if not isinstance(root, dict):
+        return out
+    for node in iter_all_nodes(root):
+        cfg = config_of(node)
+        row: dict[str, Any] = {"id": node.get("id"), "type": node.get("type")}
+        if cfg.get("subtype"):
+            row["subtype"] = cfg.get("subtype")
+        if node.get("label"):
+            row["label"] = node.get("label")
+        tools = cfg.get("tools")
+        if isinstance(tools, list) and tools:
+            row["tools"] = tools
+        out.append(row)
+    return out
+
+
 class DesignerChatOrchestrator:
     """Dispatches LLM tool-calls to mutation primitives and yields SSE events.
 
@@ -675,7 +979,9 @@ class DesignerChatOrchestrator:
             CriticVerdict,
         )
 
-        # Enforce limits BEFORE the workflow starts (cheap and fast)
+        # Bound the conversation (graceful oldest-first trim) so a long or
+        # heavily-retried session can never wedge, THEN enforce the byte caps.
+        messages = self.prepare_messages(messages, current_ast, assets)
         self._check_limits(messages, current_ast, assets)
         # The client owns session persistence; the orchestrator stays stateless.
         _ = session_id
@@ -712,39 +1018,9 @@ class DesignerChatOrchestrator:
                 }
             )
 
-        # 1. Resolve workflow path (allow override via env var for A/B testing).
-        wf_path_env = os.environ.get("DESIGNER_WORKFLOW_YAML")
-        if wf_path_env:
-            wf_path = Path(wf_path_env)
-        else:
-            wf_path = Path(__file__).parent / "designer_workflow.yaml"
-
-        # 2. Load the workflow and programmatically patch output_model classes
-        #    on the architect and critic agent nodes (AgentNodeConfig.output_model
-        #    is a free field on the node config dict, validated by the executor
-        #    when it constructs AgentNodeConfig from node.config at runtime).
-        try:
-            workflow_def = load_workflow(str(wf_path))
-        except Exception as exc:
-            logger.exception("DESIGNER_WORKFLOW_LOAD_FAILED")
-            yield ErrorEvent(message=f"Designer workflow load failed: {exc}")
-            yield DoneEvent()
-            return
-
-        # NOTE: architect intentionally has NO output_model patch — it's a
-        # tool-using agent (ReAct loop), and the framework's structured-output
-        # path is bypassed when tools are present (Codex iter-2 fix #2). The
-        # architect's system prompt instructs it to end its turn with a fenced
-        # ```json ... ``` block; parse_architect_ast (next tool node) extracts
-        # the AST from that final message via regex. The critic IS patched
-        # because it's a no-tools agent and structured output enforces the
-        # CriticVerdict shape we need for the loop's stop condition.
-        _patch_node_output_models(
-            workflow_def.root,
-            {
-                "critic": CriticVerdict,
-            },
-        )
+        # Workflow selection + load happens AFTER grounding + routing (see the
+        # "Route" block below): the resolved lane (build vs edit) determines
+        # which YAML to load, so it cannot run before we know the route.
 
         # 3. Build the seeded WorkflowState. The most recent user message
         #    drives the architect; prior turns ride along as
@@ -755,7 +1031,14 @@ class DesignerChatOrchestrator:
             user_intent = _message_content_to_text(last.get("content"))
 
         prior_messages = messages[:-1] if len(messages) > 1 else []
-        normalized_request_assets = normalize_assets(assets or [])
+        # Issue #2: on an EDIT, seed the existing workflow's corpus tools back
+        # into grounding so the classifier doesn't see ``no_assets`` and rebuild
+        # web-only — preserving vector/table/genie/knowledge tools by default.
+        # UI-selected request assets take precedence over AST-derived ones
+        # (normalize_assets dedups by (kind, identity), first-wins).
+        normalized_request_assets = normalize_assets(
+            [*normalize_assets(assets or []), *assets_from_ast(current_ast)]
+        )
         prompt_grounding = await ground_prompt(
             intent=user_intent,
             existing_assets=normalized_request_assets,
@@ -804,6 +1087,82 @@ class DesignerChatOrchestrator:
             resolved_tool_contract
         )
 
+        # ---- Route: build (new/empty AST) vs edit (surgical | topology | rebuild) ----
+        # The structure-deciding build stages are blind to the existing workflow,
+        # so an EDIT must be classified HERE and dispatched to the right lane
+        # rather than silently rebuilt (the root cause this plan fixes). Gated by
+        # DESIGNER_EDIT_LANE (default-on; set to 0/false/off to force legacy build).
+        edit_lane_enabled = os.environ.get(
+            "DESIGNER_EDIT_LANE", "1"
+        ).strip().lower() not in {"0", "false", "no", "off", ""}
+        edit_scope: EditScope | None = None
+        if not edit_lane_enabled or not _is_meaningful_ast(current_ast):
+            route = "build"
+        else:
+            ast_summary = _compact_ast_summary(current_ast)
+            edit_scope = await classify_edit_scope(
+                llm=semantic_llm, intent=user_intent, ast_summary=ast_summary
+            )
+            route = edit_scope.route
+        logger.info(
+            "DESIGNER_TURN_ROUTE route=%s levels=%s targets=%s",
+            route,
+            (edit_scope.levels if edit_scope else []),
+            (edit_scope.target_node_ids if edit_scope else []),
+        )
+
+        if route == "unsupported":
+            reason = (edit_scope.unsupported_reason if edit_scope else "") or ""
+            yield MessageEvent(
+                content=(
+                    "I couldn't apply this as a workflow edit"
+                    + (f": {reason.strip()}" if reason.strip() else ".")
+                    + " Try describing the change in terms of the existing nodes, "
+                    "tools, or prompts — or ask me to rebuild the workflow."
+                )
+            )
+            yield DoneEvent()
+            return
+
+        if route == "topology":
+            async for _topo_ev in self._run_topology_edit(
+                current_ast=current_ast or {},
+                user_intent=user_intent,
+                edit_scope=edit_scope,
+                normalized_assets=normalized_request_assets,
+                resolved_tool_contract=resolved_tool_contract,
+            ):
+                yield _topo_ev
+            return
+
+        # Build/rebuild → the deterministic-blueprint build workflow (UNCHANGED).
+        # Surgical edit → the edit lane (mutation tools seeded with current_ast).
+        lane = "edit" if route == "surgical" else "build"
+        if lane == "edit":
+            _wf_env = os.environ.get("DESIGNER_EDIT_WORKFLOW_YAML")
+            wf_path = (
+                Path(_wf_env)
+                if _wf_env
+                else Path(__file__).parent / "designer_edit_workflow.yaml"
+            )
+        else:
+            _wf_env = os.environ.get("DESIGNER_WORKFLOW_YAML")
+            wf_path = (
+                Path(_wf_env)
+                if _wf_env
+                else Path(__file__).parent / "designer_workflow.yaml"
+            )
+        try:
+            workflow_def = load_workflow(str(wf_path))
+        except Exception as exc:
+            logger.exception("DESIGNER_WORKFLOW_LOAD_FAILED")
+            yield ErrorEvent(message=f"Designer workflow load failed: {exc}")
+            yield DoneEvent()
+            return
+        # Patch the critic's structured-output model. The edit lane has no
+        # "critic" node, so this is a no-op there (the walker matches by name).
+        _patch_node_output_models(workflow_def.root, {"critic": CriticVerdict})
+
         state = WorkflowState(
             query=user_intent,
             conversation_history=prior_messages,
@@ -831,6 +1190,17 @@ class DesignerChatOrchestrator:
             "prompt_grounding_diagnostics",
             prompt_grounding_summary.get("diagnostics", []),
         )
+        if lane == "edit":
+            # Edit lane renders {edit_scope} + {current_ast_summary} in the
+            # edit_agent's user prompt (build-lane keys above are ignored by it).
+            state.append(
+                "init",
+                "edit_scope",
+                edit_scope.model_dump(mode="json") if edit_scope else {},
+            )
+            state.append(
+                "init", "current_ast_summary", _compact_ast_summary(current_ast)
+            )
         yield ToolResultEvent(
             tool_call_id="prompt_grounding:init",
             tool_name="prompt_grounding",
@@ -880,6 +1250,8 @@ class DesignerChatOrchestrator:
             build_app_workflow_runner,
         )
         from deep_research.agent_designer.framework_tools import (
+            pop_compact_tool_results,
+            push_compact_tool_results,
             register_designer_tools,
         )
 
@@ -892,6 +1264,10 @@ class DesignerChatOrchestrator:
         # doesn't have to echo the AST as an argument anymore, saving ~5K
         # output tokens/call and avoiding mid-call truncation.
         _ast_cache: list[Any] = [None]  # mutable single-cell holder
+        if lane == "edit":
+            # Seed the cache with the EXISTING workflow so the first mutation
+            # tool builds on current_ast (a minimal delta), not an empty AST.
+            _ast_cache[0] = current_ast or {}
 
         def _state_ast_getter() -> Any:
             if _ast_cache[0] is not None:
@@ -922,6 +1298,13 @@ class DesignerChatOrchestrator:
             fingerprint_getter=lambda: state.get("blueprint_fingerprint"),
             current_ast_summary_setter=lambda value: state.append(
                 "parse_architect_ast", "current_ast_summary", value
+            ),
+            # Codex review #5 — surface the parse tool's REAL normalization
+            # fixes (it computed them against the actual pre-normalized AST /
+            # merged blueprint) instead of the orchestrator re-deriving them
+            # from architect_message (a node_patches doc in patch mode).
+            normalization_fixes_setter=lambda value: state.append(
+                "parse_architect_ast", "designer_normalization_fixes", value
             ),
             # Fix (live run) — EmitTaskSignatureTool now writes its
             # validated payload directly to state.task_signature via this
@@ -989,7 +1372,17 @@ class DesignerChatOrchestrator:
 
         last_ast_seen: dict[str, Any] = current_ast or {}
         yielded_done = False
+        emitted_mutation = False
+        error_occurred = False
 
+        # EDIT lane: scope mutation tool RESULTS to a bounded summary for the
+        # duration of the ReAct stream, so a multi-node edit (e.g. "add a tool
+        # to all candidates") can't balloon the transcript by echoing the full
+        # AST per mutation (the 140K-token blowup that fell back to a gateway
+        # 400). Build lane leaves it untouched. Reset in the finally below.
+        _compact_token = (
+            push_compact_tool_results(True) if lane == "edit" else None
+        )
         try:
             async for event in runner.stream(
                 workflow_def,
@@ -1011,7 +1404,20 @@ class DesignerChatOrchestrator:
                         args=getattr(event, "arguments", {}) or {},
                     )
 
-                elif evt_type == "tool_result":
+                elif evt_type in ("node_started", "loop_iteration"):
+                    # Live progress so the chat shows activity (instead of a
+                    # frozen spinner) during the long Opus/GPT-5 agent calls;
+                    # also keeps the wire warm at node boundaries. Transient —
+                    # never persisted to the transcript. See _progress_event_for.
+                    progress_event = _progress_event_for(event)
+                    if progress_event is not None:
+                        yield progress_event
+
+                elif evt_type == "tool_result" and lane != "edit":
+                    # Build lane only. The edit lane SUPPRESSES intermediate
+                    # mutation events (each carries a full old+new AST and the
+                    # turn-registry buffers every event) and emits ONE net delta
+                    # at finalize (Codex H7). Build-lane behavior is unchanged.
                     # The framework ReAct loop returns an agent's tool events
                     # after the agent finishes, while designer mutation tools
                     # update the conversation-local AST cache during execution.
@@ -1031,8 +1437,10 @@ class DesignerChatOrchestrator:
                         if mutation_event is not None:
                             yield mutation_event
                             last_ast_seen = mutation_event.new_ast
+                            emitted_mutation = True
 
-                elif evt_type == "node_completed":
+                elif evt_type == "node_completed" and lane != "edit":
+                    # Build lane only (edit lane finalizes once — see above).
                     node_id = getattr(event, "node_id", "")
                     # After each node, surface a MutationProposedEvent if the
                     # AST has changed.
@@ -1073,15 +1481,24 @@ class DesignerChatOrchestrator:
                     else:
                         raw = _ast_cache[0] if _ast_cache[0] is not None else state_raw
                     if raw is not None:
-                        # Layer 2 fix surfacing: re-derive the normalization
-                        # fixes from the architect's raw message so the UI
-                        # can render exactly what was auto-repaired. The
-                        # parse_architect_ast tool already applied them
-                        # in-place; running normalize_ast on the un-normalized
-                        # source AST captures the same deterministic fix list.
-                        fixes_payload = _derive_normalization_fixes(
-                            state, node_id
-                        )
+                        # Layer 2 fix surfacing: prefer the REAL fixes the
+                        # parse_architect_ast tool published to state (computed
+                        # against the actual pre-normalized AST / merged
+                        # blueprint — correct in patch mode where the raw
+                        # architect_message is a node_patches doc). Fall back to
+                        # re-deriving from architect_message only when the tool
+                        # did not publish (older runs / non-parse nodes).
+                        fixes_payload: list[dict[str, Any]] | None = None
+                        try:
+                            published = state.get("designer_normalization_fixes")
+                        except Exception:
+                            published = None
+                        if isinstance(published, list):
+                            fixes_payload = published
+                        if fixes_payload is None:
+                            fixes_payload = _derive_normalization_fixes(
+                                state, node_id
+                            )
                         mutation_event = _mutation_event_for_ast_change(
                             tool_name="propose_workflow",
                             tool_call_id=f"node_{node_id or 'unknown'}",
@@ -1092,16 +1509,214 @@ class DesignerChatOrchestrator:
                         if mutation_event is not None:
                             yield mutation_event
                             last_ast_seen = mutation_event.new_ast
+                            emitted_mutation = True
 
                 elif evt_type == "workflow_completed":
+                    if lane == "edit":
+                        # Emit the single net delta (+ guard) for the whole turn.
+                        async for _fin in self._finalize_edit(
+                            current_ast=current_ast or {},
+                            final_ast=_ast_cache[0],
+                            edit_scope=edit_scope,
+                        ):
+                            yield _fin
+                    elif not emitted_mutation:
+                        # Never-silent invariant (build lane): a turn that
+                        # proposed no mutation must still tell the user why —
+                        # the mutation card is the only surface otherwise.
+                        logger.info(
+                            "DESIGNER_TURN_NO_MUTATION reason=completed_without_ast_change"
+                        )
+                        yield MessageEvent(content=_terminal_feedback_message(state))
                     yield DoneEvent()
                     yielded_done = True
         except Exception as exc:
             logger.exception("DESIGNER_WORKFLOW_STREAM_FAILED")
-            yield ErrorEvent(message=str(exc))
+            error_occurred = True
+            yield ErrorEvent(message=_edit_stream_error_message(exc, lane=lane))
+        finally:
+            if _compact_token is not None:
+                pop_compact_tool_results(_compact_token)
 
         if not yielded_done:
+            # Stream ended without an explicit workflow_completed (early stop or
+            # error). Guarantee a visible signal before closing the channel.
+            if lane == "edit" and not error_occurred:
+                async for _fin in self._finalize_edit(
+                    current_ast=current_ast or {},
+                    final_ast=_ast_cache[0],
+                    edit_scope=edit_scope,
+                ):
+                    yield _fin
+            elif not emitted_mutation and not error_occurred:
+                logger.info(
+                    "DESIGNER_TURN_NO_MUTATION reason=stream_ended_without_completion"
+                )
+                yield MessageEvent(content=_terminal_feedback_message(state))
             yield DoneEvent()
+
+    async def _finalize_edit(
+        self,
+        *,
+        current_ast: dict[str, Any],
+        final_ast: Any,
+        edit_scope: EditScope | None,
+    ) -> AsyncGenerator[DesignerSSEEvent, None]:
+        """Emit the single net result of a surgical edit (Codex H6/H7): one
+        ``MutationProposedEvent`` for the cumulative delta plus a human-readable
+        summary (with any minimality-guard warnings), OR a no-change message.
+        Intermediate per-tool mutation events are suppressed in the stream loop,
+        so this is the turn's only proposal. Diff baselines are normalized so a
+        normalization-only difference never reads as a spurious change.
+        """
+        baseline, _ = normalize_ast(current_ast or {})
+        event = _mutation_event_for_ast_change(
+            tool_name="edit",
+            tool_call_id="edit_finalize",
+            raw_ast=final_ast,
+            last_ast_seen=baseline,
+            normalization_fixes=[],
+        )
+        if event is None:
+            logger.info("DESIGNER_EDIT_RESULT result=no_change")
+            summary = (
+                edit_scope.change_summary
+                if edit_scope and edit_scope.change_summary
+                else ""
+            )
+            yield MessageEvent(
+                content=(
+                    "I didn't change the workflow"
+                    + (f" — {summary}" if summary else " for this request.")
+                    + " If you expected a change, name the node, tool, or property "
+                    "to edit and I'll try again."
+                )
+            )
+            return
+        allow_list = (
+            edit_scope.to_allow_list()
+            if edit_scope is not None
+            else EditScope(route="surgical").to_allow_list()
+        )
+        guard = edit_diff_guard(baseline, event.new_ast, allow_list)
+        logger.info(
+            "DESIGNER_EDIT_RESULT changed=%s added=%s removed=%s guard_ok=%s",
+            guard.changed_node_ids,
+            guard.added_node_ids,
+            guard.removed_node_ids,
+            guard.ok,
+        )
+        summary = (
+            edit_scope.change_summary
+            if edit_scope and edit_scope.change_summary
+            else "Updated the workflow."
+        )
+        if not guard.ok:
+            summary += (
+                "\n\n⚠️ This proposal also changed parts of the workflow that "
+                "weren't part of the request: " + "; ".join(guard.violations)
+            )
+        yield MessageEvent(content=summary)
+        yield event
+
+    async def _run_topology_edit(
+        self,
+        *,
+        current_ast: dict[str, Any],
+        user_intent: str,
+        edit_scope: EditScope | None,
+        normalized_assets: list[DesignerAsset],
+        resolved_tool_contract: Any,
+    ) -> AsyncGenerator[DesignerSSEEvent, None]:
+        """Topology SWITCH: rebuild deterministically from the PERSISTED
+        signature + the requested delta, carrying prompts over best-effort.
+
+        Pure (no LLM architect pass): ``build_blueprint`` + ``carry_over_prompts``
+        + prompt-merge. Degrades to a never-silent message for legacy ASTs with
+        no persisted signature (a guessed rebuild would be lossy).
+        """
+        from deep_research.agent_designer.blueprint import build_blueprint
+
+        yield ProgressEvent(label="Restructuring workflow")
+        sig = stored_signature(current_ast)
+        if sig is None:
+            yield MessageEvent(
+                content=(
+                    "This workflow was built before structured editing, so I "
+                    "can't change its topology without rebuilding it from scratch "
+                    "(which could lose customizations). Ask me to rebuild it, or "
+                    "make the change as smaller edits."
+                )
+            )
+            yield DoneEvent()
+            return
+        new_sig = apply_signature_delta(sig, edit_scope.delta if edit_scope else {})
+        assets_payload = [a.model_dump() for a in (normalized_assets or [])] or None
+        try:
+            blueprint = build_blueprint(
+                new_sig,
+                user_intent,
+                assets=assets_payload,
+                tool_contract=resolved_tool_contract,
+            )
+        except Exception as exc:  # noqa: BLE001 - surface, never silent
+            logger.exception("DESIGNER_TOPOLOGY_BUILD_FAILED")
+            yield MessageEvent(
+                content=(
+                    "I couldn't restructure the workflow for that request "
+                    f"({exc}). Try rephrasing, or ask me to rebuild it."
+                )
+            )
+            yield DoneEvent()
+            return
+        patches, regenerated = carry_over_prompts(current_ast, blueprint)
+        for node_id, patch in patches.items():
+            try:
+                blueprint = mutations.update_block(
+                    blueprint, node_id, {"config": patch}
+                )
+            except (mutations.BlockPathError, mutations.BlockMutationError):
+                continue  # unmappable role → keep the blueprint's default prompt
+        event = _mutation_event_for_ast_change(
+            tool_name="topology_edit",
+            tool_call_id="edit_topology",
+            raw_ast=blueprint,
+            last_ast_seen=normalize_ast(current_ast or {})[0],
+            normalization_fixes=[],
+        )
+        summary = (
+            edit_scope.change_summary
+            if edit_scope and edit_scope.change_summary
+            else "Restructured the workflow."
+        )
+        if regenerated:
+            summary += (
+                f"\n\n⚠️ I kept your prompts where roles matched; {len(regenerated)} "
+                f"new role(s) use default prompts ({', '.join(regenerated[:6])}) and "
+                "tool bindings were not carried over — review and refine them."
+            )
+        logger.info("DESIGNER_TOPOLOGY_RESULT regenerated=%s", regenerated)
+        yield MessageEvent(content=summary)
+        if event is not None:
+            yield event
+        else:
+            yield MessageEvent(
+                content="The requested change produced no net difference."
+            )
+        yield DoneEvent()
+
+    def prepare_messages(
+        self,
+        messages: list[dict[str, Any]],
+        current_ast: dict[str, Any] | None = None,
+        assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Pre-flight: bound the conversation to the size budgets via graceful
+        oldest-first trimming (never raises). Call in the route handler BEFORE
+        :meth:`check_limits` and :meth:`run_turn` so both see the same bounded
+        list. Idempotent — ``run_turn`` re-applies it defensively.
+        """
+        return _trim_conversation(messages, current_ast, assets)
 
     def check_limits(
         self,
@@ -1111,8 +1726,9 @@ class DesignerChatOrchestrator:
     ) -> None:
         """Public alias for pre-flight size validation.
 
-        Call this before opening the SSE stream so a RequestTooLargeError can
-        be surfaced as an HTTP 413 rather than as an SSE error event.
+        Call this AFTER :meth:`prepare_messages` and before opening the SSE
+        stream so a RequestTooLargeError can be surfaced as an HTTP 413 rather
+        than as an SSE error event.
         """
         self._check_limits(messages, current_ast, assets)
 
@@ -1122,18 +1738,22 @@ class DesignerChatOrchestrator:
         current_ast: dict[str, Any] | None,
         assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
     ) -> None:
-        if len(messages) > MAX_MESSAGES:
-            raise RequestTooLargeError(
-                f"messages exceeds {MAX_MESSAGES} turns (got {len(messages)})"
-            )
-        ast_size = len(json.dumps(current_ast or {}, default=str).encode("utf-8"))
+        """Hard size guard, applied AFTER :func:`_trim_conversation` has bounded
+        the message count gracefully. The message-COUNT limit is intentionally
+        not enforced here — trimming handles it, so a chat can never wedge on a
+        long/retried conversation. Only genuinely unprocessable byte sizes raise
+        (surfaced to the client as HTTP 413, never silent).
+        """
+        ast_size = _payload_bytes(current_ast or {})
         if ast_size > MAX_AST_BYTES:
-            raise RequestTooLargeError(f"current_ast exceeds {MAX_AST_BYTES} bytes ({ast_size})")
-        msg_size = len(json.dumps(messages, default=str).encode("utf-8"))
-        asset_size = len(json.dumps(assets or [], default=str).encode("utf-8"))
-        total = ast_size + msg_size + asset_size
+            raise RequestTooLargeError(
+                f"current_ast exceeds {MAX_AST_BYTES} bytes ({ast_size})"
+            )
+        total = ast_size + _payload_bytes(messages) + _payload_bytes(assets or [])
         if total > MAX_PAYLOAD_BYTES:
-            raise RequestTooLargeError(f"total payload exceeds {MAX_PAYLOAD_BYTES} bytes ({total})")
+            raise RequestTooLargeError(
+                f"total payload exceeds {MAX_PAYLOAD_BYTES} bytes ({total})"
+            )
 
     async def _dispatch(
         self,

@@ -152,7 +152,10 @@ class TestMergeAndCompile:
 
     def test_designer_contract_requires_llm_authored_lane_prompts(self) -> None:
         prompt = designer_system_prompt()
-        assert "topology: choose parallel_lanes, plan_and_execute, or single_agent" in prompt
+        assert (
+            "topology: choose parallel_lanes, plan_and_execute, single_agent, best_of_n, iterative_refinement, or router"
+            in prompt
+        )
         assert "specialized system_prompt, user_prompt_template" in prompt
         assert "the LLM authors these use-case prompts" in prompt
         assert "STATIC ``parallel_lanes``" in prompt

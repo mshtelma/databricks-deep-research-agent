@@ -293,6 +293,53 @@ root:
                     {{"independent_workstreams_count": "brief enumerates 6 distinct
                     concerns: ..."}}). Omitted otherwise.
 
+                  ## Coordination pattern (explicit multi-candidate shapes)
+                  - coordination_pattern: "best_of_n" or null (optional)
+                    Set "best_of_n" ONLY when the user explicitly asks to generate
+                    MULTIPLE candidate answers and pick the best (e.g. "generate N
+                    results and choose the best", "best of N", "produce several
+                    drafts and select the strongest"). When set, it WINS topology
+                    selection. Derive from request STRUCTURE, never from domain
+                    vocabulary. Omit (null) for ordinary research.
+                  - coordination_candidate_count: int 2..10 (optional)
+                    For best_of_n: how many candidates to generate. Map an explicit
+                    number in the request here ("generate 8" -> 8). Omit to let the
+                    builder default.
+                  - coordination_judge_tier: "analytical", "complex", or null
+                    (optional). Model tier for the judge that validates candidates
+                    and picks the best. Omit to default to "complex".
+                  best_of_n still gathers evidence with normal research lane(s):
+                  keep independent_workstreams_count + lane_descriptions set to the
+                  EVIDENCE concerns (default 1), SEPARATE from the candidate count.
+                  - coordination_pattern: "iterative_refinement" (optional)
+                    Set when the user wants the report DRAFTED, CRITIQUED, and
+                    IMPROVED iteratively until "good enough" (e.g. "draft then
+                    refine", "self-critique and improve", "have several models
+                    refine it"). When set, it WINS topology selection. Derive from
+                    request STRUCTURE, never from domain vocabulary.
+                  - refine_participants: int 1..4 (optional)
+                    Distinct proposer voices per round: 1 = single-voice
+                    self-critique; 2-4 = multi-model ensemble. Omit to default 1.
+                  - refine_max_iterations: int 1..6 (optional)
+                    Max critic-gated improvement rounds. Omit to default 3.
+                  - proposer_families: list of strings (optional)
+                    ONLY when the user names specific model families for the
+                    proposers (e.g. "use Claude and Llama"). Verbatim/extractive;
+                    validated against configured families. Omit otherwise.
+                  iterative_refinement also gathers evidence with normal research
+                  lane(s): keep independent_workstreams_count + lane_descriptions
+                  set to the EVIDENCE concerns (default 1).
+                  - coordination_pattern: "router" (optional)
+                    Set when the query should be CLASSIFIED and routed to one of
+                    several distinct handling paths (e.g. "handle pricing vs
+                    technical questions differently"). When set, it WINS topology
+                    selection. Derive from request STRUCTURE, never from domain
+                    vocabulary.
+                  - router_cases: list of 2-6 strings (for router)
+                    EXTRACTIVE route labels naming the distinct query classes,
+                    verbatim from the request. The LAST case is the default /
+                    fallback branch. Omit for non-router patterns.
+
                   ## Output format
                   Call ``emit_task_signature`` exactly once with the JSON above and
                   stop. The tool node downstream writes state.task_signature.
@@ -423,10 +470,12 @@ root:
                             primary_evidence_kind, expected_output_shape, confidence,
                             step_dependencies_present, independent_workstreams_count,
                             iteration_required, output_aggregation_kind,
-                            lane_descriptions, axis_reasoning.
+                            lane_descriptions, axis_reasoning, coordination_pattern,
+                            coordination_candidate_count, coordination_judge_tier.
                             **Structure is mechanical — the deterministic blueprint
                             builder has already mapped the signature to a topology
-                            (single_agent, parallel_lanes, or plan_and_execute) and
+                            (single_agent, parallel_lanes, plan_and_execute, or
+                            best_of_n) and
                             laid out the lane/pool/synthesizer scaffold. The scaffold
                             is held in workflow state as ``initial_blueprint`` and you may
                             customize PROMPTS only. To inspect topology decisions,
@@ -646,6 +695,14 @@ root:
 
                           Use `single_agent` for bounded questions that one well-prompted
                           agent can answer directly.
+
+                          Use `best_of_n` when the user asks to generate multiple
+                          candidate answers and pick the best ("best of N"). Shape:
+                          coordinator -> parallel(evidence lane(s)) -> parallel(N
+                          candidate synthesizers, each a diverse synthesis of the
+                          shared evidence pools) -> a complex-tier judge that selects
+                          and emits the best report. The classifier selects it via
+                          coordination_pattern; you customize PROMPTS only.
 
                           ## Plan v2.1 PR-3 — Deterministic blueprint contract (ACTIVE
                           when state.initial_blueprint is non-empty)

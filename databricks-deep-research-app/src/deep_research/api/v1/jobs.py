@@ -194,6 +194,16 @@ class SubmitJobRequest(BaseModel):
         default=None,
         description="Custom agent ID to use for this research job.",
     )
+    turn_intent: str = Field(
+        default="auto",
+        pattern="^(auto|chat|research)$",
+        description=(
+            "Per-turn routing for custom-agent chats: 'auto' (classify intent), "
+            "'chat' (answer from already-gathered data, no re-run), or 'research' "
+            "(force a fresh agent run). Ignored unless agent_id is set and the chat "
+            "has prior research."
+        ),
+    )
     enable_plan_review: bool = Field(
         default=False,
         description="If true, pause after plan creation for user review.",
@@ -340,6 +350,7 @@ async def submit_job(
         user_token=user_token,
         file_ids=body.file_ids,
         agent_id=body.agent_id,
+        turn_intent=body.turn_intent,
         enable_plan_review=body.enable_plan_review,
         approval_broker=approval_broker,
     )

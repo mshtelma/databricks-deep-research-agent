@@ -7,7 +7,6 @@ from deep_research.agent_designer.workflow_migrator import (
     scan_workflow_for_migration,
 )
 
-
 _VALID_TEMPLATE = (
     "## Investigation Brief\n\n"
     "You are investigating: **{query}**\n\n"

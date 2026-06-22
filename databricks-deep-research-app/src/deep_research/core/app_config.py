@@ -1730,6 +1730,13 @@ class AppConfig(BaseModel):
     default_role: str = "analytical"
     endpoints: dict[str, EndpointConfig] = Field(default_factory=dict)
     models: dict[str, ModelRoleConfig] = Field(default_factory=dict)
+    # OPTIONAL LLM model-family catalog: family label -> ordered list of endpoint
+    # ids (keys of ``endpoints``). Orthogonal to ``models`` (capability tiers): a
+    # node may pin ``config.model_family`` to route to a specific family
+    # regardless of tier (e.g. multi-model iterative_refinement ensembles). Empty
+    # by default — when absent, family selection is simply unavailable and the
+    # Designer falls back to tier+stance diversity.
+    model_families: dict[str, list[str]] = Field(default_factory=dict)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     truncation: TruncationConfig = Field(default_factory=TruncationConfig)
@@ -1789,6 +1796,16 @@ class AppConfig(BaseModel):
                 if endpoint_id not in self.endpoints:
                     errors.append(
                         f"Role '{role_name}' references undefined endpoint: '{endpoint_id}'"
+                    )
+
+        for family_name, family_endpoints in self.model_families.items():
+            if not family_endpoints:
+                errors.append(f"Model family '{family_name}' has no endpoints")
+            for endpoint_id in family_endpoints:
+                if endpoint_id not in self.endpoints:
+                    errors.append(
+                        f"Model family '{family_name}' references undefined "
+                        f"endpoint: '{endpoint_id}'"
                     )
 
         if self.default_role and self.models and self.default_role not in self.models:

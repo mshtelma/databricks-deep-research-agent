@@ -100,6 +100,96 @@ def asset_context_payload(raw_assets: Any) -> dict[str, Any]:
     }
 
 
+# Inverse of ``_EXPECTED_TOOL_KINDS_BY_ASSET_KIND``: maps an existing AST tool
+# ``kind`` back to the asset kind it was built from, plus the ordered config
+# keys that hold the asset identity. Used by :func:`assets_from_ast` so an EDIT
+# can reconstruct the corpus assets a workflow already uses and PRESERVE them
+# instead of rebuilding web-only. Web tools (web_search/web_research/web_crawl)
+# and unknown kinds are intentionally absent — they are not assets.
+_TOOL_KIND_TO_ASSET: dict[str, tuple[DesignerAssetKind, tuple[str, ...]]] = {
+    "vector_search": ("vector_index", ("index_name",)),
+    "table_search": ("delta_table", ("table_name",)),
+    "table_read": ("delta_table", ("table_name",)),
+    "table_neighbors": ("delta_table", ("table_name",)),
+    "table_load": ("delta_table", ("table_name",)),
+    "table_aggregate": ("delta_table", ("table_name",)),
+    "genie": ("genie_space", ("space_id", "genie_space_id")),
+    "knowledge_assistant": ("knowledge_assistant", ("endpoint_name",)),
+}
+
+
+def assets_from_ast(current_ast: Any) -> list[DesignerAsset]:
+    """Reconstruct corpus/structured ``DesignerAsset``s from an existing AST's tools.
+
+    On an EDIT, the existing workflow's ``tools`` already encode the corpus the
+    user is working with (vector index, Delta tables, Genie space, knowledge
+    assistant). Seeding these back into the grounding pipeline keeps an edit from
+    classifying as ``no_assets`` and rebuilding web-only (the reported defect).
+
+    Identity, warehouse, columns and query_type are carried into ``metadata`` so
+    :func:`recommend_tools_for_assets` regenerates the SAME tools (including a
+    non-default ``warehouse_id``, which ``_warehouse_id`` reads from metadata
+    before falling back to the env default). Generic: every value is read off the
+    tool ``config`` — no corpus/table/domain identifier is hardcoded.
+
+    ``usage`` is left at the permissive default (``preferred``) so the
+    fail-closed branch of :func:`_build_asset_tool_plan` is not tripped for a
+    derived (rather than user-required) asset.
+    """
+    if not isinstance(current_ast, dict):
+        return []
+    tools = current_ast.get("tools")
+    if not isinstance(tools, list):
+        return []
+
+    assets: list[DesignerAsset] = []
+    seen: set[tuple[str, str]] = set()
+    for tool in tools:
+        if not isinstance(tool, dict):
+            continue
+        mapping = _TOOL_KIND_TO_ASSET.get(str(tool.get("kind") or ""))
+        if mapping is None:
+            continue
+        asset_kind, identity_keys = mapping
+        config = tool.get("config") if isinstance(tool.get("config"), dict) else {}
+        identity = ""
+        for key in identity_keys:
+            value = config.get(key)
+            if isinstance(value, str) and value.strip():
+                identity = value.strip()
+                break
+        if not identity:
+            continue
+        dedup_key = (asset_kind, identity.casefold())
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
+
+        metadata: dict[str, Any] = {}
+        for wkey in ("warehouse_id", "sql_warehouse_id"):
+            wval = config.get(wkey)
+            if isinstance(wval, str) and wval.strip():
+                metadata["warehouse_id"] = wval.strip()
+                break
+        columns = config.get("columns")
+        if isinstance(columns, list):
+            metadata["columns"] = columns
+        query_type = config.get("query_type")
+        if isinstance(query_type, str) and query_type.strip():
+            metadata["query_type"] = query_type.strip()
+
+        assets.append(
+            DesignerAsset(
+                kind=asset_kind,
+                full_name=identity,
+                name=(str(tool.get("name")).strip() or None) if tool.get("name") else None,
+                usage="preferred",
+                metadata=metadata,
+            )
+        )
+    return assets
+
+
 def _unique_name(base: str, used: set[str]) -> str:
     candidate = base
     suffix = 2

@@ -175,6 +175,7 @@ class JobManager:
         user_token: str | None = None,
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
+        turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
     ) -> ResearchSession:
@@ -368,6 +369,7 @@ class JobManager:
                 user_token=user_token,
                 file_ids=file_ids,
                 agent_id=agent_id,
+                turn_intent=turn_intent,
                 enable_plan_review=enable_plan_review,
                 approval_broker=approval_broker,
             )
@@ -519,6 +521,7 @@ class JobManager:
         user_token: str | None = None,
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
+        turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
     ) -> None:
@@ -659,6 +662,7 @@ class JobManager:
                 user_token=user_token,  # OBO auth for enterprise tools
                 file_ids=file_ids,
                 agent_id=agent_id,
+                turn_intent=turn_intent,
                 enable_plan_review=enable_plan_review,
                 approval_broker=approval_broker,
             )

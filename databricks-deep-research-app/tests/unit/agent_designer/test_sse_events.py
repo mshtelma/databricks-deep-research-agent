@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-
-from deep_research.agent_designer.sse_events import MutationProposedEvent
+from deep_research.agent_designer.sse_events import MutationProposedEvent, ProgressEvent
 
 
 class TestMutationProposedEvent:
@@ -40,6 +38,22 @@ class TestMutationProposedEvent:
             # Layer 2 auto-repair — default empty when no fixes were applied.
             "normalization_fixes": [],
         }
+
+
+class TestProgressEvent:
+    def test_type_discriminator(self) -> None:
+        assert ProgressEvent(label="Workflow Architect (Opus)").type == "progress"
+
+    def test_iteration_total_default_none(self) -> None:
+        event = ProgressEvent(label="Working")
+        assert event.iteration is None
+        assert event.total is None
+
+    def test_model_dump_excludes_type(self) -> None:
+        event = ProgressEvent(label="Refining", iteration=2, total=4)
+        dumped = event.model_dump(exclude={"type"})
+        assert "type" not in dumped
+        assert dumped == {"label": "Refining", "iteration": 2, "total": 4}
 
 
 class TestReExportIntegrity:

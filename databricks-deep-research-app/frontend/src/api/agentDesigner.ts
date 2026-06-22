@@ -326,11 +326,133 @@ export async function startDesignerSqlWarehouse(
 // Chat SSE stream
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Wire payload slimming
+// ---------------------------------------------------------------------------
+
+/** Keep this many most-recent messages verbatim on the wire (current + prior turn). */
+const WIRE_KEEP_RECENT = 6
+/** Summarize historical tool/assistant message content longer than this (chars). */
+const WIRE_CONTENT_MAX_CHARS = 2048
+
+/**
+ * Slim the transcript sent on the wire. Old `tool`/`assistant` messages carry
+ * large discovery dumps and full AST snapshots that the server never consumes
+ * as runtime input (it uses `current_ast`, sent separately) — they are stale
+ * LLM context only. Replacing their oversized `content` with a compact summary
+ * keeps the request under the server size cap and the LLM context lean without
+ * dropping turns. The DISPLAYED transcript is untouched (this affects only the
+ * outgoing copy). `role`, `tool_calls`, and `tool_call_id` are preserved so the
+ * gateway's tool pairing stays valid; the recent window and the final user
+ * message are always kept verbatim.
+ */
+export function slimWireMessages(messages: ChatMessage[]): ChatMessage[] {
+  const n = messages.length
+  return messages.map((message, i) => {
+    const isRecent = i >= n - WIRE_KEEP_RECENT
+    if (
+      !isRecent &&
+      (message.role === 'tool' || message.role === 'assistant') &&
+      typeof message.content === 'string' &&
+      message.content.length > WIRE_CONTENT_MAX_CHARS
+    ) {
+      return {
+        ...message,
+        content: `[${message.role} content summarized: ${message.content.length} chars omitted to fit the request budget]`,
+      }
+    }
+    return message
+  })
+}
+
+/**
+ * One item from a designer SSE stream: a parsed event plus its sequence id (the
+ * SSE `id:` line). `seq` is null for connection-scoped frames (`turn_started`)
+ * and never set for keepalive comments — only buffered events carry a sequence,
+ * which the consumer tracks as `lastSeq` to resume a reconnect from `since`.
+ */
+export interface DesignerStreamChunk {
+  event: DesignerSSEEvent
+  seq: number | null
+}
+
+/**
+ * Read an SSE response body and yield parsed event frames with their sequence
+ * id. Comment lines (`:keepalive`) and any line that is not `event:`/`data:`/`id:`
+ * are ignored. Shared by `chatStream` (POST) and `reconnectChatStream` (GET).
+ */
+async function* _readSSE(response: Response): AsyncIterable<DesignerStreamChunk> {
+  if (!response.body) {
+    throw new ApiError(0, 'NO_BODY', 'Response body is missing')
+  }
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let currentEventType: string | null = null
+  let currentData: string | null = null
+  let currentId: number | null = null
+
+  const flushFrame = (): DesignerStreamChunk | null => {
+    const chunk =
+      currentEventType !== null && currentData !== null
+        ? ((): DesignerStreamChunk | null => {
+            const event = _parseFrame(currentEventType, currentData)
+            return event !== null ? { event, seq: currentId } : null
+          })()
+        : null
+    currentEventType = null
+    currentData = null
+    currentId = null
+    return chunk
+  }
+
+  const applyLine = (rawLine: string): void => {
+    // Strip trailing \r (CRLF streams).
+    const trimmed = rawLine.endsWith('\r') ? rawLine.slice(0, -1) : rawLine
+    if (trimmed.startsWith('event:')) {
+      currentEventType = trimmed.slice('event:'.length).trim()
+    } else if (trimmed.startsWith('data:')) {
+      currentData = trimmed.slice('data:'.length).trim()
+    } else if (trimmed.startsWith('id:')) {
+      const parsed = Number.parseInt(trimmed.slice('id:'.length).trim(), 10)
+      currentId = Number.isNaN(parsed) ? null : parsed
+    }
+    // Comment lines (':keepalive') and unknown fields are intentionally skipped.
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // Split on newlines; keep the last (possibly partial) line in the buffer.
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        if (line === '' || line === '\r') {
+          // Blank line → end of SSE frame.
+          const chunk = flushFrame()
+          if (chunk !== null) yield chunk
+          continue
+        }
+        applyLine(line)
+      }
+    }
+    // Flush any trailing buffered line, then a final complete frame.
+    if (buffer) applyLine(buffer)
+    const tail = flushFrame()
+    if (tail !== null) yield tail
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 /**
  * Open a streaming chat session with the agent designer.
  *
- * Yields `DesignerSSEEvent` objects as they arrive. The stream ends with a
- * `{ type: 'done' }` event.
+ * Yields `DesignerStreamChunk` objects (event + sequence id) as they arrive. The
+ * first frame is `turn_started` (carrying the turn_id for reconnect); the stream
+ * ends with a `{ type: 'done' }` event.
  *
  * Throws `ApiError` with status 413 if the payload exceeds server size limits
  * (HTTP 413 is returned BEFORE any SSE frames).
@@ -353,13 +475,34 @@ export async function* chatStream({
   session_id?: string | null
   assets?: DesignerAsset[]
   signal?: AbortSignal
-}): AsyncIterable<DesignerSSEEvent> {
-  const wireMessages = messages.map((message) => ({
-    role: message.role,
-    content: message.content,
-    tool_calls: message.tool_calls,
-    tool_call_id: message.tool_call_id,
-  }))
+}): AsyncIterable<DesignerStreamChunk> {
+  // The backend ChatMessage schema is extra="forbid", and the Databricks
+  // gateway only permits tool_calls on assistant turns and tool_call_id on tool
+  // turns. Replaying a tool_calls key on a user/tool message (or an empty []) —
+  // which the prior unconditional map did — triggers a 400
+  // "messages.N.tool_calls: Extra inputs are not permitted" on multi-turn edits.
+  // Attach tool fields only where the gateway permits them, and never an empty
+  // array. (The framework also flattens history defensively, but stripping at
+  // the source keeps payloads small and the wire shape valid.)
+  const wireMessages = slimWireMessages(messages).map((message) => {
+    const wire: {
+      role: ChatMessage['role']
+      content: string
+      tool_calls?: NonNullable<ChatMessage['tool_calls']>
+      tool_call_id?: NonNullable<ChatMessage['tool_call_id']>
+    } = { role: message.role, content: message.content }
+    if (
+      message.role === 'assistant' &&
+      message.tool_calls &&
+      message.tool_calls.length > 0
+    ) {
+      wire.tool_calls = message.tool_calls
+    }
+    if (message.role === 'tool' && message.tool_call_id) {
+      wire.tool_call_id = message.tool_call_id
+    }
+    return wire
+  })
   const response = await fetch(`${API_BASE_URL}/agent-designer/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -369,10 +512,15 @@ export async function* chatStream({
 
   // 413 must be surfaced as ApiError BEFORE yielding any events.
   if (response.status === 413) {
+    // The backend wraps every HTTPException as { code, message }; older/raw
+    // shapes use { detail }. Read `message` first so the banner shows the real
+    // reason (e.g. "total payload exceeds 524288 bytes (…)") instead of a
+    // generic string. Fall back to the literal for non-string (object) bodies.
     let detail = 'Request payload too large'
     try {
-      const body = (await response.json()) as { detail?: string }
-      if (body.detail) detail = body.detail
+      const body = (await response.json()) as { message?: unknown; detail?: unknown }
+      const reason = body.message ?? body.detail
+      if (typeof reason === 'string' && reason) detail = reason
     } catch {
       // ignore
     }
@@ -393,80 +541,51 @@ export async function* chatStream({
     )
   }
 
-  if (!response.body) {
-    throw new ApiError(0, 'NO_BODY', 'Response body is missing')
+  yield* _readSSE(response)
+}
+
+
+/**
+ * Resume a designer chat turn after its streamed connection was severed (the
+ * Databricks Apps gateway's absolute ~4-minute response cap). Streams the
+ * buffered events from sequence `since` via the GET resume route, so the client
+ * picks up exactly where it left off — including a terminal `mutation_proposed`
+ * + `done` produced while disconnected.
+ *
+ * Throws `ApiError` with status 404 when the turn is unknown or expired (the FE
+ * surfaces this as "please resend" rather than retrying forever).
+ */
+export async function* reconnectChatStream({
+  turnId,
+  since,
+  signal,
+}: {
+  turnId: string
+  since: number
+  signal?: AbortSignal
+}): AsyncIterable<DesignerStreamChunk> {
+  const response = await fetch(
+    `${API_BASE_URL}/agent-designer/chat/${encodeURIComponent(turnId)}/events?since=${since}`,
+    { method: 'GET', signal },
+  )
+  if (!response.ok) {
+    let code = 'UNKNOWN'
+    let detail = response.statusText || 'Reconnect failed'
+    try {
+      const body = (await response.json()) as {
+        code?: string
+        message?: unknown
+        detail?: unknown
+      }
+      const reason = body.message ?? body.detail
+      if (typeof reason === 'string' && reason) detail = reason
+      if (typeof body.code === 'string') code = body.code
+    } catch {
+      // ignore — fall back to statusText
+    }
+    throw new ApiError(response.status, code, detail)
   }
-
-  // Read the SSE stream incrementally.
-  const reader = response.body.getReader()
-  const decoder = new TextDecoder()
-
-  // Accumulate text across chunks; frames are delimited by blank lines.
-  let buffer = ''
-
-  // State for the current incomplete SSE frame.
-  let currentEventType: string | null = null
-  let currentData: string | null = null
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-
-      buffer += decoder.decode(value, { stream: true })
-
-      // Split on newlines and process complete lines.
-      // We keep the last partial line in the buffer.
-      const lines = buffer.split('\n')
-      // The last element may be an incomplete line — hold it back.
-      buffer = lines.pop() ?? ''
-
-      for (const line of lines) {
-        if (line === '' || line === '\r') {
-          // Blank line → end of SSE frame.
-          if (currentEventType !== null && currentData !== null) {
-            const event = _parseFrame(currentEventType, currentData)
-            if (event !== null) {
-              yield event
-            }
-          }
-          currentEventType = null
-          currentData = null
-          continue
-        }
-
-        // Strip trailing \r (CRLF streams)
-        const trimmed = line.endsWith('\r') ? line.slice(0, -1) : line
-
-        if (trimmed.startsWith('event:')) {
-          currentEventType = trimmed.slice('event:'.length).trim()
-        } else if (trimmed.startsWith('data:')) {
-          currentData = trimmed.slice('data:'.length).trim()
-        }
-        // Lines not starting with 'event:' or 'data:' are intentionally skipped.
-      }
-    }
-
-    // Flush any remaining buffered content after the stream ends.
-    if (buffer) {
-      const trimmed = buffer.endsWith('\r') ? buffer.slice(0, -1) : buffer
-      if (trimmed.startsWith('event:')) {
-        currentEventType = trimmed.slice('event:'.length).trim()
-      } else if (trimmed.startsWith('data:')) {
-        currentData = trimmed.slice('data:'.length).trim()
-      }
-    }
-
-    // Yield the final frame if complete.
-    if (currentEventType !== null && currentData !== null) {
-      const event = _parseFrame(currentEventType, currentData)
-      if (event !== null) {
-        yield event
-      }
-    }
-  } finally {
-    reader.releaseLock()
-  }
+  yield* _readSSE(response)
 }
 
 /**

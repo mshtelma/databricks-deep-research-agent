@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 from typing import Any
@@ -70,6 +71,16 @@ _CORPUS_ONLY_ASSET_SIGNATURES: frozenset[str] = frozenset(
 # Asset signature that explicitly mixes user-selected corpus assets with
 # public-web research. Both kinds get wired into the workflow tools list.
 _MIXED_ASSET_SIGNATURES: frozenset[str] = frozenset({"corpus_plus_web"})
+# Primary (evidence-source) asset kinds. Their presence means the workflow has a
+# corpus/structured evidence base — so a classifier ``no_assets``/``web_only``
+# verdict is an under-classification that the deterministic floor corrects.
+# ``sql_warehouse`` is excluded: it is a SUPPORTING asset for table tools, not a
+# primary evidence source on its own.
+_CORPUS_ASSET_KINDS: frozenset[str] = frozenset(
+    {"vector_index", "delta_table", "genie_space", "knowledge_assistant", "serving_endpoint"}
+)
+
+logger = logging.getLogger(__name__)
 # Default web tool names declared by ``_default_web_tool_decls`` in
 # ``workflow_builder.py``. Re-declared here so the corpus_plus_web branch
 # can extend ``tool_plan`` with the right pair without re-importing the
@@ -519,9 +530,30 @@ def _build_asset_tool_plan(
     normalized_assets = list(normalize_assets(assets or []))
     sig_value = str(sig.asset_signature)
 
+    # Issue #2 deterministic floor (RC6): the classifier may emit ``no_assets``
+    # even though corpus/structured assets ARE present — e.g. an edit where the
+    # existing workflow's tools were seeded back as assets (the reported defect),
+    # or UI-selected corpus assets the classifier overlooked. ``no_assets`` means
+    # "the classifier saw no evidence base"; when corpus assets are in fact
+    # present that is an under-classification, so honor the assets and build
+    # corpus tools instead of silently rebuilding web-only. Scoped to
+    # ``no_assets`` ONLY — a deliberate ``web_only`` verdict is respected even
+    # when corpus assets happen to be selected. Generic: driven purely by asset
+    # presence, never by intent text or domain. Recorded as a diagnostic so the
+    # under-classification stays observable rather than hidden.
+    if sig_value == "no_assets" and any(
+        asset.kind in _CORPUS_ASSET_KINDS for asset in normalized_assets
+    ):
+        logger.warning(
+            "BLUEPRINT_ASSET_SIGNATURE_FLOOR emitted=no_assets coerced=corpus_only "
+            "corpus_assets=%d reason=classifier_underclassified_with_corpus_assets_present",
+            len(normalized_assets),
+        )
+        sig_value = "corpus_only"
+
     if sig_value not in _CORPUS_ONLY_ASSET_SIGNATURES and sig_value not in _MIXED_ASSET_SIGNATURES:
-        # ``no_assets`` and ``web_only`` are handled by the builder's
-        # default-web-tool path. No tool_plan needed.
+        # ``no_assets`` and ``web_only`` with no corpus assets are handled by the
+        # builder's default-web-tool path. No tool_plan needed.
         return None
 
     reco = recommend_tools_for_assets(
@@ -738,6 +770,12 @@ def build_blueprint(
         else {"schema": "resolved_tool_contract.v1", "available": False}
     )
     ast["structural_fingerprint"] = compute_structural_fingerprint(ast)
+    # Persist the signature that produced this AST so a later topology EDIT can
+    # retrieve it (rather than re-infer it from arbitrary AST shape) and apply
+    # only the requested delta. Stamped AFTER the fingerprint and excluded from
+    # it (top-level metadata only, like ``lane_keys``), so it never perturbs the
+    # PR-3 immutability check. See ``edit_planning.stored_signature``.
+    ast["designer_signature"] = sig.model_dump(mode="json")
     return ast
 
 
