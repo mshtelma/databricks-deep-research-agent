@@ -208,6 +208,12 @@ _DEFAULT_ESTIMATED_TOKENS = 4096
 _DEFAULT_OUTPUT_RESERVE = 4096
 # Headroom for tokenization variance + system framing on the fit check.
 _CONTEXT_SAFETY_MARGIN = 1024
+# Per-document character cap applied before sending texts to the embedding
+# endpoint. Over-long documents otherwise blow the embedding model's token
+# limit and fail the whole batch; truncating is strictly safer (a head-only
+# embedding still yields a usable vector). Matches gpt-researcher's content
+# cap (``_MAX_CONTENT_CHARS`` ~= 50k chars).
+MAX_EMBED_CHARS = 50_000
 
 
 def _truncate_messages_to_tokens(
@@ -818,6 +824,11 @@ class FrameworkLLMClient:
                 "No embedding model configured. Pass one explicitly or set "
                 "embedding_model at construction time."
             )
+
+        # Truncate each doc to dodge the embedding endpoint's token limit. An
+        # over-long document otherwise fails the entire batch; a head-only
+        # embedding is strictly safer (short docs are left untouched).
+        texts = [t[:MAX_EMBED_CHARS] for t in texts]
 
         response = await self._get_client().embeddings.create(
             input=texts,

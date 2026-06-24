@@ -202,6 +202,11 @@ Target: {min_steps} to {max_steps} research steps
 ## Reflector Feedback (if replanning)
 {reflector_feedback}
 
+## Open Knowledge Gaps (if replanning)
+The reflector flagged these still-unaddressed gaps. Prioritize NEW steps that
+close them; if this section is empty, there are no outstanding gaps to target.
+{knowledge_gaps}
+
 ## Current Iteration
 {iteration}
 
@@ -432,6 +437,12 @@ Target: {min_steps} to {max_steps} research steps
 
 ## Reflector Feedback (if replanning)
 {reflector_feedback}
+
+## Open Knowledge Gaps (if replanning)
+The reflector flagged these still-unaddressed gaps. Prioritize NEW steps that
+close them, routing each to the most appropriate source; if this section is
+empty, there are no outstanding gaps to target.
+{knowledge_gaps}
 
 ## Current Iteration
 {iteration}

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pydantic import BaseModel
 
 from databricks_deep_research.api import Agent
-from databricks_deep_research.workflow.state import StateEntry, WorkflowState
+from databricks_deep_research.workflow.state import WorkflowState
 
 
 class Report(BaseModel):

@@ -386,7 +386,7 @@ class WebResearchTool:
                     text, title_from_page = await _default_crawl(
                         hit.url, timeout=10.0
                     )
-        except (asyncio.TimeoutError, TimeoutError):
+        except TimeoutError:
             logger.info("WEB_RESEARCH_FETCH_TIMEOUT url=%s", hit.url)
             return {}
         except Exception as exc:  # noqa: BLE001

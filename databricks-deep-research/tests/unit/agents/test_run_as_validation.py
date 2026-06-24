@@ -11,8 +11,6 @@ from pydantic import ValidationError
 from databricks_deep_research.workflow.definition import (
     ServicePrincipalRunAs,
     WorkflowDefinition,
-    WorkflowNode,
-    NodeType,
 )
 
 # ---------------------------------------------------------------------------

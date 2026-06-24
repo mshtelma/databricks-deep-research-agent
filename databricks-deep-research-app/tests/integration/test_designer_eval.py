@@ -34,7 +34,6 @@ from typing import Any
 
 import pytest
 import yaml
-
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter
@@ -44,7 +43,6 @@ from deep_research.agent_designer.orchestrator import (
     LLMToolCall,
     MutationProposedEvent,
 )
-
 
 _FIXTURE_PATH = Path(__file__).parent / "fixtures" / "designer_eval_prompts.yaml"
 

@@ -11,6 +11,7 @@ from databricks_deep_research.errors import WorkflowValidationError
 from databricks_deep_research.workflow.definition import WorkflowDefinition
 from databricks_deep_research.workflow.loader import (
     load_workflow,
+    load_workflow_from_dict,
     load_workflow_from_string,
     save_workflow,
 )
@@ -149,6 +150,48 @@ def test_roundtrip_save_load(tmp_path: Path) -> None:
     assert reloaded.root.id == original.root.id
     assert len(reloaded.root.children) == len(original.root.children)
     assert reloaded.model_dump() == original.model_dump()
+
+
+# ---------------------------------------------------------------------------
+# 3b. mcp_servers survive load + dump->load (regression: previously dropped)
+# ---------------------------------------------------------------------------
+
+MCP_YAML = """\
+id: mcp-wf
+name: MCP Workflow
+mcp_servers:
+  - name: my_remote
+    url: https://mcp.example.com/sse
+    transport: sse
+    citeable: true
+root:
+  id: root
+  type: sequence
+  label: Root
+  children:
+    - id: step1
+      type: agent
+      label: Researcher
+      config:
+        subtype: researcher
+"""
+
+
+def test_mcp_servers_survive_load_and_roundtrip() -> None:
+    # Regression: the loader constructed WorkflowDefinition WITHOUT mcp_servers,
+    # so persisted/loaded workflows silently lost their MCP attachments before
+    # the orchestrator could inject them. Assert they survive an initial load
+    # AND a model_dump -> load_workflow_from_dict cycle (the app's persist path).
+    wf = load_workflow_from_string(MCP_YAML)
+    assert len(wf.mcp_servers) == 1
+    assert wf.mcp_servers[0].name == "my_remote"
+    assert wf.mcp_servers[0].url == "https://mcp.example.com/sse"
+    assert wf.mcp_servers[0].transport == "sse"
+
+    reloaded = load_workflow_from_dict(wf.model_dump(mode="json"))
+    assert len(reloaded.mcp_servers) == 1
+    assert reloaded.mcp_servers[0].name == "my_remote"
+    assert reloaded.model_dump()["mcp_servers"] == wf.model_dump()["mcp_servers"]
 
 
 # ---------------------------------------------------------------------------

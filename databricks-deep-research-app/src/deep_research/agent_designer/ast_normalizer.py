@@ -509,6 +509,73 @@ def _normalize_model_tiers(ast: dict[str, Any], ctx: _NormalizerContext) -> None
         )
 
 
+def _lift_mcp_servers(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
+    """Lift ``kind == 'mcp'`` tool declarations into the workflow ``mcp_servers``.
+
+    An MCP server is authored as an ``mcp`` card in the tool picker, but the
+    framework keeps remote MCP servers in the top-level ``mcp_servers`` list (not
+    the per-tool ``tools`` section): each is built into an ``MCPToolset``
+    per-request and its discovered tools are injected via the resolver override
+    (B2). This step moves each ``mcp`` tool decl's ``config`` into ``mcp_servers``
+    (dedup by name) and removes it from ``tools``, so the persisted definition
+    round-trips through the framework loader's ``mcp_servers`` parsing (P0a).
+    """
+    tools = ast.get("tools")
+    if not isinstance(tools, list):
+        return
+    existing = ast.get("mcp_servers")
+    if not isinstance(existing, list):
+        existing = []
+    seen = {s.get("name") for s in existing if isinstance(s, dict)}
+
+    lifted: list[dict[str, Any]] = []
+    remaining: list[Any] = []
+    for idx, tool in enumerate(tools):
+        if not (isinstance(tool, dict) and tool.get("kind") == "mcp"):
+            remaining.append(tool)
+            continue
+        config = tool.get("config")
+        server = dict(config) if isinstance(config, dict) else {}
+        name = server.get("name") or tool.get("name")
+        if not name:
+            # A nameless MCP card can't bind; drop it with a recorded fix rather
+            # than persisting an unusable server.
+            ctx.record(
+                kind="mcp_server_dropped",
+                path=f"tools.{idx}",
+                before="mcp tool (no name)",
+                after="(removed)",
+                rationale="an MCP server declaration requires a 'name'.",
+            )
+            continue
+        server["name"] = name
+        if name in seen:
+            ctx.record(
+                kind="mcp_server_dedup",
+                path=f"tools.{idx}",
+                before=f"duplicate mcp server '{name}'",
+                after="(removed)",
+                rationale=f"an MCP server named '{name}' is already declared.",
+            )
+            continue
+        seen.add(name)
+        lifted.append(server)
+        ctx.record(
+            kind="mcp_server_lift",
+            path=f"tools.{idx}",
+            before=f"tool(kind=mcp, name={name})",
+            after=f"mcp_servers[{name}]",
+            rationale=(
+                "MCP servers live in the workflow 'mcp_servers' list, not 'tools'; "
+                "lifted so the server is built per-request under OBO."
+            ),
+        )
+
+    if lifted or len(remaining) != len(tools):
+        ast["tools"] = remaining
+        ast["mcp_servers"] = list(existing) + lifted
+
+
 def _normalize_tool_kinds(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
     """Rewrite tool kind aliases in the top-level tools declarations."""
     tools = ast.get("tools")
@@ -1530,6 +1597,7 @@ def normalize_ast(
     ctx = _NormalizerContext()
     _normalize_subtypes(new_ast, ctx)
     _normalize_model_tiers(new_ast, ctx)
+    _lift_mcp_servers(new_ast, ctx)
     _normalize_tool_kinds(new_ast, ctx)
     _normalize_web_search_provider(new_ast, ctx)
     _normalize_pool_specs(new_ast, ctx)

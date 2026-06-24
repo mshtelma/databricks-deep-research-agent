@@ -703,3 +703,11 @@ agent_designer:
     max_concurrent_probes: 4
     max_output_chars: 800
     persist: false
+
+# Skills subsystem (Feature 2.2).
+skills:
+  # GLOBAL kill-switch for executing skill SCRIPTS (the hardened out-of-process
+  # sandbox). Default false: even an agent with allow_skill_scripts=true cannot
+  # run scripts unless this is also true. Reading skill BODIES (read_skill) is
+  # always allowed and unaffected by this flag.
+  allow_script_execution: false

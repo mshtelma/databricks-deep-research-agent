@@ -28,20 +28,48 @@ import {
   FlaskConical,
   Pencil,
   Save,
+  ChevronRight,
 } from 'lucide-react';
 import type { RegistryResponse, ToolKindSpec } from '@/types/agentDesigner';
 import type { ToolDecl } from '@/types/ast';
-import { refreshCatalog, probeTools, type ProbeSample } from '@/api/agentDesigner';
+import {
+  refreshCatalog,
+  probeTools,
+  listDesignerResources,
+  getDesignerCapabilities,
+  type ProbeSample,
+  type DesignerCapabilities,
+} from '@/api/agentDesigner';
 import { resolveBlock } from '@/lib/blockPath';
 import { requiredConfigErrors, schemaProperties } from '@/lib/jsonSchema';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import { TypePill, LayerChip } from './atoms';
 import { SchemaField } from './SchemaField';
 import { AddToolDialog } from './AddToolDialog';
+import { WorkflowSettingsPanel } from './WorkflowSettingsPanel';
 
 // ---------------------------------------------------------------------------
 // AJV factory
 // ---------------------------------------------------------------------------
+
+/** A SchemaField ``x-enumOptions`` entry (dropdown choice). */
+interface EnumOption {
+  value: string;
+  label: string;
+}
+
+/** Inject discovery-populated ``x-enumOptions`` into an array field's item schema. */
+function withItemOptions(
+  fieldSchema: Record<string, unknown>,
+  options: EnumOption[],
+): Record<string, unknown> {
+  if (options.length === 0) return fieldSchema;
+  const baseItems =
+    fieldSchema['items'] && typeof fieldSchema['items'] === 'object'
+      ? (fieldSchema['items'] as Record<string, unknown>)
+      : { type: 'string' };
+  return { ...fieldSchema, items: { ...baseItems, 'x-enumOptions': options } };
+}
 
 function makeValidator(schema: Record<string, unknown>): ReturnType<Ajv['compile']> | null {
   try {
@@ -173,6 +201,7 @@ export function ConfigPanel({ registry }: ConfigPanelProps): React.ReactElement 
                 onClose={() => setSelectedToolName(null)}
               />
             )}
+            <WorkflowSettingsPanel />
           </div>
         </aside>
         {showAddTool && (
@@ -375,6 +404,56 @@ function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): R
     [formValue, validate, selectedPath],
   );
 
+  // Discovery-populated options for the skills / mcp_servers array fields. Fetched
+  // once per agent inspector; on any error we keep the fields as free-text arrays
+  // (graceful — authoring still works, just without a dropdown). No QueryClient
+  // dependency (plain effect) so bare-rendered inspectors stay test-safe.
+  const isAgentLike = block.type === 'agent' || block.type === 'plan_and_execute';
+  const [skillOptions, setSkillOptions] = React.useState<EnumOption[]>([]);
+  const [mcpOptions, setMcpOptions] = React.useState<EnumOption[]>([]);
+  // Per-group collapse overrides (group name → user-set open state). Advanced
+  // groups start collapsed; a group is force-opened when it contains an error.
+  const [openGroups, setOpenGroups] = React.useState<Record<string, boolean>>({});
+  // Global feature-gate states, so a gated knob set per-agent but disabled
+  // globally is flagged (never-silent) instead of silently doing nothing.
+  const [capabilities, setCapabilities] = React.useState<DesignerCapabilities | null>(null);
+  React.useEffect(() => {
+    if (!isAgentLike) return undefined;
+    let cancelled = false;
+    listDesignerResources(['skill', 'mcp_server'])
+      .then((res) => {
+        if (cancelled) return;
+        const toOpts = (kind: string): EnumOption[] =>
+          res.resources
+            .filter((r) => r.kind === kind)
+            .map((r) => ({ value: r.name, label: r.name }));
+        setSkillOptions(toOpts('skill'));
+        setMcpOptions(toOpts('mcp_server'));
+      })
+      .catch(() => {
+        /* graceful: leave skills / mcp_servers as free-text arrays */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAgentLike, selectedPath]);
+
+  // Fetch global gate states once (cached) so gated knobs can be annotated.
+  React.useEffect(() => {
+    if (!isAgentLike) return undefined;
+    let cancelled = false;
+    getDesignerCapabilities()
+      .then((c) => {
+        if (!cancelled) setCapabilities(c);
+      })
+      .catch(() => {
+        /* graceful: no banner if capabilities are unavailable */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAgentLike]);
+
   if (!configSchema) {
     return (
       <p className="text-[12px] text-db-gray-text">No configurable properties for this block.</p>
@@ -400,19 +479,138 @@ function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): R
 
   const errorMap = ajvErrors ?? {};
 
+  // Turn the skills / mcp_servers free-text arrays into discovery-populated
+  // dropdowns when options were fetched (otherwise the fields stay free-text).
+  const enhancedSchemaProps: Record<string, Record<string, unknown>> = {
+    ...visibleSchemaProps,
+  };
+  if (enhancedSchemaProps['skills']) {
+    enhancedSchemaProps['skills'] = withItemOptions(
+      enhancedSchemaProps['skills'],
+      skillOptions,
+    );
+  }
+  if (enhancedSchemaProps['mcp_servers']) {
+    enhancedSchemaProps['mcp_servers'] = withItemOptions(
+      enhancedSchemaProps['mcp_servers'],
+      mcpOptions,
+    );
+  }
+
+  // Never-silent: warn when a gated knob is enabled per-agent but its global
+  // switch is off, so it doesn't quietly no-op at runtime.
+  const skillScriptsGatedOff =
+    capabilities !== null &&
+    formValue['allow_skill_scripts'] === true &&
+    !capabilities.skill_scripts_global;
+  const gatedWarning = skillScriptsGatedOff ? (
+    <div
+      role="status"
+      className="mb-3 flex items-start gap-2 rounded-db-md border border-db-gray-lines bg-db-oat-light px-3 py-2 text-[12px] leading-[1.5] text-db-navy-700"
+    >
+      <Info size={14} className="mt-0.5 shrink-0 text-db-gray-text" aria-hidden="true" />
+      <span>
+        <strong>allow_skill_scripts</strong> is on for this agent, but skill-script execution
+        is disabled globally (<code className="font-db-mono">skills.allow_script_execution</code>)
+        — it has no effect until an admin enables it.
+      </span>
+    </div>
+  ) : null;
+
+  const renderField = (
+    fieldName: string,
+    fieldSchema: Record<string, unknown>,
+  ): React.ReactElement => (
+    <SchemaField
+      key={fieldName}
+      name={fieldName}
+      schema={fieldSchema}
+      value={formValue[fieldName]}
+      onChange={(v) => handleFieldChange(fieldName, v)}
+      required={requiredKeys.includes(fieldName)}
+      errors={errorMap[fieldName] ?? []}
+    />
+  );
+
+  const propEntries = Object.entries(enhancedSchemaProps);
+  const hasGroups = propEntries.some(
+    ([, s]) => typeof s['x-group'] === 'string',
+  );
+
+  // Non-agent nodes (loop, conditional, tool, …) have no grouping metadata —
+  // render them flat, exactly as before. Only the agent inspector's 40+ fields
+  // get collapsible groups.
+  if (!hasGroups) {
+    return (
+      <>
+        {gatedWarning}
+        {propEntries.map(([name, s]) => renderField(name, s))}
+      </>
+    );
+  }
+
+  // Partition into groups, preserving the backend's (group, order) ordering
+  // (the registry emits properties already sorted, and Map keeps insertion order).
+  const grouped = new Map<string, Array<[string, Record<string, unknown>]>>();
+  for (const [fieldName, fieldSchema] of propEntries) {
+    const group =
+      typeof fieldSchema['x-group'] === 'string'
+        ? (fieldSchema['x-group'] as string)
+        : 'Settings';
+    const bucket = grouped.get(group);
+    if (bucket) bucket.push([fieldName, fieldSchema]);
+    else grouped.set(group, [[fieldName, fieldSchema]]);
+  }
+
   return (
     <>
-      {Object.entries(visibleSchemaProps).map(([fieldName, fieldSchema]) => (
-        <SchemaField
-          key={fieldName}
-          name={fieldName}
-          schema={fieldSchema}
-          value={formValue[fieldName]}
-          onChange={(v) => handleFieldChange(fieldName, v)}
-          required={requiredKeys.includes(fieldName)}
-          errors={errorMap[fieldName] ?? []}
-        />
-      ))}
+      {gatedWarning}
+      {Array.from(grouped.entries()).map(([groupName, entries]) => {
+        const advanced = entries.every(([, s]) => s['x-advanced'] === true);
+        const errorCount = entries.reduce(
+          (n, [fieldName]) => n + (errorMap[fieldName]?.length ?? 0),
+          0,
+        );
+        const userOpen = openGroups[groupName];
+        // Default: expanded unless advanced. User toggle wins. An error always
+        // force-opens the group so a hidden validation error can't be missed.
+        const open = (userOpen !== undefined ? userOpen : !advanced) || errorCount > 0;
+        return (
+          <details
+            key={groupName}
+            open={open}
+            className="mb-2 rounded-db-md border border-db-gray-lines bg-white"
+          >
+            <summary
+              onClick={(e) => {
+                e.preventDefault();
+                setOpenGroups((prev) => ({ ...prev, [groupName]: !open }));
+              }}
+              className="flex cursor-pointer select-none items-center justify-between gap-2 rounded-db-md px-3 py-2 font-db-sans text-[11px] font-semibold uppercase tracking-[0.06em] text-db-navy-700 hover:bg-db-oat-light"
+            >
+              <span className="flex items-center gap-1.5">
+                <ChevronRight
+                  size={13}
+                  className={`transition-transform ${open ? 'rotate-90' : ''}`}
+                  aria-hidden="true"
+                />
+                {groupName}
+              </span>
+              {errorCount > 0 && (
+                <span
+                  className="rounded-full bg-db-lava-600 px-1.5 py-0.5 text-[10px] font-bold text-white"
+                  aria-label={`${errorCount} validation ${errorCount === 1 ? 'error' : 'errors'}`}
+                >
+                  {errorCount}
+                </span>
+              )}
+            </summary>
+            <div className="border-t border-db-gray-lines px-3 pt-3">
+              {entries.map(([name, s]) => renderField(name, s))}
+            </div>
+          </details>
+        );
+      })}
     </>
   );
 }

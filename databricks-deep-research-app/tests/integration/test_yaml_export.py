@@ -66,9 +66,9 @@ _DB_SKIP = pytest.mark.skipif(
 @pytest.fixture
 async def db_session() -> Any:
     """Async DB session scoped to the test, rolls back after each test."""
-    import deep_research.db.session as _db_mod
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+    import deep_research.db.session as _db_mod
     from deep_research.core.config import get_settings
     from deep_research.db.session import get_database_url
 
@@ -391,7 +391,6 @@ def test_exported_yaml_reimports_cleanly(user_a_client: TestClient) -> None:
 @pytest.mark.integration
 def test_export_emits_yaml_export_ms() -> None:
     """Mock the metric sink and assert histogram is called with correct name."""
-    from deep_research.agent_designer.yaml_export import serialize_to_yaml
     from deep_research.storage.observability import MetricsSink
 
     mock_sink = MagicMock(spec=MetricsSink)

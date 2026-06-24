@@ -109,7 +109,7 @@ class BraveSearchAdapter:
         self._api_key = api_key
         self._client: object | None = None  # httpx.AsyncClient, imported lazily
 
-    def _get_client(self) -> "httpx.AsyncClient":
+    def _get_client(self) -> httpx.AsyncClient:
         import httpx
 
         client = self._client

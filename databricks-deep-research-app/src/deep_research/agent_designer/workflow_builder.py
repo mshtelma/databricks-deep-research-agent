@@ -42,6 +42,9 @@ _RUNTIME_TEMPLATE_KEYS: frozenset[str] = frozenset(
         "fallback_discovery_sources",
         "file_context",
         "iteration",
+        # Reflector knowledge-gaps list -- injected by build_planner_runtime_context
+        # (planner_context.py) into the builtin PLANNER_SYSTEM_PROMPT at runtime.
+        "knowledge_gaps",
         "max_steps",
         "max_words",
         "min_steps",
@@ -1774,6 +1777,9 @@ def build_web_research_workflow(
     proposer_families: list[str] | None = None
     # router coordination params (same pattern).
     router_cases: list[str] | None = None
+    # tree_search coordination params (same pattern).
+    tree_breadth: int | None = None
+    tree_depth: int | None = None
     if task_signature is not None:
         # Plan v2.1 M11: failure-closed on invalid TaskSignature payloads.
         # Previously this catch silently fell back to brief topology — the
@@ -1802,6 +1808,8 @@ def build_web_research_workflow(
         refine_max_iterations = sig.refine_max_iterations
         proposer_families = sig.proposer_families
         router_cases = sig.router_cases
+        tree_breadth = sig.tree_breadth
+        tree_depth = sig.tree_depth
     # Phase 3: dispatch through the TopologySpec registry. The registry is the
     # single source of truth for name -> builder; ``get_topology_spec`` fails
     # CLOSED on an unknown topology (no silent default to parallel_lanes). The
@@ -1825,6 +1833,8 @@ def build_web_research_workflow(
         refine_max_iterations=refine_max_iterations,
         proposer_families=proposer_families,
         router_cases=router_cases,
+        tree_breadth=tree_breadth,
+        tree_depth=tree_depth,
     )
     return get_topology_spec(topology).build(build_context)
 
@@ -2493,85 +2503,22 @@ def _build_best_of_n_workflow(
     n = max(_MIN_CANDIDATE_COUNT, min(_MAX_CANDIDATE_COUNT, n))
 
     domain_label = _workflow_domain_label(compiled_brief)
-    coordinator_system, _ = _default_prompts("coordinator")
-    researcher_system, _ = _default_prompts("researcher")
     synthesizer_system, _ = _default_prompts("synthesizer")
     synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
 
     # --- Evidence front (identical construction to parallel_lanes lanes) -----
-    lane_specs = _lane_specs(
-        compiled_brief, intent=intent, assets=assets, ambiguity_axes=ambiguity_axes
-    )
-    _require_authored_lane_specs(lane_specs, topology="best_of_n")
-    default_researcher_tools = ["web_research"]
-    tools = _tool_plan_declarations(compiled_brief)
-    if tools is None:
-        tools = _default_web_tool_decls(max_results=10)
-
-    coordinator = make_agent_node(
-        node_id="coordinator",
-        label="Coordinator",
-        subtype="coordinator",
-        input_keys=["query"],
-        output_key="coordination",
-        model_tier="simple",
-        output_format="json",
-        max_tool_calls=0,
-        extra_config={
-            "system_prompt": _with_designer_goal(
-                coordinator_system,
-                intent,
-                role="coordinator",
-                design_brief=compiled_brief,
-            ),
-        },
-    )
-    base_researcher_prompt = _with_designer_goal(
-        researcher_system,
+    # Reuse the shared evidence-front builder. The id_prefix is empty and the
+    # parallel node id/label are pinned to best_of_n's historical values so the
+    # produced AST is byte-identical to the prior inline construction (guarded by
+    # the golden-AST test ``test_evidence_front_golden_best_of_n``).
+    coordinator, evidence_parallel, lane_specs, tools = _build_evidence_front(
         intent,
-        role="researcher",
-        design_brief=compiled_brief,
-    )
-    lane_researchers: list[dict[str, Any]] = []
-    for spec in lane_specs:
-        agent_node = make_agent_node(
-            node_id=f"{spec['id']}-researcher",
-            label=spec["label"],
-            subtype="researcher",
-            input_keys=["query", "coordination"],
-            output_key=f"findings_{spec['id']}",
-            model_tier="analytical",
-            output_format="json",
-            tools=_tool_plan_bindings(
-                compiled_brief,
-                node_id=f"{spec['id']}-researcher",
-                default=default_researcher_tools,
-                researcher=True,
-            ),
-            pool_writes=[
-                {"pool": "observations", "extract": f"findings_{spec['id']}"},
-                {"pool": "sources", "extract": "sources"},
-            ],
-            max_tool_calls=12,
-            extra_config=_lane_extra_config(
-                system_prompt=_assemble_lane_system_prompt(
-                    base_researcher_prompt=base_researcher_prompt,
-                    spec=spec,
-                    include_scope_block=True,
-                ),
-                spec=spec,
-            ),
-        )
-        agent_node["error_handling"] = {
-            "on_error": "skip",
-            "max_retries": 1,
-            "retry_delay_seconds": 1.0,
-        }
-        lane_researchers.append(agent_node)
-    evidence_parallel = make_parallel(
-        node_id="evidence-lanes",
-        label=f"{domain_label} Evidence Lanes",
-        children=lane_researchers,
+        compiled_brief,
+        assets=assets,
+        ambiguity_axes=ambiguity_axes,
+        topology="best_of_n",
+        parallel_node_id="evidence-lanes",
+        parallel_label=f"{domain_label} Evidence Lanes",
     )
 
     # --- Candidate synthesizers (N diverse syntheses of the shared evidence) -
@@ -2714,22 +2661,39 @@ def _build_evidence_front(
     ambiguity_axes: list[str] | None = None,
     id_prefix: str = "",
     topology: str = "parallel_lanes",
+    parallel_node_id: str | None = None,
+    parallel_label: str | None = None,
+    extra_lane_input_keys: list[str] | None = None,
+    lane_prompt_suffix: str = "",
 ) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, str]], list[dict[str, Any]]]:
     """Build the shared evidence front: coordinator + parallel lane researchers.
 
     Returns ``(coordinator_node, evidence_parallel_node, lane_specs, tool_decls)``.
 
     Node ids are prefixed by ``id_prefix`` so the front can be embedded more than
-    once in a single workflow (e.g. one per router branch) without colliding on
-    the global duplicate-node-id rule (``workflow.validation``). Output keys and
-    pool names are intentionally left unprefixed: at most one front runs per
-    conditional branch, and pool contents are shared by design.
+    once in a single workflow (e.g. one per router branch, or one per tree_search
+    level) without colliding on the global duplicate-node-id rule
+    (``workflow.validation``). Output keys and pool names are intentionally left
+    unprefixed: pool contents are shared by design.
 
-    This is the coordinator + lane construction the ``parallel_lanes`` and
-    ``best_of_n`` builders use; centralizing it keeps the evidence contract
-    (researchers write observations+sources; tool-access + lane-prompt gates) in
-    one place. (Behavior with ``id_prefix=""`` is identical to the inline
-    parallel_lanes front.)
+    ``parallel_node_id`` / ``parallel_label`` override the evidence-parallel node's
+    id and label (default ``{id_prefix}parallel-lanes`` / ``... Parallel Research
+    Lanes``). best_of_n names its parallel ``evidence-lanes``; tree_search names
+    each level ``{id_prefix}research-level``.
+
+    ``extra_lane_input_keys`` appends additional ``input_keys`` to every lane
+    researcher (and the lane prompt may reference them via ``lane_prompt_suffix``).
+    tree_search's deeper levels use this to read the prior level's
+    ``{level{i}_review}`` reflector output so the next level targets the open gaps.
+    ``lane_prompt_suffix`` is appended to each lane researcher's system prompt
+    (after the lane-focus footer) so the gap-targeting instruction reaches the
+    researcher without overwriting the architect/placeholder-authored body.
+
+    This is the coordinator + lane construction the ``parallel_lanes``,
+    ``best_of_n``, ``router`` and ``tree_search`` builders use; centralizing it
+    keeps the evidence contract (researchers write observations+sources;
+    tool-access + lane-prompt gates) in one place. (Behavior with ``id_prefix=""``
+    and no overrides is identical to the inline parallel_lanes front.)
     """
     domain_label = _workflow_domain_label(compiled_brief)
     coordinator_system, _ = _default_prompts("coordinator")
@@ -2766,13 +2730,21 @@ def _build_evidence_front(
         role="researcher",
         design_brief=compiled_brief,
     )
+    lane_input_keys = ["query", "coordination", *(extra_lane_input_keys or [])]
     lane_researchers: list[dict[str, Any]] = []
     for spec in lane_specs:
+        lane_system_prompt = _assemble_lane_system_prompt(
+            base_researcher_prompt=base_researcher_prompt,
+            spec=spec,
+            include_scope_block=True,
+        )
+        if lane_prompt_suffix:
+            lane_system_prompt = f"{lane_system_prompt}\n\n{lane_prompt_suffix}"
         agent_node = make_agent_node(
             node_id=f"{id_prefix}{spec['id']}-researcher",
             label=spec["label"],
             subtype="researcher",
-            input_keys=["query", "coordination"],
+            input_keys=lane_input_keys,
             output_key=f"findings_{spec['id']}",
             model_tier="analytical",
             output_format="json",
@@ -2788,11 +2760,7 @@ def _build_evidence_front(
             ],
             max_tool_calls=12,
             extra_config=_lane_extra_config(
-                system_prompt=_assemble_lane_system_prompt(
-                    base_researcher_prompt=base_researcher_prompt,
-                    spec=spec,
-                    include_scope_block=True,
-                ),
+                system_prompt=lane_system_prompt,
                 spec=spec,
             ),
         )
@@ -2803,8 +2771,8 @@ def _build_evidence_front(
         }
         lane_researchers.append(agent_node)
     evidence_parallel = make_parallel(
-        node_id=f"{id_prefix}parallel-lanes",
-        label=f"{domain_label} Parallel Research Lanes",
+        node_id=parallel_node_id or f"{id_prefix}parallel-lanes",
+        label=parallel_label or f"{domain_label} Parallel Research Lanes",
         children=lane_researchers,
     )
     return coordinator, evidence_parallel, lane_specs, tools
@@ -3218,6 +3186,301 @@ def _build_iterative_refinement_workflow(
             node_id="main",
             label=f"{domain_label} Iterative Refinement Pipeline",
             children=[coordinator, evidence_parallel, refine_loop, finalizer],
+        ),
+    }
+    _inject_tool_catalogs_into_workflow(workflow)
+    validate_generated_workflow(workflow)
+    return workflow
+
+
+# ---------------------------------------------------------------------------
+# tree_search topology
+# ---------------------------------------------------------------------------
+
+_DEFAULT_TREE_BREADTH = 4
+_MIN_TREE_BREADTH = 2
+_MAX_TREE_BREADTH = 6
+_DEFAULT_TREE_DEPTH = 2
+_MIN_TREE_DEPTH = 1
+_MAX_TREE_DEPTH = 3
+
+
+def _tree_search_breadths(breadth: int, depth: int) -> list[int]:
+    """Return the per-level researcher counts for a depth-``D`` tree_search.
+
+    Narrowing breadth, mirroring gpt-researcher's ``new_breadth = max(2,
+    breadth // 2)``: level 1 has ``breadth`` researchers; each deeper level halves
+    (floored at 2). For ``(B, D) = (6, 3)`` this yields ``[6, 3, 2]``.
+    """
+    breadths = [breadth]
+    for _ in range(1, depth):
+        breadths.append(max(_MIN_TREE_BREADTH, breadths[-1] // 2))
+    return breadths
+
+
+def _tree_level_brief(
+    compiled_brief: WorkflowDesignBrief, lane_count: int
+) -> WorkflowDesignBrief:
+    """Return a copy of ``compiled_brief`` whose ``research_lanes`` has exactly
+    ``lane_count`` entries.
+
+    tree_search's per-level researcher count is the level breadth, NOT the brief's
+    authored lane count. To reuse the shared evidence-front builder (which derives
+    one researcher per ``research_lanes`` entry), we cycle the brief's authored
+    lanes up to ``lane_count`` (preserving each lane's authored system_prompt /
+    user_prompt_template) — never inventing semantic content beyond duplicating the
+    designer-authored lanes. When the brief has more lanes than the breadth, the
+    extra lanes are dropped for that level.
+    """
+    authored = list(compiled_brief.research_lanes)
+    if not authored:
+        return compiled_brief.model_copy(update={"research_lanes": []})
+    cycled = [authored[i % len(authored)] for i in range(lane_count)]
+    return compiled_brief.model_copy(update={"research_lanes": cycled})
+
+
+def _tree_reflector_directive(
+    compiled_brief: WorkflowDesignBrief, level: int, total_levels: int
+) -> str:
+    """Core directive for a tree_search between-level gap-finding reflector.
+
+    Embeds user_goal + required_outputs VERBATIM and BEFORE the strippable
+    ``## Designer Goal`` block so the reflector clears the generic-reflector
+    coverage gate (``detect_generic_reflector_prompt``). Instructs the reflector to
+    name concrete KNOWLEDGE GAPS the next, narrower level should investigate.
+    Domain-agnostic: the task's own terms are the only task-specific content.
+    """
+    required_outputs = _brief_list(
+        compiled_brief.required_outputs, fallback="the user's requested deliverable"
+    )
+    goal = _bounded_intent(compiled_brief.user_goal, max_length=600)
+    return (
+        "## Level Gap-Analysis Contract\n\n"
+        f"This is a breadth-then-depth survey. Level {level} of {total_levels} has "
+        "just finished; review what the shared observations and sources pools now "
+        "contain against the user's goal:\n"
+        f"{goal}\n\n"
+        f"The final report MUST cover these required outputs: {required_outputs}.\n"
+        "Identify the most important KNOWLEDGE GAPS that remain — required outputs "
+        "that are uncovered, thinly supported, or contradicted by the evidence "
+        "gathered so far. The NEXT (narrower) level of researchers will target the "
+        "gaps you name, so be concrete and specific.\n"
+        "Return the standard reflector JSON. Put the concrete gap-closing research "
+        "directives in suggested_changes / knowledge_gaps. Use decision='complete' "
+        "only when every required output is already well covered and grounded; "
+        "otherwise decision='adjust' with the gaps to close."
+    )
+
+
+def _tree_level_gap_clause(level: int) -> str:
+    """System-prompt suffix appended to a deeper-level researcher.
+
+    References the prior level's reflector review ``{level{level}_review}`` (a
+    whitelisted upstream output_key) so the researcher narrows onto the open
+    knowledge gaps. Kept as an appended suffix (not a prompt rewrite) so the
+    architect/placeholder-authored lane body — and the gates that read it — stay
+    intact.
+    """
+    return (
+        "## Depth Focus (gap-driven)\n"
+        f"A prior survey level already gathered breadth. Its gap analysis is:\n"
+        f"{{level{level}_review}}\n\n"
+        "Prioritize closing the knowledge gaps it names: go DEEPER on the "
+        "uncovered, thinly supported, or contradicted required outputs rather than "
+        "repeating breadth already covered. Add new source-backed evidence to the "
+        "shared pools; do not restate prior findings without new support."
+    )
+
+
+def _build_tree_search_workflow(
+    intent: str,
+    name: str,
+    compiled_brief: WorkflowDesignBrief,
+    *,
+    assets: list[dict[str, Any]] | None = None,
+    ambiguity_axes: list[str] | None = None,
+    breadth: int | None = None,
+    depth: int | None = None,
+) -> dict[str, Any]:
+    """Tree-search topology: a breadth x gap-driven-depth survey, STATIC-unrolled.
+
+    Shape (generalized over depth ``D``):
+
+        sequence(
+          coordinator,
+          parallel(level-1: breadth_1 researchers),            # _build_evidence_front("l1_")
+          [for each level i in 1..D-1:
+             level{i}_reflector (output_key="level{i}_review", emits knowledge_gaps),
+             parallel(level-(i+1): breadth_(i+1) researchers
+                      whose prompts reference {level{i}_review})],   # "l{i+1}_"
+          synthesizer)                                          # citation pipeline over the full pool
+
+    * ``D == 1`` → coordinator → parallel(B) → synthesizer (NO reflector).
+    * ``D == 2`` → one reflector between two levels.
+    * ``D == 3`` → two reflectors.
+
+    Breadth narrows per level (``next = max(2, breadth // 2)``); caps are B<=6, D<=3.
+
+    Why STATIC-unroll (not a loop): each between-level reflector is UPSTREAM of the
+    next level's lanes, so ``{level{i}_review}`` is a NORMAL upstream output_key and
+    every deeper lane's ``input_keys`` resolves against
+    ``_validate_agent_semantics``'s available-keys set. A loop-based design would put
+    the reflector output behind the loop boundary and fail the prompt-var whitelist.
+
+    Gate-clean by construction: every level is a normal evidence front (tool-access +
+    grounded-researcher contracts); the synthesizer injects observations+sources and
+    its core embeds goal + required outputs (generic-synthesizer gate); each
+    between-level reflector reuses the domain-anchored gap directive (generic-reflector
+    gate). Levels share the ``observations``/``sources`` pools, so the synthesizer's
+    citation pipeline runs over the full accumulated evidence.
+    """
+    b = breadth if breadth is not None else _DEFAULT_TREE_BREADTH
+    b = max(_MIN_TREE_BREADTH, min(_MAX_TREE_BREADTH, b))
+    d = depth if depth is not None else _DEFAULT_TREE_DEPTH
+    d = max(_MIN_TREE_DEPTH, min(_MAX_TREE_DEPTH, d))
+    breadths = _tree_search_breadths(b, d)
+
+    domain_label = _workflow_domain_label(compiled_brief)
+    reflector_system, _ = _default_prompts("reflector")
+    synthesizer_system, _ = _default_prompts("synthesizer")
+    synthesizer_system = _designer_synthesizer_system_prompt(synthesizer_system)
+
+    sequence_children: list[dict[str, Any]] = []
+    coordinator: dict[str, Any] | None = None
+    tools: list[dict[str, Any]] | None = None
+    all_lane_specs: list[dict[str, str]] = []
+
+    for level_index, level_breadth in enumerate(breadths, start=1):
+        level_brief = _tree_level_brief(compiled_brief, level_breadth)
+        # Deeper levels (level_index >= 2) target the prior level's reflector gaps.
+        extra_lane_input_keys: list[str] | None = None
+        lane_prompt_suffix = ""
+        if level_index >= 2:
+            prior_review_key = f"level{level_index - 1}_review"
+            extra_lane_input_keys = [prior_review_key]
+            lane_prompt_suffix = _tree_level_gap_clause(level_index - 1)
+        level_coordinator, level_parallel, level_specs, level_tools = _build_evidence_front(
+            intent,
+            level_brief,
+            assets=assets,
+            ambiguity_axes=ambiguity_axes,
+            id_prefix=f"l{level_index}_",
+            topology="tree_search",
+            parallel_node_id=f"l{level_index}_research-level",
+            parallel_label=f"{domain_label} Research Level {level_index} (x{level_breadth})",
+            extra_lane_input_keys=extra_lane_input_keys,
+            lane_prompt_suffix=lane_prompt_suffix,
+        )
+        if coordinator is None:
+            # Reuse the first level's coordinator; deeper levels would build an
+            # identical one, so we only emit it once (id ``l1_coordinator``).
+            coordinator = level_coordinator
+            tools = level_tools
+            sequence_children.append(coordinator)
+        all_lane_specs.extend(level_specs)
+
+        # Insert the between-level gap reflector BEFORE every level after the first
+        # so its review output_key is upstream of the deeper lanes that read it.
+        if level_index >= 2:
+            reflector = make_agent_node(
+                node_id=f"level{level_index - 1}_reflector",
+                label=f"{domain_label} Level {level_index - 1} Gap Reflector",
+                subtype="reflector",
+                input_keys=["query", "coordination"],
+                output_key=f"level{level_index - 1}_review",
+                model_tier="analytical",
+                output_format="json",
+                pool_inject=[
+                    {"pool": "observations", "threshold": 0},
+                    {"pool": "sources", "threshold": 0},
+                ],
+                max_tool_calls=0,
+                extra_config={
+                    "system_prompt": _with_designer_goal(
+                        _tree_reflector_directive(
+                            compiled_brief, level_index - 1, d
+                        )
+                        + "\n\n"
+                        + reflector_system,
+                        intent,
+                        role="reflector",
+                        design_brief=compiled_brief,
+                    ),
+                    "user_prompt_template": (
+                        "Review the survey so far for {query} and name the "
+                        "remaining knowledge gaps.\n\n"
+                        "Return reflector JSON with decision, reasoning, "
+                        "suggested_changes, knowledge_gaps, evidence_sufficiency, "
+                        "and failure_mode."
+                    ),
+                },
+            )
+            # The reflector review is consumed by the next level's lanes; a skipped
+            # output would dangle their input_keys, so it must NOT be error-skip.
+            sequence_children.append(reflector)
+        sequence_children.append(level_parallel)
+
+    synthesizer = make_agent_node(
+        node_id="tree-synthesizer",
+        label=f"{domain_label} Tree Survey Synthesizer",
+        subtype="synthesizer",
+        input_keys=["query", "coordination"],
+        output_key="report",
+        model_tier="complex",
+        output_format="markdown",
+        pool_inject=[
+            {"pool": "observations", "threshold": 0},
+            {"pool": "sources", "threshold": 0},
+        ],
+        max_tool_calls=0,
+        extra_config={
+            "system_prompt": _with_designer_goal(
+                _synthesizer_lane_coverage_directive(all_lane_specs)
+                + "\n\n"
+                + synthesizer_system,
+                intent,
+                role="synthesizer",
+                design_brief=compiled_brief,
+            ),
+            "grounding_mode": compiled_brief.grounding_mode,
+            "output_schema": _grounded_synthesizer_output_schema(compiled_brief),
+            "user_prompt_template": (
+                "Produce the final report for {query} from the FULL accumulated "
+                "evidence gathered across every survey level.\n\n"
+                "Use ONLY the injected observations and sources pools; never invent "
+                "figures, dates, quotations, or citations."
+            ),
+        },
+    )
+    sequence_children.append(synthesizer)
+
+    if tools is None:  # pragma: no cover - defensive; first level always sets it
+        tools = _default_web_tool_decls(max_results=10)
+
+    workflow = {
+        "id": "designer-draft",
+        "name": compiled_brief.workflow_name or name,
+        "description": intent,
+        "version": 1,
+        "tools": tools,
+        "pools": [
+            make_pool_decl(
+                name="sources",
+                dedup_key=_sources_dedup_key(assets, compiled_brief.tool_plan),
+                max_items=100,
+            ),
+            make_pool_decl(name="observations", dedup_key="content_hash", max_items=50),
+        ],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "token_budget": 0,
+        "timeout_seconds": 1800,
+        "root": make_sequence(
+            node_id="main",
+            label=f"{domain_label} Tree-Search Pipeline",
+            children=sequence_children,
         ),
     }
     _inject_tool_catalogs_into_workflow(workflow)

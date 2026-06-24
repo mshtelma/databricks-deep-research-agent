@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from databricks_deep_research.errors import WorkflowValidationError
+from databricks_deep_research.tools.mcp import MCPServerConfig
 from databricks_deep_research.workflow.definition import (
     ErrorConfig,
     NodeType,
@@ -140,6 +141,15 @@ def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
         SourceDefinition(**s) if isinstance(s, dict) else s for s in sources_raw
     ]
 
+    # Parse declarative MCP servers. Previously dropped here: the constructor was
+    # never given ``mcp_servers``, so persisted/loaded workflows silently lost
+    # their MCP attachments before the orchestrator could inject them. Accept
+    # dicts (YAML / ``model_dump``) or pre-built ``MCPServerConfig`` models.
+    mcp_raw = raw.get("mcp_servers", []) or []
+    mcp_servers = [
+        MCPServerConfig(**m) if isinstance(m, dict) else m for m in mcp_raw
+    ]
+
     definition = WorkflowDefinition(
         id=raw["id"],
         name=raw["name"],
@@ -147,6 +157,7 @@ def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
         version=raw.get("version", 1),
         root=root,
         tools=tool_declarations,
+        mcp_servers=mcp_servers,
         pools=raw.get("pools", []),
         sources=sources,
         models=raw.get("models", {}),

@@ -20,7 +20,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections.abc import Generator
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -102,13 +102,13 @@ async def db_session() -> Any:
     Skips gracefully when no database is configured so the test run does not
     error out — it simply reports a meaningful skip reason instead.
     """
-    import deep_research.db.session as _db_mod
     from sqlalchemy.ext.asyncio import (
         AsyncSession,
         async_sessionmaker,
         create_async_engine,
     )
 
+    import deep_research.db.session as _db_mod
     from deep_research.core.config import get_settings
     from deep_research.db.session import get_database_url
 
@@ -244,7 +244,7 @@ def test_v15_full_release_chain(
       10. Assert all five V1.5 server-side metric signals    (US-601/610/611/612/620)
       11. Assert total elapsed < 90 s                        (runtime budget)
     """
-    start = datetime.now(timezone.utc)
+    start = datetime.now(UTC)
 
     # ------------------------------------------------------------------
     # Step 1 — Import YAML via POST /agent-designer/import-yaml (US-611)
@@ -393,7 +393,7 @@ def test_v15_full_release_chain(
     # ------------------------------------------------------------------
     # Step 11 — Runtime budget: total elapsed must be < 90 s
     # ------------------------------------------------------------------
-    elapsed = (datetime.now(timezone.utc) - start).total_seconds()
+    elapsed = (datetime.now(UTC) - start).total_seconds()
     assert elapsed < 90, (
         f"V1.5 e2e exceeded 90 s budget: {elapsed:.1f} s"
     )

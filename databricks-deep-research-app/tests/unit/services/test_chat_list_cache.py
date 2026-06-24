@@ -11,15 +11,13 @@ Coverage targets per the plan §3.6:
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4, UUID
+from uuid import UUID
 
 import pytest
 
 from deep_research.services._list_cache import _UserScopedLRU
-
 
 # ---------------------------------------------------------------------------
 # _UserScopedLRU unit tests
@@ -157,9 +155,8 @@ class _CountingBackend:
         pass
 
 
-def _make_service(backend: _CountingBackend) -> "CachedChatService":
+def _make_service(backend: _CountingBackend) -> CachedChatService:
     """Build a ``CachedChatService`` over a counting backend."""
-    from unittest.mock import MagicMock
 
     from deep_research.services.cached.chat import CachedChatService
 
@@ -176,8 +173,8 @@ class TestCachedChatServiceListCache:
 
     def setup_method(self) -> None:
         # Each test gets a fresh cache singleton by patching the module-level object.
-        from deep_research.services._list_cache import _UserScopedLRU
         import deep_research.services.cached.chat as chat_mod
+        from deep_research.services._list_cache import _UserScopedLRU
 
         chat_mod._CHAT_LIST_CACHE = _UserScopedLRU(ttl_sec=2.0, max_entries=10_000)
 
@@ -240,7 +237,6 @@ class TestCachedChatServiceListCache:
         calls_after_first_list = backend.list_calls
 
         # create() should invalidate.
-        from deep_research.storage.documents import ChatDocument
         svc._stack.backend.write_chat = AsyncMock()
         await svc.create("user_b")
 

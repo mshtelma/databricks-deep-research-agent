@@ -665,7 +665,11 @@ quickstart:
 # Generate requirements.txt for Databricks Apps
 requirements: build-framework
 	@echo "Generating requirements.txt from pyproject.toml..."
-	uv pip compile pyproject.toml --python-platform x86_64-unknown-linux-gnu -o requirements.txt
+	@# --extra mcp ships the Model Context Protocol client (mcp + databricks-mcp)
+	@# in the deployed image. Without it, chat-/Designer-attached MCP servers
+	@# (client_kind=databricks) fail to build at runtime (MCPConfigError) and
+	@# contribute zero tools. The guarded imports keep the default path clean.
+	uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt
 	@# Remove local editable installs (workspace deps installed via wheel below)
 	@sed -i '' '/^-e file:/d' requirements.txt
 	@# Tell pip to look in wheels/ for local packages (e.g. databricks-deep-research)

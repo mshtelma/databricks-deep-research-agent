@@ -1335,6 +1335,22 @@ class ResearchTypeConfig(BaseModel):
         default=None,
         description="Optional per-type overrides for citation verification",
     )
+    default_tone: str | None = Field(
+        default=None,
+        description=(
+            "Optional default report tone for this research depth (lowercase "
+            "framework Tone member name, e.g. 'objective'). None => unchanged "
+            "synthesis tone. Overridden by a per-request tone."
+        ),
+    )
+    default_output_language: str | None = Field(
+        default=None,
+        description=(
+            "Optional default report output language for this research depth "
+            "(free-form language name, e.g. 'Spanish'). None => unchanged. "
+            "Overridden by a per-request output_language."
+        ),
+    )
 
     model_config = {"frozen": True}
 
@@ -1724,6 +1740,19 @@ class AgentDesignerConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class SkillsConfig(BaseModel):
+    """Skills subsystem configuration (Feature 2.2)."""
+
+    # GLOBAL kill-switch for executing skill SCRIPTS. Default OFF: even an agent
+    # with ``allow_skill_scripts=True`` cannot run skill scripts unless this is
+    # also True. Reading skill BODIES (``read_skill``) is unaffected. This is the
+    # environment-level half of the two-switch gate (the other is per-agent
+    # ``AgentNodeConfig.allow_skill_scripts``).
+    allow_script_execution: bool = False
+
+    model_config = {"frozen": True}
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
@@ -1784,6 +1813,11 @@ class AppConfig(BaseModel):
     agent_designer: AgentDesignerConfig = Field(
         default_factory=AgentDesignerConfig,
         description="Agent Designer tool catalog and SafeProbe settings.",
+    )
+    # Skills subsystem (Feature 2.2) — global skill-script kill-switch lives here.
+    skills: SkillsConfig = Field(
+        default_factory=SkillsConfig,
+        description="Skills subsystem configuration (skill-script execution gate).",
     )
 
     @model_validator(mode="after")

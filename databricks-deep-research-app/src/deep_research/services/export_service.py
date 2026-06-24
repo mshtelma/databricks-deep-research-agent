@@ -10,7 +10,9 @@ The _get_sources_for_messages() method loads all sources for multiple messages
 in a single JOIN query.
 """
 
+import html as html_lib
 import logging
+import re
 from collections import defaultdict
 from datetime import UTC, datetime
 from typing import Any
@@ -27,6 +29,77 @@ from deep_research.services.chat_service import ChatService
 from deep_research.services.message_service import MessageService
 
 logger = logging.getLogger(__name__)
+
+
+class ExportDependencyError(RuntimeError):
+    """Raised when an optional export backend (PDF/DOCX) is not installed.
+
+    Binary export (PDF/DOCX) depends on optional third-party libraries
+    (``markdown`` + ``weasyprint`` for PDF; ``markdown`` + ``htmldocx`` +
+    ``python-docx`` for DOCX) that are NOT part of the base install.  The
+    methods defer those imports so a missing library degrades to this clear,
+    catchable error (the API layer maps it to a 503) instead of crashing the
+    process at import time — the gpt-researcher "missing gobject hard-crash"
+    lesson.  Markdown/JSON export never touch these libraries.
+    """
+
+
+# Matches a markdown "## Sources" heading on its own line (any heading level),
+# used to detect a synthesizer-rendered reference list already in the report body.
+_SOURCES_HEADING_RE = re.compile(r"(?mi)^\s{0,3}#{1,6}\s+sources\b")
+
+
+def _body_has_sources_section(content: str | None) -> bool:
+    """True if *content* already contains a markdown ``## Sources`` heading.
+
+    Guards against double-appending the reference list on export when the
+    framework synthesizer already rendered one into the report body.
+    """
+    if not content:
+        return False
+    return bool(_SOURCES_HEADING_RE.search(content))
+
+
+def _markdown_to_html(markdown_text: str, *, title: str) -> str:
+    """Render *markdown_text* to a standalone HTML document.
+
+    Uses the optional ``markdown`` library (deferred import).  Citation markers
+    like ``[0]`` and the existing ``## Sources`` block are plain markdown, so
+    they render as ordinary text/links — no special handling is needed and the
+    de-dup performed upstream (``export_report_markdown``) is preserved.
+
+    Raises:
+        ExportDependencyError: If the ``markdown`` library is not installed.
+    """
+    try:
+        import markdown as markdown_lib
+    except ImportError as exc:  # pragma: no cover - exercised via degrade test
+        raise ExportDependencyError(
+            "PDF/DOCX export requires the 'markdown' library; install the "
+            "'export' optional dependency group"
+        ) from exc
+
+    body_html = markdown_lib.markdown(
+        markdown_text,
+        extensions=["tables", "fenced_code", "sane_lists"],
+    )
+    safe_title = html_lib.escape(title)
+    # Minimal print-oriented styling; self-contained so the PDF/DOCX renderer
+    # needs no external assets (no network egress).
+    return (
+        "<!DOCTYPE html>\n"
+        '<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+        f"<title>{safe_title}</title>\n"
+        "<style>\n"
+        "body { font-family: sans-serif; line-height: 1.5; margin: 2em; }\n"
+        "h1, h2, h3 { color: #1a1a1a; }\n"
+        "table { border-collapse: collapse; }\n"
+        "th, td { border: 1px solid #ccc; padding: 4px 8px; }\n"
+        "code { background: #f4f4f4; padding: 1px 4px; }\n"
+        "</style>\n</head>\n<body>\n"
+        f"{body_html}\n"
+        "</body>\n</html>\n"
+    )
 
 
 class ExportService:
@@ -352,8 +425,10 @@ class ExportService:
 
         lines.extend(["", "---", ""])
 
-        # Sources section
-        if session:
+        # Sources section — skip when the report body already carries a
+        # synthesizer-rendered "## Sources" block (framework feature 4.2), so we
+        # never double-append the reference list on export.
+        if session and not _body_has_sources_section(message.content):
             sources_result = await self._session.execute(
                 select(Source)
                 .where(Source.research_session_id == session.id)
@@ -369,6 +444,105 @@ class ExportService:
                 lines.extend([""])
 
         return "\n".join(lines)
+
+    async def _report_title(self, message_id: UUID) -> str:
+        """Best-effort report title from the research session query."""
+        session_result = await self._session.execute(
+            select(ResearchSession).where(ResearchSession.message_id == message_id)
+        )
+        session = session_result.scalar_one_or_none()
+        if session and session.query:
+            title = session.query[:100]
+            if len(session.query) > 100:
+                title += "..."
+            return title
+        return "Research Report"
+
+    async def export_pdf(
+        self,
+        message_id: UUID,
+        user_id: str,
+    ) -> bytes:
+        """Export an agent response as a PDF document.
+
+        Pipeline: ``export_report_markdown`` (which already de-dups the
+        ``## Sources`` section and keeps citation markers) -> HTML -> PDF via
+        the optional ``weasyprint`` library.  The conversion libraries are
+        imported lazily, so a deployment without them degrades to a catchable
+        :class:`ExportDependencyError` rather than crashing.
+
+        Args:
+            message_id: Agent message ID containing the synthesis.
+            user_id: User ID for authorization.
+
+        Returns:
+            PDF document bytes.
+
+        Raises:
+            ValueError: If the message is not found or not owned by the user.
+            ExportDependencyError: If the PDF backend is not installed.
+        """
+        markdown_text = await self.export_report_markdown(message_id, user_id)
+        title = await self._report_title(message_id)
+        html_doc = _markdown_to_html(markdown_text, title=title)
+
+        try:
+            from weasyprint import HTML
+        except ImportError as exc:
+            logger.info("EXPORT_PDF_DEGRADED reason=weasyprint_not_installed")
+            raise ExportDependencyError(
+                "PDF export requires the 'weasyprint' library; install the "
+                "'export' optional dependency group"
+            ) from exc
+
+        pdf_bytes = HTML(string=html_doc).write_pdf()
+        if not isinstance(pdf_bytes, bytes):  # pragma: no cover - lib contract
+            raise ExportDependencyError("PDF renderer returned no document")
+        return pdf_bytes
+
+    async def export_docx(
+        self,
+        message_id: UUID,
+        user_id: str,
+    ) -> bytes:
+        """Export an agent response as a Word (.docx) document.
+
+        Pipeline: ``export_report_markdown`` -> HTML -> DOCX via the optional
+        ``htmldocx`` + ``python-docx`` libraries (deferred import).  Inherits the
+        same ``## Sources`` de-dup + citation markers as the markdown export.
+
+        Args:
+            message_id: Agent message ID containing the synthesis.
+            user_id: User ID for authorization.
+
+        Returns:
+            DOCX document bytes.
+
+        Raises:
+            ValueError: If the message is not found or not owned by the user.
+            ExportDependencyError: If the DOCX backend is not installed.
+        """
+        markdown_text = await self.export_report_markdown(message_id, user_id)
+        title = await self._report_title(message_id)
+        html_doc = _markdown_to_html(markdown_text, title=title)
+
+        try:
+            import io
+
+            from docx import Document
+            from htmldocx import HtmlToDocx
+        except ImportError as exc:
+            logger.info("EXPORT_DOCX_DEGRADED reason=htmldocx_or_python_docx_missing")
+            raise ExportDependencyError(
+                "DOCX export requires the 'htmldocx' and 'python-docx' "
+                "libraries; install the 'export' optional dependency group"
+            ) from exc
+
+        document = Document()
+        HtmlToDocx().add_html_to_document(html_doc, document)
+        buffer = io.BytesIO()
+        document.save(buffer)
+        return buffer.getvalue()
 
     async def export_provenance_markdown(
         self,

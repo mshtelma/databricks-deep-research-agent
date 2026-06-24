@@ -1048,12 +1048,27 @@ _VS_MODERATE_RELEVANCE_THRESHOLD = 0.3
 # performed semantic matching.
 _VS_RELEVANCE_FALLBACK_THRESHOLD = 0.3
 
+# Admission boost applied to sources whose text carries numeric / statistical
+# content (currency, percentages, large numbers, "billion/million").  Reuses the
+# SAME detector as citation Stage 1 (evidence selection) and Stage 6 (numeric QA)
+# so "admitted-as-numeric" == "boosted in Stage 1" == "verifiable in Stage 6".
+# Kept deliberately small (1) so numeric spam (bare prices/dates) cannot float a
+# weak source on its own — the substantive-overlap signals still dominate.
+NUMERIC_ADMISSION_BOOST = 1
+
+# Feature flag for the relaxed web/default acceptance gate in
+# ``_should_accept_source``.  Default ``False`` preserves the historical
+# ``score >= 2`` gate exactly (byte-identical behaviour).  When ``True``, a
+# source that carries numeric content is admitted at ``score >= 1`` so figures
+# that would otherwise fall just below threshold still reach the pool.
+_RELAX_GATE_FOR_NUMERIC = False
+
 
 def _score_source_relevance(
     source: dict[str, Any],
     profile: dict[str, Any],
     *,
-    reputation_scorer: "SourceReputationScorer | None" = None,
+    reputation_scorer: SourceReputationScorer | None = None,
 ) -> tuple[int, str]:
     """Score a candidate source for admission to the evidence pool.
 
@@ -1102,6 +1117,17 @@ def _score_source_relevance(
             pass
     score += enterprise_boost
 
+    # Numeric-content boost — upweight sources carrying figures at ADMISSION so
+    # they reach the pool (prevention-over-cleanup for numeric-evidence recovery).
+    # Reuses the shared citation detector so the same notion of "numeric" governs
+    # admission, Stage-1 evidence selection, and Stage-6 numeric QA.
+    from databricks_deep_research.citation.utils import has_numeric_content
+
+    has_numeric = has_numeric_content(text)
+    if has_numeric:
+        score += NUMERIC_ADMISSION_BOOST
+        source["has_numeric"] = True
+
     # Reputation adjustment — soft per-agent ranking signal from
     # preferred/deprecated domain lists. No-op when scorer is None or
     # has empty pattern lists.
@@ -1122,6 +1148,8 @@ def _score_source_relevance(
         reason_parts.append(f"phrases={matched_phrases[:2]}")
     if enterprise_boost:
         reason_parts.append(f"enterprise_boost=+{enterprise_boost} (relevance_score={relevance_score})")
+    if has_numeric:
+        reason_parts.append(f"numeric_boost=+{NUMERIC_ADMISSION_BOOST}")
     if reputation_delta:
         reason_parts.append(f"reputation={reputation_delta:+d} ({reputation_reason})")
     reason = ", ".join(reason_parts) if reason_parts else "no meaningful overlap with step profile"
@@ -1129,7 +1157,7 @@ def _score_source_relevance(
     logger.debug(
         "ADMISSION_SCORE_BREAKDOWN source_title=%r source_kind=%s "
         "relevance_score=%s text_len=%d matched_terms=%s matched_phrases=%s "
-        "enterprise_boost=%d reputation_delta=%+d final_score=%d threshold=2",
+        "enterprise_boost=%d has_numeric=%s reputation_delta=%+d final_score=%d threshold=2",
         source.get("title", "")[:120],
         source_kind,
         relevance_score,
@@ -1137,6 +1165,7 @@ def _score_source_relevance(
         matched_terms[:6],
         matched_phrases[:4],
         enterprise_boost,
+        has_numeric,
         reputation_delta,
         score,
     )
@@ -1176,6 +1205,12 @@ def _should_accept_source(
         except (TypeError, ValueError):
             return False
 
+    # Web/default gate.  Default behaviour is the historical ``score >= 2``.
+    # When the numeric-relaxation flag is on, a source carrying numeric content
+    # is admitted at ``score >= 1`` so borderline figure-bearing sources still
+    # reach the pool.
+    if _RELAX_GATE_FOR_NUMERIC:
+        return score >= 2 or (bool(source.get("has_numeric")) and score >= 1)
     return score >= 2
 
 

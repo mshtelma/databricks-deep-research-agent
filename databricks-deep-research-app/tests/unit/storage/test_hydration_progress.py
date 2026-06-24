@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
 from uuid import uuid4
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage.cache import ChatStateCache
 from deep_research.storage.hydration_progress import (
@@ -13,8 +13,6 @@ from deep_research.storage.hydration_progress import (
     HydrationTimeoutError,
 )
 from deep_research.storage.observability import RecordingSink, use_sink
-from tests.fakes.fake_backend import FakeBackend
-
 
 # Compressed deadlines so tests are fast. Semantics identical to production:
 # deadline_1 emits 'context_loading', deadline_2 emits 'context_slow',
@@ -97,9 +95,8 @@ class TestCap:
             deadlines=_TEST_DEADLINES,
         )
         sink = RecordingSink()
-        with use_sink(sink):
-            with pytest.raises(HydrationTimeoutError) as excinfo:
-                await hp.hydrate(uuid4(), user_id="u")
+        with use_sink(sink), pytest.raises(HydrationTimeoutError) as excinfo:
+            await hp.hydrate(uuid4(), user_id="u")
         # Both intermediate events fired before the cap hit.
         assert events == ["context_loading", "context_slow"]
         assert sink.count("storage_first_turn_outcome_total", outcome="capped", backend="fake") == 1

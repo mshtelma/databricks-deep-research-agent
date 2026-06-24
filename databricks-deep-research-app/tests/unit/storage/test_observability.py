@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from deep_research.storage.observability import (
     LogStructuredSink,
     MetricsSink,

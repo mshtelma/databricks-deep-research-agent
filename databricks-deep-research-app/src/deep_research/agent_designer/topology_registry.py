@@ -59,6 +59,9 @@ class TopologyBuildContext:
     proposer_families: list[str] | None = None
     # router coordination params (ignored by the others' adapters).
     router_cases: list[str] | None = None
+    # tree_search coordination params (ignored by the others' adapters).
+    tree_breadth: int | None = None
+    tree_depth: int | None = None
 
 
 @dataclass(frozen=True)
@@ -79,6 +82,7 @@ def _build_registry() -> dict[str, TopologySpec]:
         _build_plan_and_execute_workflow,
         _build_router_workflow,
         _build_single_agent_workflow,
+        _build_tree_search_workflow,
     )
 
     return {
@@ -156,6 +160,25 @@ def _build_registry() -> dict[str, TopologySpec]:
                 assets=c.assets,
                 ambiguity_axes=c.ambiguity_axes,
                 router_cases=c.router_cases,
+            ),
+        ),
+        "tree_search": TopologySpec(
+            name="tree_search",
+            # A coordinator -> (parallel level, gap reflector)* -> synthesizer
+            # sequence. Its level parallels would make the generic topology walker
+            # infer parallel_lanes, so it gets its OWN structural family and the
+            # probe detects it at the root BEFORE the generic parallel-recursion
+            # (mirrors router). Level/reflector shape is verified by the probe's
+            # tree_search invariants.
+            structural_family="tree_search",
+            build=lambda c: _build_tree_search_workflow(
+                c.intent,
+                c.name,
+                c.brief,
+                assets=c.assets,
+                ambiguity_axes=c.ambiguity_axes,
+                breadth=c.tree_breadth,
+                depth=c.tree_depth,
             ),
         ),
     }

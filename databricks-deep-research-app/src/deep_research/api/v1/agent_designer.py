@@ -63,6 +63,7 @@ from deep_research.agent_designer.turn_registry import (
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
 from deep_research.agent_designer.yaml_import import YamlImportError, parse_and_validate_yaml
 from deep_research.core.app_config import get_app_config
+from deep_research.core.config import get_settings
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.agent_v2 import CustomToolDef
@@ -455,6 +456,8 @@ _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
         "serving_endpoint",
         "delta_table",
         "sql_warehouse",
+        "mcp_server",
+        "skill",
     }
 )
 
@@ -557,6 +560,44 @@ async def get_registry(
     )
     record_registry_fetch((time.monotonic() - _t0) * 1000)
     return result
+
+
+class CapabilitiesResponse(BaseModel):
+    """Global feature-gate states the Designer/chat UI needs to annotate knobs.
+
+    A per-agent toggle (e.g. ``allow_skill_scripts``) is a no-op unless its global
+    switch is also on; exposing these lets the UI warn the author instead of
+    silently doing nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_scripts_global: bool = Field(
+        description="skills.allow_script_execution — global gate for executing skill scripts."
+    )
+    cross_session_memory_global: bool = Field(
+        description="cross_session_memory_enabled — default for recalling facts from prior chats."
+    )
+    live_search_global: bool = Field(
+        description="followup_live_search_enabled — default for the chat-over-report live-search escape hatch."
+    )
+
+
+@router.get("/capabilities", response_model=CapabilitiesResponse)
+async def get_capabilities() -> CapabilitiesResponse:
+    """Report global feature-gate states so the UI can annotate gated knobs.
+
+    Returns only non-sensitive global booleans; route auth is enforced by the
+    app's middleware stack (no per-route identity needed).
+    """
+    settings = get_settings()
+    return CapabilitiesResponse(
+        skill_scripts_global=bool(get_app_config().skills.allow_script_execution),
+        cross_session_memory_global=bool(
+            getattr(settings, "cross_session_memory_enabled", False)
+        ),
+        live_search_global=bool(getattr(settings, "followup_live_search_enabled", False)),
+    )
 
 
 def _tool_declarations_from_definition(
@@ -788,6 +829,10 @@ class ChatRequest(BaseModel):
     current_ast: dict[str, Any] | None = None
     session_id: str | None = None
     assets: list[DesignerAsset] = Field(default_factory=list)
+    # Skill -> Workflow (P5): skill names to COMPILE into the drafted workflow.
+    # Kept separate from `assets` so they never enter the resource-asset /
+    # tool-contract / structural-gate paths (Codex CRITICAL #5).
+    skill_names: list[str] = Field(default_factory=list)
 
 
 def _format_sse(event_type: str, payload: dict[str, Any], *, seq: int | None = None) -> str:
@@ -941,6 +986,7 @@ async def chat(
             user_token=obo_token,
             current_user_id=user.user_id,
             assets=request.assets,
+            skill_names=request.skill_names,
         ),
         on_error=_log_stream_error,
     )

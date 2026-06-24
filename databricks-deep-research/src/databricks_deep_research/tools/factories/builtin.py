@@ -16,9 +16,11 @@ logger = logging.getLogger(__name__)
 
 _SUPPORTED_KINDS = frozenset({
     "web_search", "web_crawl", "web_research",
+    "academic_search",
     "file_search", "compute", "compute_namespace",
     "table_discovery", "table_search", "table_read",
     "table_neighbors", "table_load", "table_aggregate",
+    "read_skill",
 })
 _FUNCTIONAL_TABLE_KINDS = frozenset({
     "table_search",
@@ -416,6 +418,22 @@ class BuiltinToolFactory:
                 "the cleaned page body."
             ),
         ),
+        "academic_search": CatalogCard(
+            summary="Search key-less scholarly APIs and return papers with abstracts and links.",
+            input_prose=(
+                "Provide a focused scholarly query string — author names, "
+                "concepts, methods, or a paper title work best. The backing "
+                "corpus is selected by the tool's configured provider (arxiv, "
+                "openalex, pubmed_central, or semantic_scholar); no API key is "
+                "required."
+            ),
+            output_prose=(
+                "Returns a list of papers. Each entry includes a title, a "
+                "landing-page or DOI URL, and an abstract (reconstructed where the "
+                "provider ships it inverted). URLs are registered with the "
+                "framework so cite results by the assigned index."
+            ),
+        ),
         "file_search": CatalogCard(
             summary="Search a local file index by keyword and return matching file paths.",
             input_prose=(
@@ -530,12 +548,25 @@ class BuiltinToolFactory:
                 "carries one row per group with the requested aggregate value."
             ),
         ),
+        "read_skill": CatalogCard(
+            summary="Load the full body of an attached skill by name (progressive disclosure).",
+            input_prose=(
+                "Provide the exact name of a skill listed (name + description only) "
+                "in the system prompt. The tool fetches that skill's full instructions "
+                "from the configured skill store."
+            ),
+            output_prose=(
+                "Returns the skill body as markdown. On an unknown name, returns a "
+                "graceful miss listing the available skill names."
+            ),
+        ),
     }
 
     safe_probes: ClassVar[Mapping[str, SafeProbe | None]] = {
         "web_search": None,
         "web_crawl": None,
         "web_research": None,
+        "academic_search": None,
         "file_search": None,
         "compute": None,
         "compute_namespace": None,
@@ -545,6 +576,7 @@ class BuiltinToolFactory:
         "table_neighbors": None,
         "table_load": None,
         "table_aggregate": None,
+        "read_skill": None,
     }
 
     def supports(self, kind: str) -> bool:
@@ -628,6 +660,38 @@ class BuiltinToolFactory:
                 max_body_chars=decl.config.get("max_body_chars", 8000),
             )
 
+        if decl.kind == "academic_search":
+            # Key-less scholarly retriever. config.provider selects the backing
+            # corpus (arxiv [default], openalex, pubmed_central,
+            # semantic_scholar). Network is constructed inside the tool from a
+            # mockable http_fetch seam; no API key required (an optional key is
+            # forwarded for providers that offer one — Semantic Scholar / NCBI).
+            from databricks_deep_research.tools.builtins.academic_search import (
+                ACADEMIC_PROVIDERS,
+                DEFAULT_ACADEMIC_PROVIDER,
+            )
+
+            provider = (
+                _clean_str(decl.config.get("provider")) or DEFAULT_ACADEMIC_PROVIDER
+            ).lower()
+            tool_cls = ACADEMIC_PROVIDERS.get(provider)
+            if tool_cls is None:
+                raise ValueError(
+                    f"Unknown academic_search provider: {provider!r}. "
+                    f"Supported: {sorted(ACADEMIC_PROVIDERS)}"
+                )
+
+            return tool_cls(
+                http_fetch=ctx.extras.get("_academic_http_fetch"),
+                name=decl.name,
+                description=decl.description or "",
+                max_results=decl.config.get("max_results", 5),
+                max_content_chars=decl.config.get("max_content_chars", 8000),
+                timeout_seconds=decl.config.get("timeout_seconds", 30.0),
+                api_key=_clean_str(decl.config.get("api_key"))
+                or ctx.api_keys.get(provider),
+            )
+
         if decl.kind == "file_search":
             if ctx.file_index is None:
                 raise ValueError(
@@ -645,6 +709,7 @@ class BuiltinToolFactory:
                 name=decl.name,
                 allowed_modules=decl.config.get("allowed_modules"),
                 extra_modules=decl.config.get("extra_modules"),
+                enable_dataframes=decl.config.get("enable_dataframes", False),
                 max_execution_seconds=decl.config.get("max_execution_seconds", 10.0),
                 max_output_chars=decl.config.get("max_output_chars", 10_000),
                 max_code_length=decl.config.get("max_code_length", 20_000),
@@ -667,6 +732,27 @@ class BuiltinToolFactory:
 
             return ComputeNamespaceListTool(
                 compute_resolver=_resolve_compute,
+                name=decl.name,
+                description=decl.description,
+            )
+
+        if decl.kind == "read_skill":
+            # The SkillStore is injected by the host via ctx.extras using the
+            # framework-reserved ``_skill_store`` key (same DI idiom as the
+            # compute resolver). The framework stays free of any persistence
+            # dependency — the host supplies a FilesystemSkillStore or its own.
+            skill_store = ctx.extras.get("_skill_store")
+            if skill_store is None:
+                raise ValueError(
+                    f"read_skill tool '{decl.name}' requires a SkillStore in "
+                    f"ToolFactoryContext.extras['_skill_store']"
+                )
+            from databricks_deep_research.tools.builtins.read_skill import (
+                ReadSkillTool,
+            )
+
+            return ReadSkillTool(
+                skill_store=skill_store,
                 name=decl.name,
                 description=decl.description,
             )

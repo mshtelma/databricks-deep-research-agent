@@ -133,3 +133,78 @@ def test_update_workflow_meta_rejects_unknown_or_structural_keys() -> None:
     for bad in ({"tools": []}, {"root": {}}, {"id": "x"}, {}):
         with pytest.raises(m.BlockMutationError):
             m.update_workflow_meta(ast, bad)
+
+
+# --- expected_count patch-semantics (DeerFlow skill_manage_tool.py:135) ------
+
+
+def test_count_matching_nodes_counts_distinct_resolved_refs() -> None:
+    ast = _ast()
+    assert m.count_matching_nodes(ast, "cand-0") == 1
+    assert m.count_matching_nodes(ast, ["cand-0", "root"]) == 2
+    # duplicate refs to the same node count once
+    assert m.count_matching_nodes(ast, ["cand-0", "cand-0"]) == 1
+    # an unresolvable ref contributes zero
+    assert m.count_matching_nodes(ast, "does-not-exist") == 0
+
+
+def test_assert_match_count_passes_on_exact_match() -> None:
+    ast = _ast()
+    # No raise == pass.
+    m.assert_match_count(ast, "cand-0", 1)
+
+
+def test_assert_match_count_fails_loudly_on_wrong_count() -> None:
+    ast = _ast()
+    with pytest.raises(m.PatchCountError) as exc_info:
+        m.assert_match_count(ast, "does-not-exist", 1)
+    msg = str(exc_info.value)
+    assert "expected to match 1" in msg
+    assert "matched 0" in msg
+    assert "NOT applied" in msg
+    # PatchCountError is a BlockMutationError so existing handlers catch it.
+    assert isinstance(exc_info.value, m.BlockMutationError)
+
+
+def test_assert_match_count_rejects_negative_expected() -> None:
+    ast = _ast()
+    with pytest.raises(m.PatchCountError):
+        m.assert_match_count(ast, "cand-0", -1)
+
+
+def test_edit_update_block_with_correct_expected_count_lands() -> None:
+    ast = _ast()
+    out = m.edit_update_block(
+        ast,
+        "cand-0",
+        {"config": {"system_prompt": "patched"}},
+        expected_count=1,
+    )
+    assert out["root"]["children"][0]["config"]["system_prompt"] == "patched"
+
+
+def test_edit_update_block_with_wrong_expected_count_fails_and_no_apply() -> None:
+    ast = _ast()
+    before = ast["root"]["children"][0]["config"]["system_prompt"]
+    # The node resolves to exactly 1, so asserting 2 must fail loudly.
+    with pytest.raises(m.PatchCountError, match="expected to match 2"):
+        m.edit_update_block(
+            ast,
+            "cand-0",
+            {"config": {"system_prompt": "should-not-apply"}},
+            expected_count=2,
+        )
+    # Input AST untouched (pure functions) — patch was NOT mis-applied.
+    assert ast["root"]["children"][0]["config"]["system_prompt"] == before
+
+
+def test_edit_update_block_default_expected_count_is_byte_identical() -> None:
+    ast = _ast()
+    # Without expected_count, behavior is exactly as before (no assertion).
+    out_default = m.edit_update_block(
+        ast, "cand-0", {"config": {"model_tier": "complex"}}
+    )
+    out_explicit = m.edit_update_block(
+        ast, "cand-0", {"config": {"model_tier": "complex"}}, expected_count=1
+    )
+    assert out_default == out_explicit

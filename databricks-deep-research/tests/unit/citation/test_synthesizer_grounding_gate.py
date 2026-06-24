@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from databricks_deep_research.agents.builtins.synthesizer import (
-    _GroundingOutcome,
     _build_reclaim_generation_instructions,
     _classify_grounding,
+    _GroundingOutcome,
 )
 from databricks_deep_research.agents.config import AgentNodeConfig
 from databricks_deep_research.citation.types import ClaimInfo, ClaimRole

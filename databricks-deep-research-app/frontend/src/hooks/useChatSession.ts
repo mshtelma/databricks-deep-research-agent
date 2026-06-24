@@ -296,6 +296,8 @@ function _reconnectBackoffMs(attempt: number): number {
 export function useChatSession(opts?: {
   sessionId?: string | null
   assets?: DesignerAssetsProvider
+  // Skill -> Workflow (P5): skill names to compile into the drafted workflow.
+  skillNames?: string[] | (() => string[])
 }): ChatSession {
   const [state, dispatch] = useReducer(reducer, initialChatState)
   // Keep a live ref to pendingMutations so applyPendingMutation can read
@@ -307,6 +309,8 @@ export function useChatSession(opts?: {
   const sessionId = opts?.sessionId
   const assetsRef = useRef<DesignerAssetsProvider | undefined>(opts?.assets)
   assetsRef.current = opts?.assets
+  const skillNamesRef = useRef<string[] | (() => string[]) | undefined>(opts?.skillNames)
+  skillNamesRef.current = opts?.skillNames
 
   // Keep a live ref to isStreaming and messages for the sendMessage guard
   const isStreamingRef = useRef(false)
@@ -398,6 +402,8 @@ export function useChatSession(opts?: {
       const allMessages: ChatMessage[] = [...messagesRef.current, userMessage]
       const assetSource = assetsRef.current
       const assets = typeof assetSource === 'function' ? assetSource() : assetSource
+      const skillSource = skillNamesRef.current
+      const skillNames = typeof skillSource === 'function' ? skillSource() : skillSource
 
       const controller = new AbortController()
       abortRef.current = controller
@@ -441,6 +447,7 @@ export function useChatSession(opts?: {
           current_ast: currentAst,
           session_id: sessionId,
           assets,
+          skill_names: skillNames,
           signal: controller.signal,
         })
         let reconnects = 0

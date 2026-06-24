@@ -18,7 +18,6 @@ from deep_research.observability.agent_designer_metrics import (
 )
 from deep_research.storage.observability import RecordingSink, use_sink
 
-
 # ---------------------------------------------------------------------------
 # record_registry_fetch
 # ---------------------------------------------------------------------------

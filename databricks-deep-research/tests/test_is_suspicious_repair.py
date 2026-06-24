@@ -13,14 +13,13 @@ import logging
 
 import pytest
 
+from databricks_deep_research.agents.config import AgentNodeConfig
 from databricks_deep_research.agents.harness import (
     _JSON_REPAIR_MIN_SIZE_RATIO,
     _is_suspicious_repair,
     _parse_output,
     _UnparsedJSONOutput,
 )
-from databricks_deep_research.agents.config import AgentNodeConfig
-
 
 # ---------------------------------------------------------------------------
 # _is_suspicious_repair behavior

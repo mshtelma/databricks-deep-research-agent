@@ -79,11 +79,21 @@ def build_databricks_workflow_runner(
 
 
 def workflow_requires_databricks(definition: WorkflowDefinition) -> bool:
-    """Return ``True`` iff any top-level declared tool is Databricks-bound.
+    """Return ``True`` iff the workflow needs the caller's Databricks identity.
 
-    Hosts use this to fail closed: when a workflow needs UC-gated resources
-    (``DATABRICKS_BOUND_TOOL_KINDS``) but no OBO user token was forwarded,
-    running as the service principal would silently produce permission
-    errors / empty results, so the host should reject the request instead.
+    Hosts use this to fail closed: when a workflow needs UC-gated resources but
+    no OBO user token was forwarded, running as the service principal would
+    silently produce permission errors / empty results, so the host should
+    reject the request instead. This is True when either:
+
+    * a top-level declared tool is Databricks-bound
+      (``DATABRICKS_BOUND_TOOL_KINDS``), or
+    * any configured MCP server is a Databricks managed / UC-connection server
+      (``client_kind='databricks'``), which is reached strictly under OBO (B1).
     """
-    return any(tool.kind in DATABRICKS_BOUND_TOOL_KINDS for tool in definition.tools)
+    if any(tool.kind in DATABRICKS_BOUND_TOOL_KINDS for tool in definition.tools):
+        return True
+    return any(
+        getattr(server, "client_kind", "http") == "databricks"
+        for server in (getattr(definition, "mcp_servers", None) or [])
+    )

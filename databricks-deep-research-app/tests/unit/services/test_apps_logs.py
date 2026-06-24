@@ -10,18 +10,14 @@ Covers:
 """
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
 from deep_research.services.deployment.apps_logs import (
-    AppLogTail,
-    SECRET_PATTERNS,
     _redact,
     fetch_app_log_tail,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

@@ -178,6 +178,12 @@ class JobManager:
         turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
+        tone: str | None = None,
+        output_language: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+        enabled_skills: list[str] | None = None,
+        enable_cross_session_memory: bool | None = None,
+        allow_live_search: bool | None = None,
     ) -> ResearchSession:
         """Submit a new research job.
 
@@ -372,6 +378,12 @@ class JobManager:
                 turn_intent=turn_intent,
                 enable_plan_review=enable_plan_review,
                 approval_broker=approval_broker,
+                tone=tone,
+                output_language=output_language,
+                enabled_mcp_servers=enabled_mcp_servers,
+                enabled_skills=enabled_skills,
+                enable_cross_session_memory=enable_cross_session_memory,
+                allow_live_search=allow_live_search,
             )
         )
         self._active_tasks[session_id] = task
@@ -524,6 +536,12 @@ class JobManager:
         turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
+        tone: str | None = None,
+        output_language: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+        enabled_skills: list[str] | None = None,
+        enable_cross_session_memory: bool | None = None,
+        allow_live_search: bool | None = None,
     ) -> None:
         """Execute research job in background.
 
@@ -643,10 +661,33 @@ class JobManager:
                         output_type=output_type,
                     )
 
+            # Resolve per-run tone/output-language: an explicit per-request value
+            # wins; otherwise fall back to the research-depth config defaults
+            # (default_tone / default_output_language). Both absent => None =>
+            # unchanged synthesis (byte-identical default path).
+            effective_tone = tone
+            effective_output_language = output_language
+            if effective_tone is None or effective_output_language is None:
+                try:
+                    from deep_research.agent.config import get_research_type_config
+
+                    _valid_depths = {"light", "medium", "extended"}
+                    _depth = research_depth if research_depth in _valid_depths else "medium"
+                    _depth_config = get_research_type_config(_depth)
+                    if effective_tone is None:
+                        effective_tone = _depth_config.default_tone
+                    if effective_output_language is None:
+                        effective_output_language = _depth_config.default_output_language
+                except Exception:
+                    # Defaulting is best-effort; never block a job on config lookup.
+                    logger.debug("RESEARCH_TYPE_TONE_DEFAULT_LOOKUP_FAILED", exc_info=True)
+
             config = OrchestrationConfig(
                 query_mode=query_mode,
                 research_depth=research_depth,
                 system_instructions=system_instructions,
+                tone=effective_tone,
+                output_language=effective_output_language,
                 message_id=message_id,
                 research_session_id=session_id,
                 is_draft=False,  # Chat already created
@@ -659,6 +700,10 @@ class JobManager:
                 source_scope=source_scope,
                 enabled_sources=enabled_sources,
                 disabled_sources=disabled_sources,
+                enabled_mcp_servers=enabled_mcp_servers,
+                enabled_skills=enabled_skills,
+                enable_cross_session_memory=enable_cross_session_memory,
+                allow_live_search=allow_live_search,
                 user_token=user_token,  # OBO auth for enterprise tools
                 file_ids=file_ids,
                 agent_id=agent_id,

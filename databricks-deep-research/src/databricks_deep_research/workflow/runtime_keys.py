@@ -38,6 +38,7 @@ _HARNESS_TEMPLATE_KEYS: frozenset[str] = frozenset(
         "fallback_discovery_sources",
         "file_context",
         "iteration",
+        "knowledge_gaps",
         "max_steps",
         "max_words",
         "min_steps",

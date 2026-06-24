@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -12,7 +11,6 @@ from deep_research.storage.backend import StorageBackend
 from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.cold_cache import ColdReadCache
 from deep_research.storage.factory import (
-    StorageStack,
     create_backend,
     create_storage_stack,
 )

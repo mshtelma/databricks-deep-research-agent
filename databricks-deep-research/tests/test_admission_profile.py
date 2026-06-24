@@ -23,7 +23,6 @@ from databricks_deep_research.agents.source_aware import (
     _reserve_slots,
 )
 
-
 # ---------------------------------------------------------------------------
 # _reserve_slots — pure allocator
 # ---------------------------------------------------------------------------

@@ -18,6 +18,10 @@ class ReplanFeedbackEntry:
     cycle: int
     message: str
     step_title: str = ""
+    # Explicit reflector-emitted coverage gaps carried into the next planning
+    # step. Optional-with-default: an empty list preserves today's behavior
+    # (the planner simply renders no "Open knowledge gaps" section).
+    knowledge_gaps: list[str] = field(default_factory=list)
 
 
 @dataclass

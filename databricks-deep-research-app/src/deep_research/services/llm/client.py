@@ -28,7 +28,7 @@ from deep_research.core.logging_utils import (
 from deep_research.core.tracing import safe_tool_span
 from deep_research.services.llm.config import ModelConfig
 from deep_research.services.llm.types import (
-    CLAUDE_THINKING_BUDGETS,
+    CLAUDE_ADAPTIVE_EFFORT,
     EndpointHealth,
     LLMResponse,
     ModelEndpoint,
@@ -406,19 +406,20 @@ class LLMClient:
             if force_tool_use:
                 return config
 
-            # Resolve budget: explicit override → tier default
-            resolved_max_tokens = config["max_tokens"]
-            if effective_effort == ReasoningEffort.MAX:
-                budget = max(1024, resolved_max_tokens - 1024)
-            else:
-                budget = (
-                    endpoint.reasoning_budget
-                    or role.reasoning_budget
-                    or CLAUDE_THINKING_BUDGETS[effective_effort.value]
-                )
-
+            # Claude 4.x uses ADAPTIVE thinking. The gateway rejects the legacy
+            # {"type": "enabled", "budget_tokens": N} shape ("thinking.type.enabled
+            # is not supported for this model. Use thinking.type.adaptive and
+            # output_config.effort to control thinking behavior."). Map the effort
+            # enum onto the adaptive set (low | high | max); NONE/MINIMAL already
+            # returned above, so are never seen here.
+            effort_key = (
+                effective_effort.value if effective_effort is not None else "high"
+            )
             config["extra_body"] = {
-                "thinking": {"type": "enabled", "budget_tokens": budget}
+                "thinking": {"type": "adaptive"},
+                "output_config": {
+                    "effort": CLAUDE_ADAPTIVE_EFFORT.get(effort_key, "high")
+                },
             }
             # Claude thinking requires temperature=1
             config["temperature"] = 1

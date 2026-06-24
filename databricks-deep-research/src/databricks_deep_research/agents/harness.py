@@ -14,7 +14,7 @@ import json
 import logging
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -51,6 +51,9 @@ from databricks_deep_research.agents.execution.state_projection import (
     project_research_state as _project_research_state_impl,
 )
 from databricks_deep_research.agents.isolation import AgentInput, AgentOutput
+from databricks_deep_research.agents.message_hygiene import (
+    sanitize_conversation_history,
+)
 from databricks_deep_research.agents.prompt_context import (
     CompiledSynthesisContext,
     compile_pool_section,
@@ -68,7 +71,6 @@ from databricks_deep_research.events.types import (
 )
 from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient
-from databricks_deep_research.llm.roles import sanitize_history_messages
 from databricks_deep_research.memory import (
     CHAT_MEMORY_APPENDIX_STATE_KEY,
     inject_attached_context_block,
@@ -308,6 +310,7 @@ async def execute_agent(
     tool_call_cache: Any | None = None,
     runtime_context: Mapping[str, Any] | None = None,
     execution_context: ExecutionContext | None = None,
+    spawn_runner: Callable[..., Awaitable[Any]] | None = None,
 ) -> AgentOutput:
     """Execute a single agent node.
 
@@ -550,6 +553,11 @@ async def execute_agent(
                 tool_extras["_framework_user_id"] = execution_context.user_id
             if execution_context.approval_broker is not None:
                 tool_extras["_framework_approval_broker"] = execution_context.approval_broker
+        # RAG-over-tools (spec §5.5): expose the append-only runtime store so the
+        # ReAct loop can record deferred-tool promotions as diagnostics. Absent a
+        # store the deferral path still works (promotion is log-only).
+        if state.runtime_store is not None:
+            tool_extras["_framework_runtime_store"] = state.runtime_store
         logger.info(
             "HARNESS_EXTRAS_POPULATED node=%s user_id_set=%s broker_set=%s",
             node_id,
@@ -607,6 +615,18 @@ async def execute_agent(
                 convergence_rounds=config.convergence_rounds,
                 per_tool_limits=config.per_tool_limits,
                 hint_queries=config.hint_queries,
+                tool_output_offload=config.tool_output_offload,
+                tool_output_budget=config.tool_output_budget,
+                evidence_rescue=config.evidence_rescue,
+                compaction_budget_chars=config.compaction_budget_chars,
+                action_mode=config.action_mode,
+                code_action_tools=config.code_action_tools,
+                spawn_runner=spawn_runner,
+                spawnable_subagents=config.spawnable_subagents,
+                spawn_budget=config.spawn_budget,
+                max_concurrent_spawns=config.max_concurrent_spawns,
+                defer_tools=config.defer_tools,
+                defer_threshold=config.defer_tool_threshold,
                 suppress_planning_final_output=bool(
                     config.extras.get("suppress_planning_final_output", False)
                 ),
@@ -904,8 +924,21 @@ async def execute_agent(
             )
 
         if builtin and builtin.post_process:
-            domain_events = builtin.post_process(node_id, state_output, config, state)
-            events.extend(domain_events)
+            try:
+                domain_events = builtin.post_process(node_id, state_output, config, state)
+                events.extend(domain_events)
+            except Exception as exc:  # noqa: BLE001 — advisory events must not fail a completed node
+                # post_process only emits advisory domain/stream events; the
+                # node's actual output (report/research) is already computed in
+                # `state_output`. A malformed advisory event (e.g. an LLM field
+                # that doesn't fit the event schema) must never fail the whole
+                # run — log and continue so the run completes + persists.
+                logger.warning(
+                    "BUILTIN_POST_PROCESS_FAILED node_id=%s subtype=%s error=%s",
+                    node_id,
+                    config.subtype,
+                    str(exc)[:200],
+                )
 
         return AgentOutput(
             content=state_output,
@@ -1089,6 +1122,14 @@ async def _build_input(
     # prompts for workflows without memory. See injection.py for the helper.
     system_prompt = inject_attached_context_block(system_prompt, chat_memory_appendix)
 
+    # Inject the metadata-only skills section (Feature 2.2 runtime wiring).
+    # Resolved from the attached read_skill tool's store; no-op when no skills
+    # are attached or the store/tool is absent (graceful — never breaks a run).
+    if config.skills:
+        skills_section = await _render_attached_skills_section(config.skills, tools)
+        if skills_section:
+            system_prompt = f"{system_prompt}\n\n{skills_section}"
+
     logger.info(
         "AGENT_PROMPTS node=%s system_len=%d user_len=%d "
         "system_preview=%s user_preview=%s chat_memory_appendix_len=%d",
@@ -1134,6 +1175,42 @@ async def _build_input(
         ),
         pool_token_usage,
     )
+
+
+async def _render_attached_skills_section(
+    skill_names: list[str], tools: list[ResearchTool]
+) -> str:
+    """Render the metadata-only skills section for ``config.skills``.
+
+    Resolves each attached skill's metadata from the wired ``read_skill`` tool's
+    :class:`SkillStore` (the same store it reads bodies from). Returns "" when no
+    ``read_skill`` tool is attached (store not wired) or none of the names
+    resolve — so the caller can append unconditionally. Never raises out of the
+    prompt-build path: a store error degrades to no section (logged).
+    """
+    from databricks_deep_research.skills.injector import render_skills_section
+    from databricks_deep_research.skills.models import SkillMeta
+    from databricks_deep_research.tools.builtins.read_skill import ReadSkillTool
+
+    store = next((t.store for t in tools if isinstance(t, ReadSkillTool)), None)
+    if store is None:
+        logger.warning(
+            "SKILLS_SECTION_SKIPPED reason=no_read_skill_tool attached=%d",
+            len(skill_names),
+        )
+        return ""
+    # Metadata only (name + description) — cheap and unscanned. Bodies are pulled
+    # (and fail-closed scanned) later via the read_skill tool, so the section
+    # never triggers a per-skill body-load or scan at prompt-build time.
+    try:
+        available = {meta.name: meta for meta in await store.list_skills()}
+    except Exception:  # noqa: BLE001 — never fail the run on a store error
+        logger.exception("SKILLS_SECTION_LIST_FAILED attached=%d", len(skill_names))
+        return ""
+    metas: list[SkillMeta] = [
+        available[name] for name in skill_names if name in available
+    ]
+    return render_skills_section(metas)
 
 
 def _resolve_background_summary(state: WorkflowState) -> str:
@@ -1337,7 +1414,7 @@ def _build_messages(agent_input: AgentInput) -> list[dict[str, Any]]:
     # ``tool_calls`` key or orphan ``tool`` message can't trigger a 400
     # "Extra inputs are not permitted" / tool-call-pairing error. In-turn tool
     # calling is unaffected — it is appended later inside the ReAct loop.
-    messages.extend(sanitize_history_messages(agent_input.conversation_history))
+    messages.extend(sanitize_conversation_history(agent_input.conversation_history))
 
     if parts:
         messages.append({"role": "user", "content": "\n\n".join(parts)})

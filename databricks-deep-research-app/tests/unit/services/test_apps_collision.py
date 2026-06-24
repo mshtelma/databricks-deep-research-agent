@@ -9,16 +9,14 @@ Covers:
 """
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
 from deep_research.services.deployment.apps_collision import (
-    AppOwnershipCheck,
     generate_suggested_name,
     resolve_apps_already_exists,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

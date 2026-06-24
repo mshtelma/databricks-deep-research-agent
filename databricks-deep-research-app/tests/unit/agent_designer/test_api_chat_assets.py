@@ -57,6 +57,7 @@ class _FakeOrchestrator:
         user_token: str,
         current_user_id: str = "",
         assets: list[Any] | None = None,
+        skill_names: list[str] | None = None,
     ) -> AsyncIterator[DesignerSSEEvent]:
         self.run_turn_calls.append(
             {
@@ -66,6 +67,7 @@ class _FakeOrchestrator:
                 "user_token": user_token,
                 "current_user_id": current_user_id,
                 "assets": assets,
+                "skill_names": skill_names,
             }
         )
         yield DoneEvent()

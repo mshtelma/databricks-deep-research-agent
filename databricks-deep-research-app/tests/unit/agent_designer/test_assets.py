@@ -203,6 +203,33 @@ def test_recommend_tools_for_assets_returns_vector_delta_and_compute_tools() -> 
     assert table_tool["config"]["compute_tool_name"] == "compute"
 
 
+def test_scaffold_compute_tool_uses_safe_enable_dataframes() -> None:
+    """Security review R7: the scaffold must request pandas/numpy via the SAFE
+    ``enable_dataframes`` capability switch, NOT raw
+    ``extra_modules:["pandas","numpy"]`` (which historically loaded them through
+    the generic facade — read_pickle/np.load unpickle/native-libc RCE)."""
+    result = recommend_tools_for_assets(
+        _office_like_assets(),
+        intent="answer numeric questions and calculate totals from tables",
+    )
+    compute_tool = next(
+        tool for tool in result["recommended_tools"] if tool["kind"] == "compute"
+    )
+    cfg = compute_tool["config"]
+    assert cfg.get("enable_dataframes") is True
+    # The raw, unsafe form is no longer authored.
+    assert "pandas" not in (cfg.get("extra_modules") or [])
+    assert "numpy" not in (cfg.get("extra_modules") or [])
+
+
+def test_registry_compute_schema_exposes_enable_dataframes() -> None:
+    """The Designer inspector can author the safe capability switch."""
+    tool_kinds = {item["kind"]: item for item in tool_kinds_payload()}
+    props = tool_kinds["compute"]["config_schema"]["properties"]
+    assert "enable_dataframes" in props
+    assert props["enable_dataframes"]["type"] == "boolean"
+
+
 def test_recommend_tools_for_assets_uses_generic_runtime_tool_names() -> None:
     result = recommend_tools_for_assets(
         [

@@ -28,6 +28,7 @@ from deep_research.models import (  # noqa: E402, F401
     message,
     message_feedback,
     research_session,
+    skill,
     source,
     user,
     user_preferences,

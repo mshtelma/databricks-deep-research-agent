@@ -20,6 +20,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.core.auth import UserIdentity
 from deep_research.middleware import auth as auth_module
@@ -28,7 +29,6 @@ from deep_research.middleware.auth import (
     _user_sync_cache,
     _user_sync_locks,
 )
-from tests.fakes.fake_backend import FakeBackend
 
 
 def _user(user_id: str = "u_race") -> UserIdentity:

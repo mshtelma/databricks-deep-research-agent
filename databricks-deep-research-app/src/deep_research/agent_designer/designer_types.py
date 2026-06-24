@@ -52,6 +52,15 @@ _MAX_LANE_USER_PROMPT_TEMPLATE_LENGTH = 4000
 #   parallel(P proposers)→integrator (participants>=2, multi-model ensemble, with
 #   optional per-proposer model_family). Critique is folded back via the existing
 #   revision_block_md channel. Use for "draft, critique, improve until good enough".
+#
+# ``tree_search`` (Phase 6) — coordinator → parallel(level-1: B researchers) →
+#   [for each deeper level i: level-i gap-finding reflector → parallel(level-(i+1):
+#   narrowed-breadth researchers whose prompts target the prior level's gaps)] →
+#   synthesizer over the full accumulated pool. Built as a STATIC UNROLL over depth
+#   D (no runtime recursion): each between-level reflector is UPSTREAM of the next
+#   level so {level{i}_review} is a normal upstream output_key. Breadth narrows per
+#   level (next = max(2, breadth // 2)). Use for "survey N angles, then go deeper on
+#   the gaps" breadth x gap-driven-depth research.
 TopologyKind = Literal[
     "parallel_lanes",
     "plan_and_execute",
@@ -59,6 +68,7 @@ TopologyKind = Literal[
     "best_of_n",
     "iterative_refinement",
     "router",
+    "tree_search",
 ]
 GroundingKind = Literal["reclaim", "none", "classical_lite"]
 EvidencePolicy = Literal[

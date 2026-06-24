@@ -14,7 +14,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import AsyncGenerator, AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from typing import Any, Protocol
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -35,7 +35,11 @@ from deep_research.agent_designer.designer_architect import (
     WorkflowDesignBrief,
     designer_system_prompt,
 )
-from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter, SourceKind
+from deep_research.agent_designer.discovery import (
+    DesignerDiscoveryAdapter,
+    SourceKind,
+    _workspace_client_for_user_token,
+)
 from deep_research.agent_designer.edit_planning import (
     EditScope,
     apply_signature_delta,
@@ -943,9 +947,16 @@ class DesignerChatOrchestrator:
         self,
         llm: LLMClientProto,
         discovery: DesignerDiscoveryAdapter,
+        *,
+        workspace_client_factory: Callable[[str | None], Any] | None = None,
     ) -> None:
         self._llm = llm
         self._discovery = discovery
+        # OBO workspace-client seam for the skill->workflow brief (mirrors the
+        # discovery adapter's factory). Default builds an OBO client per token.
+        self._ws_factory: Callable[[str | None], Any] = (
+            workspace_client_factory or _workspace_client_for_user_token
+        )
 
     async def run_turn(
         self,
@@ -955,6 +966,7 @@ class DesignerChatOrchestrator:
         user_token: str,
         current_user_id: str = "",
         assets: list[DesignerAsset] | list[dict[str, Any]] | None = None,
+        skill_names: list[str] | None = None,
     ) -> AsyncGenerator[DesignerSSEEvent, None]:
         """Drive the designer_workflow.yaml framework workflow and translate
         framework StreamEvents → DesignerSSEEvents for the frontend.
@@ -1096,7 +1108,9 @@ class DesignerChatOrchestrator:
             "DESIGNER_EDIT_LANE", "1"
         ).strip().lower() not in {"0", "false", "no", "off", ""}
         edit_scope: EditScope | None = None
-        if not edit_lane_enabled or not _is_meaningful_ast(current_ast):
+        if not edit_lane_enabled or not _is_meaningful_ast(current_ast) or bool(skill_names):
+            # Compiling a skill always (re)builds — never a surgical edit of an
+            # existing canvas (Codex MED #6).
             route = "build"
         else:
             ast_summary = _compact_ast_summary(current_ast)
@@ -1175,6 +1189,9 @@ class DesignerChatOrchestrator:
         state.append("init", "critic_verdict", "")
         state.append("init", "gate_result", "")
         state.append("init", "designer_assets", designer_assets)
+        # Skill->Workflow brief: always seed (empty for non-skill turns so the
+        # prompt var resolves) and override below when skills are attached.
+        state.append("init", "skill_workflow_brief", "")
         state.append("init", "prompt_grounding", prompt_grounding_payload)
         state.append("init", "prompt_grounding_summary", prompt_grounding_summary)
         state.append("init", "resource_semantics", resource_semantics_payload)
@@ -1237,6 +1254,40 @@ class DesignerChatOrchestrator:
             yield ErrorEvent(message=f"Designer LLM init failed: {exc}")
             yield DoneEvent()
             return
+
+        # Skill -> Workflow (P5): when skills are attached, summarize them (OBO,
+        # fail-closed scanned) into a bounded brief and seed it so the classifier
+        # emits a matching TaskSignature and the architect specializes each node's
+        # prompt to a skill step. Fail-soft: any failure leaves the brief empty (a
+        # normal build). Only the SUMMARY enters state — never the raw skill body.
+        if skill_names:
+            try:
+                from deep_research.agent_designer.skill_brief import (
+                    render_skill_brief,
+                    summarize_skills_to_brief,
+                )
+                from deep_research.services.skill_runtime import (
+                    build_runtime_skill_store,
+                )
+
+                _skill_store = build_runtime_skill_store(
+                    llm_client=framework_llm,
+                    workspace_client=self._ws_factory(user_token),
+                    user_token=user_token,
+                )
+                _brief = await summarize_skills_to_brief(
+                    skill_names, skill_store=_skill_store, llm=semantic_llm
+                )
+                _rendered = render_skill_brief(_brief)
+                if _rendered:
+                    state.append("skill_brief", "skill_workflow_brief", _rendered)
+                logger.info(
+                    "SKILL_TO_WORKFLOW_BRIEF_SEEDED skills=%d steps=%d",
+                    len(skill_names),
+                    len(_brief.steps),
+                )
+            except Exception:  # noqa: BLE001 — brief is best-effort; never break a turn
+                logger.warning("SKILL_TO_WORKFLOW_BRIEF_FAILED", exc_info=True)
 
         # Build a WorkflowRunner via the app's shared factory so the Designer
         # follows the same construction pattern as every other entry point

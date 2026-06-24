@@ -62,6 +62,7 @@ class ToolKind(StrEnum):
     web_search = "web_search"
     web_crawl = "web_crawl"
     web_research = "web_research"
+    academic_search = "academic_search"
     file_search = "file_search"
     vector_search = "vector_search"
     genie = "genie"
@@ -74,6 +75,7 @@ class ToolKind(StrEnum):
     table_neighbors = "table_neighbors"
     table_load = "table_load"
     table_aggregate = "table_aggregate"
+    mcp = "mcp"
     custom = "custom"
 
 
@@ -103,6 +105,9 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.web_search: SourceKind.web,
     ToolKind.web_crawl: SourceKind.builtin,
     ToolKind.web_research: SourceKind.web,
+    # Academic retrievers return scholarly documents over the public web; treat
+    # them as web sources so they admit to the pool via the keyword/BM25 path.
+    ToolKind.academic_search: SourceKind.web,
     ToolKind.file_search: SourceKind.file,
     ToolKind.vector_search: SourceKind.vector_index,
     ToolKind.genie: SourceKind.sql_analytics,
@@ -115,6 +120,9 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.table_neighbors: SourceKind.text_table,
     ToolKind.table_load: SourceKind.text_table,
     ToolKind.table_aggregate: SourceKind.text_table,
+    # MCP research tools are NL question→answer, and CITEABLE (non-builtin) so
+    # their results flow through admission to the pool (spec §4.3 #11).
+    ToolKind.mcp: SourceKind.qa_assistant,
 }
 
 

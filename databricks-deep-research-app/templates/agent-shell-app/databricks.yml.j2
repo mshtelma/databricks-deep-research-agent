@@ -65,6 +65,11 @@ resources:
         - vectorsearch.vector-search-endpoints
         - vectorsearch.vector-search-indexes
         - dashboards.genie
+        # Lists Unity Catalog connections backing MCP servers
+        # (GET /api/2.1/unity-catalog/connections); keep in sync with ../databricks.yml.
+        # Valid app token is `catalog.connections`, not bare `unity-catalog`
+        # (databricks-sdk-go#1528).
+        - catalog.connections
 
 targets:
   dev:

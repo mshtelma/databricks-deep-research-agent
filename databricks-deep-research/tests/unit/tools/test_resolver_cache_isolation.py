@@ -16,12 +16,11 @@ from databricks_deep_research.tools.builtins.compute import PythonComputeTool
 from databricks_deep_research.tools.builtins.compute_namespace import (
     ComputeNamespaceListTool,
 )
-from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.factories.builtin import BuiltinToolFactory
+from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import ToolContext
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.workflow.definition import ToolDeclaration
-
 
 # ---------------------------------------------------------------------------
 # Helpers

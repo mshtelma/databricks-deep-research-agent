@@ -14,8 +14,6 @@ import pathlib
 import re
 import typing
 
-import pytest
-
 from deep_research.schemas.deployment import DeployHereErrorKind
 
 _TS_FILE = (

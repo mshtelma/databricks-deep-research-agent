@@ -64,7 +64,7 @@ class PromptTemporalContext(BaseModel):
     model_config = {"frozen": True}
 
     @classmethod
-    def now(cls, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> "PromptTemporalContext":
+    def now(cls, *, tz: tzinfo = UTC, tz_name: str = "UTC") -> PromptTemporalContext:
         """Construct from the system clock.
 
         Defaults to UTC for cross-deployment consistency. Callers (e.g., an

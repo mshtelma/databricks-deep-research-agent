@@ -13,18 +13,16 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import uuid4
 
-import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.services._protocols import IResearchEventService
 from deep_research.services.cached.research_event import (
     CachedResearchEventService,
 )
-from deep_research.storage.backend import StorageBackend
 from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.cold_cache import ColdReadCache
 from deep_research.storage.factory import StorageStack
 from deep_research.storage.queue import WriteQueue
-from tests.fakes.fake_backend import FakeBackend
 
 
 async def _stack() -> StorageStack:

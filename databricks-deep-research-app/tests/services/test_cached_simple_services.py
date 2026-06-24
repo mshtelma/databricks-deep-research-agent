@@ -7,10 +7,10 @@ the legacy SQLAlchemy impls is deferred to integration tests.
 
 from __future__ import annotations
 
-import asyncio
 from uuid import uuid4
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.services._protocols import (
     IFeedbackService,
@@ -24,7 +24,6 @@ from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.cold_cache import ColdReadCache
 from deep_research.storage.factory import StorageStack
 from deep_research.storage.queue import WriteQueue
-from tests.fakes.fake_backend import FakeBackend
 
 
 async def _stack() -> StorageStack:

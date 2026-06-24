@@ -30,6 +30,17 @@ class BlockMutationError(ValueError):
     """Mutation rejected by domain rules."""
 
 
+class PatchCountError(BlockMutationError):
+    """A surgical patch matched a different number of nodes than asserted.
+
+    Raised by :func:`assert_match_count` when a caller supplies an
+    ``expected_count`` that does not equal the number of nodes the patch
+    actually resolves to. Modelled on DeerFlow's ``skill_manage_tool.py``
+    expected-count assertion: a patch that would touch the wrong number of
+    nodes FAILS LOUDLY rather than silently mis-applying.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Valid model tiers
 # ---------------------------------------------------------------------------
@@ -332,6 +343,68 @@ def _resolve_node_ref(ast: dict[str, Any], ref: str) -> str:
         "dot-notation indexed path (e.g. 'root.children.1.children.0')."
     )
     raise BlockPathError(" ".join(hint_lines))
+
+
+# ---------------------------------------------------------------------------
+# Patch-count assertion (DeerFlow skill_manage_tool.py:135 pattern)
+# ---------------------------------------------------------------------------
+
+
+def count_matching_nodes(
+    ast: dict[str, Any], node_refs: str | list[str]
+) -> int:
+    """Return how many DISTINCT nodes *node_refs* resolves to inside *ast*.
+
+    A *ref* is either a semantic node id or an indexed dot-path (the same
+    surface :func:`_resolve_node_ref` accepts). Unresolvable refs contribute
+    zero (they do not raise here — :func:`assert_match_count` turns a count
+    mismatch into the loud error). Duplicate refs that resolve to the same
+    indexed path are counted once, so the count reflects the number of nodes a
+    patch would actually touch.
+    """
+    refs = [node_refs] if isinstance(node_refs, str) else list(node_refs)
+    resolved: set[str] = set()
+    for ref in refs:
+        try:
+            resolved.add(_resolve_node_ref(ast, ref))
+        except BlockPathError:
+            continue
+    return len(resolved)
+
+
+def assert_match_count(
+    ast: dict[str, Any], node_refs: str | list[str], expected_count: int
+) -> None:
+    """Fail LOUDLY when a patch would match a different number of nodes.
+
+    Patch-semantics borrowed from DeerFlow's ``skill_manage_tool.py``: before a
+    surgical edit is applied, the caller asserts how many nodes the edit is
+    expected to touch. If the resolved count differs, we raise
+    :class:`PatchCountError` with a clear, actionable message INSTEAD of
+    silently mis-applying the edit to the wrong (or zero) nodes — the exact
+    failure mode behind the designer-chat-edit "config-blind diff" defect.
+
+    Pure + total apart from the deliberate raise; never mutates *ast*.
+
+    Raises
+    ------
+    PatchCountError
+        If the number of nodes *node_refs* resolves to != *expected_count*.
+    """
+    if not isinstance(expected_count, int) or expected_count < 0:
+        raise PatchCountError(
+            f"expected_count must be a non-negative int, got {expected_count!r}"
+        )
+    refs = [node_refs] if isinstance(node_refs, str) else list(node_refs)
+    actual = count_matching_nodes(ast, refs)
+    if actual != expected_count:
+        available = sorted(_collect_id_index(ast).keys())
+        sample = available[:20]
+        raise PatchCountError(
+            f"Patch expected to match {expected_count} node(s) but matched "
+            f"{actual} for ref(s) {refs}. The edit was NOT applied (refusing to "
+            f"mis-apply a surgical patch). Available node ids: {sample}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -962,6 +1035,7 @@ def edit_update_block(
     patches: dict[str, Any],
     *,
     allowed_config_fields: frozenset[str] | set[str] | None = None,
+    expected_count: int | None = None,
 ) -> dict[str, Any]:
     """EDIT-lane variant of :func:`update_block` with an explicit config
     allow-list (decoupled from the global deterministic-blueprint guard).
@@ -972,7 +1046,15 @@ def edit_update_block(
     lane validates against *allowed_config_fields* (typically derived from the
     EditScope), falling back to :data:`_EDIT_DEFAULT_CONFIG_PATCH_KEYS`, while
     still ALWAYS rejecting :data:`_FORBIDDEN_CONFIG_PATCH_KEYS` (structural).
+
+    *expected_count* is optional patch-semantics: when supplied, the edit is
+    applied ONLY if *path* resolves to exactly that many nodes (always 1 for a
+    single-ref patch); otherwise :class:`PatchCountError` is raised and nothing
+    is mutated (DeerFlow's expected-count assertion). ``None`` (the default)
+    preserves the prior behavior byte-for-byte.
     """
+    if expected_count is not None:
+        assert_match_count(ast, path, expected_count)
     if "type" in patches:
         raise BlockMutationError("'type' is not patchable")
     if "children" in patches:

@@ -568,6 +568,101 @@ def run_behavioral_probe(
                     f"router_structure_ok:branches={branch_count}"
                 )
 
+        # 14. tree_search structural invariants. The topology walker classifies it
+        #     at the root as its OWN family (so check 5 already keys off
+        #     ``tree_search``); these targeted checks verify the static-unroll
+        #     shape: a root sequence with >=1 level parallel, narrowing breadth
+        #     across the levels, >=1 researcher writing observations+sources
+        #     (grounded survey), a terminal-output synthesizer injecting both
+        #     pools, and — for depth >=2 — a gap reflector UPSTREAM of each deeper
+        #     level whose review output_key the deeper lanes read.
+        if expected_topology == "tree_search":
+            root = ast.get("root") if isinstance(ast, dict) else None
+            root_children = (
+                root.get("children") or [] if isinstance(root, dict) else []
+            )
+            level_parallels = [
+                c
+                for c in root_children
+                if isinstance(c, dict)
+                and c.get("type") == "parallel"
+                and re.match(r"^l\d+_research-level$", str(c.get("id") or ""))
+            ]
+            if not level_parallels:
+                result.gaps.append("tree_search_missing_levels")
+            else:
+                # Breadth must NARROW (non-increasing) across levels.
+                breadths = [len(p.get("children") or []) for p in level_parallels]
+                if any(
+                    later > earlier
+                    for earlier, later in zip(breadths, breadths[1:], strict=False)
+                ):
+                    result.gaps.append(
+                        f"tree_search_breadth_not_narrowing:{breadths}"
+                    )
+            researchers = [
+                n
+                for n in _iter_agent_nodes(ast.get("root"))
+                if _config_of(n).get("subtype") == "researcher"
+            ]
+            if not any(
+                {"observations", "sources"}
+                <= {
+                    pw.get("pool")
+                    for pw in (_config_of(r).get("pool_writes") or [])
+                    if isinstance(pw, dict)
+                }
+                for r in researchers
+            ):
+                result.gaps.append("tree_search_no_grounded_researcher")
+            synth_with_pools = [
+                n
+                for n in _iter_agent_nodes(ast.get("root"))
+                if _config_of(n).get("subtype") == "synthesizer"
+                and {"observations", "sources"}
+                <= {
+                    pj.get("pool")
+                    for pj in (_config_of(n).get("pool_inject") or [])
+                    if isinstance(pj, dict)
+                }
+            ]
+            if not synth_with_pools:
+                result.gaps.append("tree_search_no_grounded_synthesizer")
+            else:
+                synth_outputs = {
+                    str(_config_of(n).get("output_key")) for n in synth_with_pools
+                }
+                if not (set(ast.get("output_keys") or []) & synth_outputs):
+                    result.gaps.append("tree_search_synthesizer_no_terminal_output")
+            # Depth >=2 ⇒ a between-level reflector whose review output_key is
+            # consumed by the deeper level's lanes (the static-unroll contract).
+            if level_parallels and len(level_parallels) >= 2:
+                reflectors = [
+                    n
+                    for n in _iter_agent_nodes(ast.get("root"))
+                    if _config_of(n).get("subtype") == "reflector"
+                ]
+                review_keys = {
+                    str(_config_of(r).get("output_key"))
+                    for r in reflectors
+                    if str(_config_of(r).get("output_key") or "").startswith("level")
+                }
+                if len(review_keys) < len(level_parallels) - 1:
+                    result.gaps.append("tree_search_missing_gap_reflector")
+                # Each deeper level's lanes must read a level review key.
+                deeper_lane_inputs: set[str] = set()
+                for parallel in level_parallels[1:]:
+                    for lane in _iter_agent_nodes(parallel):
+                        deeper_lane_inputs.update(
+                            _config_of(lane).get("input_keys") or []
+                        )
+                if not (review_keys & deeper_lane_inputs):
+                    result.gaps.append("tree_search_deeper_level_ignores_gaps")
+            if not any(g.startswith("tree_search_") for g in result.gaps):
+                result.conditional_passed.append(
+                    f"tree_search_structure_ok:levels={len(level_parallels)}"
+                )
+
     # ----- Runtime-query check (opt-in) --------------------------------
 
     if runtime_queries is not None:

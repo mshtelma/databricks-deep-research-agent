@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import asyncio
 from enum import Enum
-from typing import Annotated, Optional
+from typing import Annotated
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from databricks_deep_research.tools.api import Description, tool
 from databricks_deep_research.tools.protocol import ToolContext
@@ -74,7 +74,7 @@ def test_list_param() -> None:
 
 def test_optional_param_via_union() -> None:
     @tool
-    def f(x: Optional[int] = None) -> int:
+    def f(x: int | None = None) -> int:
         """O"""
         return x or 0
 

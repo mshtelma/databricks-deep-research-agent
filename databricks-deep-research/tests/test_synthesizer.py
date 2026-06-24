@@ -241,7 +241,17 @@ async def test_execute_agent_reclaim_runs_pipeline_and_writes_state() -> None:
     ):
         output = await execute_agent("synth", config, state, llm, tools=[], pools=pools)
 
-    assert output.content == "Kroger reported identical sales growth of 2.6% [0]."
+    # 4.2: a deterministic ## Sources section is appended to the report body
+    # (default-on for deep_research). The verified claim prose is unchanged; the
+    # cited source is rendered from the evidence pool + numeric marker.
+    assert output.content.startswith(
+        "Kroger reported identical sales growth of 2.6% [0]."
+    )
+    assert "## Sources" in output.content
+    assert (
+        "[0] [Kroger Q3 2025 Results](enterprise://vector_search/earnings/0)"
+        in output.content
+    )
     assert state.get("claims")[0]["citation_keys"] == ["0"]
     assert state.get("claims")[0]["claim_role"] == "fact"
     assert state.get("verification_summary")["total_claims"] == 1

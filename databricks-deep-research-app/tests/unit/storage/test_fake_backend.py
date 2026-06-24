@@ -7,10 +7,11 @@ other storage tests can trust their fixture.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage import (
     ConflictError,
@@ -19,18 +20,15 @@ from deep_research.storage import (
 )
 from deep_research.storage.documents import (
     ChatDocument,
-    ChatMeta,
-    ChatState,
     Message,
     PrepJobDocument,
     UploadedFileMeta,
     UserDocument,
 )
-from tests.fakes.fake_backend import FakeBackend
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # --- Protocol conformance --------------------------------------------------

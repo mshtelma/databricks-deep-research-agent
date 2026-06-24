@@ -1,13 +1,14 @@
 """Verify FrameworkLLMClient emits a ModelCallEvent after model resolution."""
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 
 @pytest.mark.asyncio
 async def test_complete_emits_model_call_event() -> None:
-    from databricks_deep_research.llm.client import FrameworkLLMClient
     from databricks_deep_research.events.types import ModelCallEvent
+    from databricks_deep_research.llm.client import FrameworkLLMClient
 
     # Mock the AsyncOpenAI client so .chat.completions.create returns a fake
     fake_openai = MagicMock()

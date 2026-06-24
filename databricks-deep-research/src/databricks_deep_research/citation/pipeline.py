@@ -79,6 +79,16 @@ from databricks_deep_research.tracing import trace_span
 logger = logging.getLogger(__name__)
 
 
+# Combined-content ceiling for the small-corpus fast-path skip (Wave 1.5). The
+# fast-path only triggers when the corpus is BOTH few-sourced (<= the configured
+# ``small_corpus_skip_threshold``) AND the total content across those sources is
+# below this many characters — i.e. small enough that per-source LLM span
+# extraction buys little over keeping the content verbatim. Chosen as one LLM
+# extraction chunk's worth (``EvidenceSelectionConfig.chunk_size`` default 8_000)
+# so a corpus that wouldn't even be chunked never pays for extraction.
+_SMALL_CORPUS_TOTAL_CONTENT_CHARS = 8_000
+
+
 # Module-level monotonic counter so multiple invocations of
 # ``process_unverified_claims`` within a single run can be distinguished in
 # the trace logs (Stage 8 of the citation pipeline). PR3-0 instrumentation.
@@ -316,6 +326,7 @@ class ClaimGenerator(Protocol):
         target_word_count: int = ...,
         max_tokens: int = ...,
         generation_instructions: str = ...,
+        output_language: str | None = ...,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]: ...
 
 
@@ -563,6 +574,34 @@ class CitationVerificationPipeline:
             len(high_quality_sources),
         )
 
+        # Small-corpus fast-path skip (Wave 1.5). When the corpus is already
+        # both few-sourced and small, skip per-source LLM span extraction and
+        # route ALL of these sources through the existing corpus passthrough
+        # branch (full content kept verbatim -> numeric facts retained). The
+        # threshold lives on the selector's EvidenceSelectionConfig; ``0``
+        # (default) leaves the field absent/zero, so this whole block is a
+        # no-op and behavior is byte-identical to before. The trigger only
+        # tags the source dicts with ``_force_passthrough`` -- the selector's
+        # ``_is_corpus_source`` honors that flag, reusing the same passthrough
+        # the corpus kinds already use (no new extraction path).
+        skip_threshold = int(
+            getattr(self.evidence_selector, "small_corpus_skip_threshold", 0) or 0
+        )
+        if skip_threshold > 0 and 0 < len(high_quality_sources) <= skip_threshold:
+            total_content_chars = sum(
+                len(s.get("content") or "") for s in high_quality_sources
+            )
+            if total_content_chars <= _SMALL_CORPUS_TOTAL_CONTENT_CHARS:
+                for source in high_quality_sources:
+                    source["_force_passthrough"] = True
+                logger.info(
+                    "CITATION_PIPELINE_STAGE1_SMALL_CORPUS_FASTPATH sources=%d "
+                    "threshold=%d total_content_chars=%d",
+                    len(high_quality_sources),
+                    skip_threshold,
+                    total_content_chars,
+                )
+
         max_spans = self.config.evidence_preselection.max_spans_per_source
 
         try:
@@ -659,6 +698,7 @@ class CitationVerificationPipeline:
         target_word_count: int = 600,
         max_tokens: int = 2000,
         generation_instructions: str = "",
+        output_language: str | None = None,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Stage 2: Generate synthesis with interleaved claim/evidence pairs.
 
@@ -685,6 +725,7 @@ class CitationVerificationPipeline:
             target_word_count=target_word_count,
             max_tokens=max_tokens,
             generation_instructions=generation_instructions,
+            output_language=output_language,
         ):
             if content:
                 yield content, None
@@ -1430,10 +1471,19 @@ class CitationVerificationPipeline:
         Yields:
             ``VerificationEvent`` for each claim verified.
         """
-        # Stage 4 always runs when the pipeline is used.
-        # (Master toggle is checked in run_full_pipeline.)
+        # Stage 4 runs when the pipeline is used AND isolated verification is
+        # enabled. ``enabled`` is the pipeline master; ``enable_isolated_
+        # verification`` gates ONLY the per-claim NLI overlay so the cheap
+        # grounding-only lane can generate + link citations (Stages 1-3) while
+        # skipping this stage and Stage 8 disposition. Covers both the FACT
+        # (4a) and ANALYSIS (4b) passes, which both route through here.
         if not self.config.enabled:
             logger.info("CITATION_PIPELINE stage=4 action=skipped reason=disabled")
+            return
+        if not self.config.enable_isolated_verification:
+            logger.info(
+                "CITATION_PIPELINE stage=4 action=skipped reason=grounding_only"
+            )
             return
 
         logger.info(
@@ -1912,6 +1962,13 @@ class CitationVerificationPipeline:
         Returns:
             ``(modified_content, removed_count, softened_count, rewritten_count)``.
         """
+        # Grounding-only lane: no verdicts were produced (Stage 4 skipped), so
+        # there is nothing to remove/soften/rewrite. Return the content
+        # unchanged — the claims persist as resolvable-but-unverified citations.
+        if not self.config.enable_isolated_verification:
+            logger.info("CITATION_PIPELINE stage=8 action=skipped reason=grounding_only")
+            return content, 0, 0, 0
+
         modifications: list[tuple[str, ClaimInfo]] = []
 
         # Confidence threshold for promoting abstained-but-confident NLI
@@ -2184,6 +2241,7 @@ class CitationVerificationPipeline:
         max_tokens: int = 2000,
         draft_content: str | None = None,
         generation_instructions: str = "",
+        output_language: str | None = None,
     ) -> AsyncGenerator[VerificationEvent | str, None]:
         """Run the complete 7-stage citation verification pipeline.
 
@@ -2211,6 +2269,10 @@ class CitationVerificationPipeline:
             generation_instructions: Workflow-specific report shape and quality
                 contract for Stage 2 generation. This does not affect evidence
                 pre-selection, which continues to use ``query`` only.
+            output_language: Optional free-form language name (e.g. "Spanish").
+                When set, a hard language directive is re-forced on the Stage 2
+                generation prompt (redundant with the instructions clause) so the
+                report does not drift back to English. ``None`` => unchanged.
 
         Yields:
             ``str`` content chunks and ``VerificationEvent`` objects.
@@ -2351,6 +2413,7 @@ class CitationVerificationPipeline:
                         target_word_count=target_word_count,
                         max_tokens=max_tokens,
                         generation_instructions=generation_instructions,
+                        output_language=output_language,
                     ):
                         if interleaved_content:
                             full_content = interleaved_content

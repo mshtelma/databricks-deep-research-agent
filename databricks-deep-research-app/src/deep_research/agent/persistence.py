@@ -439,6 +439,7 @@ async def persist_complete_research(
         current_step_index=state.current_step_index,
         plan_iterations=state.plan_iterations,
         completed_at=datetime.now(UTC),
+        promotion_trace=getattr(state, "promotion_trace", None),
     )
     db.add(research_session)
     counts["research_session"] = 1
@@ -724,6 +725,7 @@ async def _persist_session_complete_cached(
                     else []
                 )
                 rs.execution_state = exec_state
+                rs.promotion_trace = getattr(state, "promotion_trace", None)
                 break
 
         # Derive chat title only when empty — preserves manual renames.
@@ -1049,6 +1051,7 @@ async def _persist_complete_research_cached(
                 else []
             ),
         },
+        promotion_trace=getattr(state, "promotion_trace", None),
     )
 
     def _apply(doc: Any) -> None:
@@ -1272,6 +1275,7 @@ async def persist_research_session_complete_update_independent(
                     current_step_index=state.current_step_index,
                     plan_iterations=state.plan_iterations,
                     completed_at=datetime.now(UTC),
+                    promotion_trace=getattr(state, "promotion_trace", None),
                 )
             )
 

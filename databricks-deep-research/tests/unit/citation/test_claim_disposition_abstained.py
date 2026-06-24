@@ -48,6 +48,9 @@ def _build_minimal_self(*, threshold: float = 0.5) -> SimpleNamespace:
 
     return SimpleNamespace(
         config=SimpleNamespace(
+            # Stage 8 runs only when isolated verification is enabled (these
+            # tests exercise the verified disposition path).
+            enable_isolated_verification=True,
             claim_disposition=SimpleNamespace(
                 abstained=ClaimDisposition.KEEP,
                 unsupported=ClaimDisposition.REMOVE,

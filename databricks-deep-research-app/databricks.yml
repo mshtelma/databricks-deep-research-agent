@@ -144,6 +144,12 @@ resources:
         - serving.serving-endpoints
         - vectorsearch.vector-search-endpoints
         - vectorsearch.vector-search-indexes
+        # Lists Unity Catalog connections backing MCP servers
+        # (GET /api/2.1/unity-catalog/connections) for Designer/chat MCP discovery.
+        # NOTE: the bundle rejects the bare `unity-catalog` OAuth scope; the valid
+        # app token is `catalog.connections` (see databricks-sdk-go#1528). If OBO
+        # still 403s at runtime, discovery fail-softs to an empty attach list.
+        - catalog.connections
 
       # ---- Config ----
       # NOTE: endpoint_name and pghost default to "pending" (not "")

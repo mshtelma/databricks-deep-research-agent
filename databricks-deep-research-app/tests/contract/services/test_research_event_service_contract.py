@@ -19,7 +19,6 @@ from deep_research.services.cached.research_event import (
     _row_to_event,
 )
 
-
 ALLOWED_COLS: frozenset[str] = frozenset({
     "session_id", "sequence_number", "ts", "event",
 })

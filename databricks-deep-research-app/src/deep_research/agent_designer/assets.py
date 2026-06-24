@@ -485,7 +485,13 @@ def recommend_tools_for_assets(raw_assets: Any, *, intent: str = "") -> dict[str
                 "config": {
                     "max_execution_seconds": 30,
                     "max_code_length": 50000,
-                    "extra_modules": ["pandas", "numpy"],
+                    # Request pandas/numpy via the supported, SAFE capability
+                    # switch (curated facades + file/network/pickle/eval/.ctypes
+                    # denylist), NOT raw ``extra_modules:["pandas","numpy"]`` which
+                    # historically loaded them through the generic facade (copying
+                    # read_pickle/np.load — unpickle/native-libc RCE, security
+                    # review R7). ``enable_dataframes`` is the honest authored knob.
+                    "enable_dataframes": True,
                 },
                 "description": "Execute Python for calculations and table analysis.",
             }

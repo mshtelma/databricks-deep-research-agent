@@ -290,8 +290,10 @@ system_prompt: |
       ensemble). The loop repeats until the critic's decision is "complete" (or
       refine_max_iterations); each round's critique is folded into the next.
       Right when the user wants the report iteratively critiqued and improved
-      ("draft then refine", "self-critique and improve", "have several models
-      refine it"). You author the lane + synthesizer/critic PROMPTS only.
+      ("draft then refine", "self-critique and improve", "reflection /
+      critic-reviser loop", "have several models refine it"). This IS the
+      reflection topology (critic→reviser). You author the lane +
+      synthesizer/critic PROMPTS only.
 
   - ``router``
       Shape: classifier → conditional(branch_1..branch_M, default). A typed
@@ -301,6 +303,19 @@ system_prompt: |
       DIFFERENT sub-pipelines per class. ``router_cases`` names the classes
       (the last is the default/fallback). You author the classifier + branch
       PROMPTS only.
+
+  - ``tree_search``
+      Shape: coordinator → parallel(level-1: B researchers) → [for each deeper
+      level: a gap-finding reflector → parallel(narrowed-breadth researchers that
+      target the prior level's gaps)] → synthesizer over the FULL accumulated
+      pool. A breadth-then-depth survey, STATIC-unrolled over depth D (no runtime
+      recursion): breadth narrows per level (next = max(2, breadth // 2)), and
+      each between-level reflector is UPSTREAM of the next level so the deeper
+      lanes read its gap analysis. Right when the user wants to SURVEY many angles
+      first and then GO DEEPER on the most decision-relevant gaps ("cast a wide
+      net, then drill into what matters"). ``tree_breadth`` (2-6) sets the level-1
+      fan-out; ``tree_depth`` (1-3) sets the number of levels. You author the lane
+      + reflector + synthesizer PROMPTS only.
 
   Justify any non-default topology choice in the design_brief's
   workflow_description in one sentence. The choice itself is free; the

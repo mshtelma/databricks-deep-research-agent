@@ -40,6 +40,27 @@ dependencies = [
 docling = [
     "docling>=2.0.0",
 ]
+# Remote MCP (Model Context Protocol) servers as citeable research sources.
+# Opt-in: the default research path never imports ``mcp``. A workflow that
+# declares ``mcp_servers`` and runs without this extra installed surfaces a
+# clear "install the mcp extra" error from the framework's guarded import —
+# it never hard-crashes the default path. ``databricks-mcp`` adds the client for
+# Databricks managed / UC-connection MCP servers (client_kind='databricks');
+# absent, only client_kind='http' servers work and the databricks branch fails
+# closed with a clear error (see agent/adapters/mcp_adapter.py).
+mcp = [
+    "mcp>=1.0.0",
+    "databricks-mcp>=0.1.0",
+]
+# Binary report export (PDF/DOCX). Opt-in: the default markdown/JSON export
+# never imports these. A missing library degrades to a catchable
+# ExportDependencyError (mapped to 503), never a hard crash at import time.
+export = [
+    "markdown>=3.4",
+    "weasyprint>=60.0",
+    "htmldocx>=0.0.6",
+    "python-docx>=1.1.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -150,6 +171,16 @@ module = [
     "mlflow.*",
     "databricks.*",
     "bm25s.*",
+    # Optional binary-export backends (the 'export' extra). Deferred imports;
+    # absent in the base/dev env, so mypy cannot resolve their stubs.
+    "markdown",
+    "markdown.*",
+    "weasyprint",
+    "weasyprint.*",
+    "htmldocx",
+    "htmldocx.*",
+    "docx",
+    "docx.*",
 ]
 ignore_missing_imports = true
 

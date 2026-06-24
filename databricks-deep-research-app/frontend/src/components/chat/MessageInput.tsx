@@ -3,6 +3,8 @@ import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 import { ResearchDepthSelector, type ResearchDepth } from './ResearchDepthSelector';
 import { QueryModeSelector } from './QueryModeSelector';
+import { ChatAttachmentsSelector } from './ChatAttachmentsSelector';
+import { ChatOptionsPanel } from './ChatOptionsPanel';
 import { SourceScopeSelector } from '@/components/research/SourceScopeSelector';
 import { SourceBrowserModal } from './SourceBrowserModal';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
@@ -136,6 +138,10 @@ export function MessageInput({
     inputConfig?.defaultResearchDepth ?? 'auto'
   );
 
+  // Per-run report style. Empty string => omit from submission (server default).
+  const [tone, setTone] = React.useState<string>('');
+  const [outputLanguage, setOutputLanguage] = React.useState<string>('');
+
   // Default: use plugin config if selector hidden, else true for deep_research
   const [verifySources, setVerifySources] = React.useState<boolean>(
     !effectiveShowVerifySources
@@ -242,8 +248,12 @@ export function MessageInput({
     refetch: refetchAgents,
   } = useAgentsV2List();
   const agents = React.useMemo(
-    () => (queryMode === 'deep_research' ? (agentsData?.items ?? []).map(agentV2ToSelectorSummary) : []),
-    [agentsData?.items, queryMode],
+    // Agent picker is available in EVERY mode so the run target is always
+    // visible/controllable (selecting an agent makes it own the pipeline — see
+    // the "Running:" indicator). Previously gated to deep_research, which hid it
+    // in Simple/Web and left users unsure what actually executed.
+    () => (agentsData?.items ?? []).map(agentV2ToSelectorSummary),
+    [agentsData?.items],
   );
 
   // Restore selected agent from localStorage on mount / when agents load
@@ -278,6 +288,15 @@ export function MessageInput({
   // when an agent is selected; the backend ignores it on first turns (no prior
   // research) and for non-agent chats.
   const [turnIntent, setTurnIntent] = React.useState<'auto' | 'chat' | 'research'>('auto');
+
+  // Chat-attached skills + MCP servers for THIS query (Feature 2.2 / 4.3 — E1).
+  const [enabledSkills, setEnabledSkills] = React.useState<string[]>([]);
+  const [enabledMcpServers, setEnabledMcpServers] = React.useState<string[]>([]);
+
+  // Run-level overrides surfaced in the Options panel (P2). Default false =>
+  // inherit the global flag; the user opts in per query.
+  const [enableCrossSessionMemory, setEnableCrossSessionMemory] = React.useState(false);
+  const [allowLiveSearch, setAllowLiveSearch] = React.useState(false);
 
   // Fetch discovered data sources for the source toggle UI
   const {
@@ -421,6 +440,13 @@ export function MessageInput({
         agentId: selectedAgent?.id ?? undefined,
         enablePlanReview: enablePlanReview || undefined,
         turnIntent: selectedAgent ? turnIntent : undefined,
+        tone: tone || undefined,
+        outputLanguage: outputLanguage || undefined,
+        enabledSkills: enabledSkills.length > 0 ? enabledSkills : undefined,
+        enabledMcpServers:
+          enabledMcpServers.length > 0 ? enabledMcpServers : undefined,
+        enableCrossSessionMemory: enableCrossSessionMemory || undefined,
+        allowLiveSearch: allowLiveSearch || undefined,
       };
 
       onSubmit(submission);
@@ -502,24 +528,60 @@ export function MessageInput({
             disabled={disabled || isLoading}
           />
         )}
-        {shouldShowDepthSelector && (
+        {/* Always surface what will actually run: a selected agent owns the run
+            (mode/depth don't apply to its saved workflow); otherwise the built-in
+            pipeline for the current mode runs. Kills "in Simple we don't know
+            what runs." */}
+        {effectiveShowModeSelector && (
+          <span
+            data-testid="run-target-indicator"
+            className="text-xs text-muted-foreground"
+            title={
+              selectedAgent
+                ? 'A selected agent runs its own saved workflow; the Simple/Web/Deep mode does not change it.'
+                : 'No agent selected — the built-in pipeline for the current mode runs.'
+            }
+          >
+            Running:{' '}
+            <span className="font-medium text-foreground">
+              {selectedAgent
+                ? selectedAgent.name
+                : queryMode === 'simple'
+                  ? 'Simple (built-in)'
+                  : queryMode === 'web_search'
+                    ? 'Web Search (built-in)'
+                    : 'Deep Research (built-in)'}
+            </span>
+          </span>
+        )}
+        {/* Depth applies only to the built-in Deep Research pipeline. A selected
+            custom agent runs its own saved workflow (iterations baked at design
+            time), so depth is meaningless then — hide it. */}
+        {shouldShowDepthSelector && !selectedAgent && (
           <ResearchDepthSelector
             value={researchDepth}
             onChange={setResearchDepth}
             disabled={disabled || isLoading}
           />
         )}
-        {shouldShowVerifyCheckbox && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={verifySources}
-              onChange={(e) => setVerifySources(e.target.checked)}
-              disabled={disabled || isLoading}
-              className="h-3.5 w-3.5 rounded border-input cursor-pointer accent-primary"
-            />
-            <span>Verify sources</span>
-          </label>
+        {effectiveShowModeSelector && queryMode !== 'simple' && (
+          <ChatOptionsPanel
+            tone={tone}
+            outputLanguage={outputLanguage}
+            onToneChange={setTone}
+            onLanguageChange={setOutputLanguage}
+            showVerify={shouldShowVerifyCheckbox}
+            verifySources={verifySources}
+            onVerifyChange={setVerifySources}
+            showPlanReview={queryMode === 'deep_research' && effectiveShowModeSelector}
+            enablePlanReview={enablePlanReview}
+            onPlanReviewChange={setEnablePlanReview}
+            enableCrossSessionMemory={enableCrossSessionMemory}
+            onCrossSessionMemoryChange={setEnableCrossSessionMemory}
+            allowLiveSearch={allowLiveSearch}
+            onAllowLiveSearchChange={setAllowLiveSearch}
+            disabled={disabled || isLoading}
+          />
         )}
         {/* Deliverable selector — choose the structured output type when >1 exists */}
         {showDeliverableSelector && (
@@ -540,8 +602,9 @@ export function MessageInput({
             </select>
           </label>
         )}
-        {/* Agent selector (deep_research mode) */}
-        {queryMode === 'deep_research' && effectiveShowModeSelector && (
+        {/* Agent selector — shown in every mode so the run target is always
+            visible and selectable (not just Deep Research). */}
+        {effectiveShowModeSelector && (
           <div className="relative" ref={agentPickerRef}>
             <button
               type="button"
@@ -602,8 +665,9 @@ export function MessageInput({
             )}
           </div>
         )}
-        {/* Follow-up routing (custom-agent chats): converse vs re-run */}
-        {queryMode === 'deep_research' && effectiveShowModeSelector && selectedAgent && (
+        {/* Follow-up routing (custom-agent chats): converse vs re-run. Shown
+            whenever an agent is selected, in any mode (the agent owns its run). */}
+        {effectiveShowModeSelector && selectedAgent && (
           <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
             <span>Follow-up</span>
             <select
@@ -620,19 +684,16 @@ export function MessageInput({
             </select>
           </label>
         )}
-        {/* Plan review toggle (deep_research mode) */}
-        {queryMode === 'deep_research' && effectiveShowModeSelector && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={enablePlanReview}
-              onChange={(e) => setEnablePlanReview(e.target.checked)}
-              disabled={disabled || isLoading}
-              className="h-3.5 w-3.5 rounded border-input cursor-pointer accent-primary"
-            />
-            <span>Review plan</span>
-          </label>
-        )}
+        {/* Plan review moved into the Options panel (ChatOptionsPanel). */}
+        <ChatAttachmentsSelector
+          selectedSkills={enabledSkills}
+          selectedMcpServers={enabledMcpServers}
+          onChange={({ skills, mcpServers }) => {
+            setEnabledSkills(skills);
+            setEnabledMcpServers(mcpServers);
+          }}
+          disabled={disabled || isLoading}
+        />
         {shouldShowSourceScope && (
           <>
             <SourceScopeSelector

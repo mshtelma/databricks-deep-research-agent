@@ -15,7 +15,6 @@ import pytest
 
 from deep_research.services.cached.export import CachedExportService
 
-
 # ---------------------------------------------------------------------------
 # Stub services
 # ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ output_keys: [current_ast]
 # false-positive them as dangling reads / dead stores. See dataflow_contracts.py.
 runtime_injected_keys:
   - designer_assets
+  - skill_workflow_brief
   - task_signature
   - prompt_grounding
   - prompt_grounding_summary
@@ -339,6 +340,23 @@ root:
                     EXTRACTIVE route labels naming the distinct query classes,
                     verbatim from the request. The LAST case is the default /
                     fallback branch. Omit for non-router patterns.
+                  - coordination_pattern: "tree_search" (optional)
+                    Set when the user wants to SURVEY many angles first and then
+                    GO DEEPER on the gaps (e.g. "cast a wide net then drill into
+                    what matters", "breadth then depth", "survey then deep-dive").
+                    When set, it WINS topology selection. Derive from request
+                    STRUCTURE, never from domain vocabulary.
+                  - tree_breadth: int 2..6 (optional)
+                    For tree_search: how many research lanes run in parallel at the
+                    FIRST level. Breadth narrows automatically at each deeper level.
+                    Map an explicit count ("survey 6 angles" -> 6). Omit to default.
+                  - tree_depth: int 1..3 (optional)
+                    For tree_search: how many breadth levels to run. D=1 is a single
+                    parallel survey; D>=2 inserts a gap-finding reflector before each
+                    deeper level. Omit to default.
+                  tree_search also gathers evidence with normal research lane(s):
+                  keep independent_workstreams_count + lane_descriptions set to the
+                  EVIDENCE concern(s); tree_breadth/tree_depth shape the survey.
 
                   ## Output format
                   Call ``emit_task_signature`` exactly once with the JSON above and
@@ -346,6 +364,18 @@ root:
                 user_prompt_template: |
                   ## User Intent
                   {user_intent}
+
+                  ## Skill Compilation Brief (empty unless compiling a skill)
+                  {skill_workflow_brief}
+
+                  When the brief above is non-empty, the user is COMPILING the
+                  described skill(s) into a deterministic workflow. Emit a
+                  TaskSignature whose structural axes MATCH the brief's steps:
+                  independent steps => independent_workstreams_count (one lane each,
+                  lane_descriptions = the step descriptions); dependent/sequential
+                  steps => step_dependencies_present=true; iterative composition =>
+                  iteration_required=true. Honor the brief's "Recommended structure"
+                  axes when present.
 
                   ## User-selected Assets
                   {designer_assets}
@@ -794,6 +824,16 @@ root:
 
                           ## Task Signature (from the classifier — PR3-B)
                           {task_signature}
+
+                          ## Skill Compilation Brief (empty unless compiling a skill)
+                          {skill_workflow_brief}
+
+                          When the brief above is non-empty, SPECIALIZE each
+                          researcher/synthesizer node's prompt to the matching skill
+                          step (one node per step, in order). Replicate the skill's
+                          logic faithfully via the node prompts; do NOT add or remove
+                          nodes. For a step that runs a script, write that step's
+                          instruction into the node's prompt (do not execute the script).
 
                           ## Initial Blueprint Summary
                           The deterministic blueprint is held in workflow state and

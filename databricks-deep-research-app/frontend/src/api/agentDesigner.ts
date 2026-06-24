@@ -91,6 +91,35 @@ export async function getRegistry(): Promise<RegistryResponse> {
   return data
 }
 
+/** Global feature-gate states used to annotate gated knobs in the inspector. */
+export interface DesignerCapabilities {
+  skill_scripts_global: boolean
+  cross_session_memory_global: boolean
+  live_search_global: boolean
+}
+
+let _capabilitiesCache: DesignerCapabilities | null = null
+
+/**
+ * Fetch global feature-gate states (cached). Used by the inspector to warn when
+ * a per-agent gated knob (e.g. allow_skill_scripts) is on but its global switch
+ * is off — so the toggle never silently no-ops.
+ */
+export async function getDesignerCapabilities(): Promise<DesignerCapabilities> {
+  if (_capabilitiesCache !== null) {
+    return _capabilitiesCache
+  }
+  const response = await fetch(`${API_BASE_URL}/agent-designer/capabilities`, {
+    headers: { 'Content-Type': 'application/json' },
+  })
+  if (!response.ok) {
+    throw new ApiError(response.status, 'UNKNOWN', 'Failed to fetch capabilities')
+  }
+  const data = (await response.json()) as DesignerCapabilities
+  _capabilitiesCache = data
+  return data
+}
+
 // ---------------------------------------------------------------------------
 // Validate
 // ---------------------------------------------------------------------------
@@ -468,12 +497,14 @@ export async function* chatStream({
   current_ast,
   session_id,
   assets,
+  skill_names,
   signal,
 }: {
   messages: ChatMessage[]
   current_ast: AST | null
   session_id?: string | null
   assets?: DesignerAsset[]
+  skill_names?: string[]
   signal?: AbortSignal
 }): AsyncIterable<DesignerStreamChunk> {
   // The backend ChatMessage schema is extra="forbid", and the Databricks
@@ -506,7 +537,13 @@ export async function* chatStream({
   const response = await fetch(`${API_BASE_URL}/agent-designer/chat`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ messages: wireMessages, current_ast, session_id, assets: assets ?? [] }),
+    body: JSON.stringify({
+      messages: wireMessages,
+      current_ast,
+      session_id,
+      assets: assets ?? [],
+      skill_names: skill_names ?? [],
+    }),
     signal,
   })
 

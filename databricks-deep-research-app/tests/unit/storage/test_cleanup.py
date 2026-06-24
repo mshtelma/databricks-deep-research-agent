@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-
-import pytest
 
 from deep_research.storage.cleanup import CleanupLoop, CleanupStats
 

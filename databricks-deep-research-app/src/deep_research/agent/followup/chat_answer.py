@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from deep_research.services.chat_source_pool_service import ChatSourcePoolService
     from deep_research.services.llm.client import LLMClient
     from deep_research.services.llm.embedder import Embedder
+    from deep_research.storage.factory import StorageStack
 
 logger = get_logger(__name__)
 
@@ -45,11 +46,12 @@ async def _load_chat_sources(
     db: AsyncSession,
     chat_id: UUID,
     embedder: Embedder | None,
+    storage_stack: StorageStack | None,
 ) -> tuple[ChatSourcePoolService | None, list[SourceInfo]]:
     """Build the chat source pool (indexed) and the SourceInfo summary list."""
     from deep_research.services.chat_source_pool_service import ChatSourcePoolService
 
-    pool = ChatSourcePoolService(db, embedder=embedder)
+    pool = ChatSourcePoolService(db, embedder=embedder, storage_stack=storage_stack)
     db_sources = await pool.get_all_sources(chat_id)
     await pool.build_search_index(chat_id)
     sources = [
@@ -73,6 +75,7 @@ async def stream_chat_about_results(
     llm: LLMClient,
     prior_findings_summary: str = "",
     embedder: Embedder | None = None,
+    storage_stack: StorageStack | None = None,
 ) -> AsyncGenerator[StreamEvent, None]:
     """Stream a grounded answer over the chat's prior research.
 
@@ -97,7 +100,9 @@ async def stream_chat_about_results(
 
         if session is not None:
             try:
-                chat_source_pool, sources = await _load_chat_sources(session, cid, embedder)
+                chat_source_pool, sources = await _load_chat_sources(
+                    session, cid, embedder, storage_stack
+                )
             except Exception as exc:  # noqa: BLE001 — source search is best-effort
                 logger.warning(
                     "FOLLOWUP_POOL_INIT_FAILED", chat_id=str(cid), error=str(exc)[:200]

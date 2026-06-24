@@ -733,6 +733,12 @@ export function useStreamingQuery(
         agentId,
         enablePlanReview,
         turnIntent,
+        tone,
+        outputLanguage,
+        enabledMcpServers,
+        enabledSkills,
+        enableCrossSessionMemory,
+        allowLiveSearch,
       } = submission;
 
       stopRequestedRef.current = false;
@@ -800,6 +806,12 @@ export function useStreamingQuery(
           agentId: agentId,
           enablePlanReview: enablePlanReview,
           turnIntent: turnIntent,
+          tone: tone,
+          outputLanguage: outputLanguage,
+          enabledMcpServers: enabledMcpServers,
+          enabledSkills: enabledSkills,
+          enableCrossSessionMemory: enableCrossSessionMemory,
+          allowLiveSearch: allowLiveSearch,
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);

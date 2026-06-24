@@ -26,6 +26,11 @@ vi.mock('@/api/agentDesigner', async (importOriginal) => {
       resources: [],
       total: 0,
     }),
+    getDesignerCapabilities: vi.fn().mockResolvedValue({
+      skill_scripts_global: false,
+      cross_session_memory_global: false,
+      live_search_global: false,
+    }),
     startDesignerSqlWarehouse: vi.fn().mockResolvedValue({
       kind: 'sql_warehouse',
       source_id: 'wh-default',
@@ -301,6 +306,65 @@ describe('ConfigPanel', () => {
       },
     };
   }
+
+  it('fetches skills + mcp_servers discovery for an agent inspector (D1)', async () => {
+    vi.mocked(listDesignerResources).mockResolvedValueOnce({
+      resources: [
+        {
+          kind: 'skill',
+          source_id: 'market-research',
+          name: 'market-research',
+          full_name: null,
+          description: 'how to research',
+          status: null,
+          capabilities: [],
+          metadata: {},
+        },
+        {
+          kind: 'mcp_server',
+          source_id: 'weather',
+          name: 'weather',
+          full_name: null,
+          description: null,
+          status: null,
+          capabilities: [],
+          metadata: {},
+        },
+      ],
+      total: 2,
+    });
+    const agentNodeType = {
+      ...FIXTURE_REGISTRY.node_types[0]!,
+      config_schema: {
+        type: 'object',
+        properties: {
+          skills: { type: 'array', title: 'Skills', items: { type: 'string' } },
+          mcp_servers: {
+            type: 'array',
+            title: 'MCP Servers',
+            items: { type: 'string' },
+          },
+        },
+      },
+    };
+    const registry: RegistryResponse = {
+      ...FIXTURE_REGISTRY,
+      node_types: [agentNodeType, ...FIXTURE_REGISTRY.node_types.slice(1)],
+    };
+    useAgentEditorStore.setState({
+      ast: astWithWebSearch([]),
+      selectedPath: 'root.children.0',
+    });
+    renderWithQuery(<ConfigPanel registry={registry} />);
+    // The agent inspector fetches the two opt-in discovery kinds to populate the
+    // skills / mcp_servers dropdowns.
+    await waitFor(() =>
+      expect(vi.mocked(listDesignerResources)).toHaveBeenCalledWith([
+        'skill',
+        'mcp_server',
+      ]),
+    );
+  });
 
   it('edits a declared tool inline from the agent Tools tab', () => {
     useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });

@@ -9,7 +9,7 @@ many *SQL statements* they emit internally, but the **user-facing contract**
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -17,7 +17,6 @@ import pytest
 from deep_research.storage.backend import ConflictError, PermanentError, StorageBackend
 from deep_research.storage.documents import (
     ChatDocument,
-    Finding,
     Message,
     PrepJobDocument,
     UploadedFileMeta,
@@ -26,7 +25,7 @@ from deep_research.storage.documents import (
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # --- Chat document round-trip ----------------------------------------------

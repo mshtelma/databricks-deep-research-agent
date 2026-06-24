@@ -6,6 +6,7 @@ import asyncio
 from uuid import UUID, uuid4
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage import MigrationInProgressError
 from deep_research.storage.cache import ChatStateCache, Hydrator
@@ -14,7 +15,6 @@ from deep_research.storage.documents import (
     Finding,
     Message,
 )
-from tests.fakes.fake_backend import FakeBackend
 
 
 async def _hydrated_cache(

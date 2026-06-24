@@ -13,8 +13,18 @@ dict shape: a top-level mapping with a ``root`` node, where every node has
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from typing import Any
+
+# Builder-owned id convention for a tree_search level parallel
+# (``_build_tree_search_workflow`` names them ``l{level}_research-level``). The
+# topology walker keys off this structural marker to classify tree_search at the
+# root BEFORE the generic parallel-recursion — otherwise its level parallels would
+# make the walker infer ``parallel_lanes`` (including the depth-1 case, which is
+# structurally a single parallel). This is a deterministic node-id convention
+# emitted by the builder, not a content/domain keyword match.
+_TREE_LEVEL_PARALLEL_ID_RE = re.compile(r"^l\d+_research-level$")
 
 
 def config_of(node: Any) -> dict[str, Any]:
@@ -95,9 +105,9 @@ def topology_of_ast(ast: dict[str, Any]) -> str:
 def topology_of_node(node: dict[str, Any]) -> str:
     """Classify the topology rooted at *node*.
 
-    Returns one of ``plan_and_execute``, ``router``, ``parallel_lanes``,
-    ``single_agent``, or ``unknown``. ``best_of_n`` and other parallel
-    fan-outs report as ``parallel_lanes`` (their family) — topology-specific
+    Returns one of ``plan_and_execute``, ``router``, ``tree_search``,
+    ``parallel_lanes``, ``single_agent``, or ``unknown``. ``best_of_n`` and other
+    parallel fan-outs report as ``parallel_lanes`` (their family) — topology-specific
     shape is verified by dedicated invariants elsewhere.
     """
     if not isinstance(node, dict):
@@ -118,6 +128,18 @@ def topology_of_node(node: dict[str, Any]) -> str:
         )
         if has_conditional and not has_parallel:
             return "router"
+        # tree_search: a sequence containing one or more level parallels with the
+        # builder's ``l{N}_research-level`` id convention. Checked BEFORE the
+        # generic parallel-recursion — otherwise its level parallels (including the
+        # depth-1 single-parallel case) would make the walker return
+        # parallel_lanes and false-classify. Mirrors the router precedence guard.
+        if any(
+            isinstance(c, dict)
+            and c.get("type") == "parallel"
+            and _TREE_LEVEL_PARALLEL_ID_RE.match(str(c.get("id") or ""))
+            for c in children
+        ):
+            return "tree_search"
     # parallel_lanes: a sequence that contains a parallel node
     for child in children:
         if isinstance(child, dict) and child.get("type") == "parallel":

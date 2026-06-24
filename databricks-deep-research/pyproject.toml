@@ -20,7 +20,10 @@ web = ["httpx>=0.24"]
 crawl = ["trafilatura>=1.6"]
 search = ["bm25s>=0.1", "numpy>=1.24"]
 tracing = ["mlflow>=2.10"]
-all = ["databricks-deep-research[web,crawl,search,tracing]"]
+# Safe pandas/numpy compute subset + server-side charts for the compute sandbox
+# (US-109 §5.2). Optional: the dataframe facade degrades gracefully if absent.
+dataframe = ["pandas>=1.5", "numpy>=1.24", "matplotlib>=3.5"]
+all = ["databricks-deep-research[web,crawl,search,tracing,dataframe]"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -69,7 +72,7 @@ check_untyped_defs = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["bm25s.*", "numpy", "numpy.*", "mlflow", "mlflow.*", "databricks.*", "json_repair", "bs4"]
+module = ["bm25s.*", "numpy", "numpy.*", "pandas", "pandas.*", "matplotlib", "matplotlib.*", "mlflow", "mlflow.*", "databricks.*", "json_repair", "bs4"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]

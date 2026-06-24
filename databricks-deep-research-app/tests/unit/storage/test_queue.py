@@ -5,19 +5,17 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 
-import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage import TransientError
 from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.documents import (
-    ChatState,
     Finding,
     Message,
     PrepJobDocument,
     UserDocument,
 )
 from deep_research.storage.queue import WriteQueue
-from tests.fakes.fake_backend import FakeBackend
 
 
 async def _wire_up(

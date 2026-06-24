@@ -185,11 +185,10 @@ class TestStrictModeRoleCheck:
         ), patch(
             "deep_research.db.grant_permissions.asyncpg.connect",
             new=AsyncMock(return_value=conn),
-        ):
-            with pytest.raises(RuntimeError, match="pg_roles existence check failed"):
-                await grant_permissions_to_app(
-                    "deep-research-agent-ais", settings=settings_stub
-                )
+        ), pytest.raises(RuntimeError, match="pg_roles existence check failed"):
+            await grant_permissions_to_app(
+                "deep-research-agent-ais", settings=settings_stub
+            )
 
     @pytest.mark.asyncio
     async def test_pg_roles_check_failure_skipped_in_tolerant_mode(
@@ -238,11 +237,10 @@ class TestPostFlightVerification:
         ), patch(
             "deep_research.db.grant_permissions.asyncpg.connect",
             new=AsyncMock(return_value=conn),
-        ):
-            with pytest.raises(RuntimeError, match="does NOT exist"):
-                await grant_permissions_to_app(
-                    "deep-research-agent-ais", settings=settings_stub
-                )
+        ), pytest.raises(RuntimeError, match="does NOT exist"):
+            await grant_permissions_to_app(
+                "deep-research-agent-ais", settings=settings_stub
+            )
 
     @pytest.mark.asyncio
     async def test_post_flight_no_login_raises(
@@ -260,11 +258,10 @@ class TestPostFlightVerification:
         ), patch(
             "deep_research.db.grant_permissions.asyncpg.connect",
             new=AsyncMock(return_value=conn),
-        ):
-            with pytest.raises(RuntimeError, match="rolcanlogin=False"):
-                await grant_permissions_to_app(
-                    "deep-research-agent-ais", settings=settings_stub
-                )
+        ), pytest.raises(RuntimeError, match="rolcanlogin=False"):
+            await grant_permissions_to_app(
+                "deep-research-agent-ais", settings=settings_stub
+            )
 
     @pytest.mark.asyncio
     async def test_post_flight_happy_path_no_raise(

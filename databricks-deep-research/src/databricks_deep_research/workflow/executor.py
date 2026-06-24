@@ -7,9 +7,10 @@ objects as an async generator.  Each node type has a dedicated handler.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -20,6 +21,7 @@ from databricks_deep_research.agents.config import (
     ConditionalNodeConfig,
     LoopNodeConfig,
     PlanAndExecuteNodeConfig,
+    SubworkflowNodeConfig,
     ToolNodeConfig,
 )
 from databricks_deep_research.agents.execution.output_normalizer import (
@@ -33,6 +35,7 @@ from databricks_deep_research.errors import (
     WorkflowError,
     WorkflowExecutionError,
 )
+from databricks_deep_research.events.status_contract import make_status_kwargs
 from databricks_deep_research.events.types import (
     AgentOutputEvent,
     BranchSelectedEvent,
@@ -377,6 +380,10 @@ class WorkflowExecutor:
         self._table_registry = table_registry or TableRegistry()
         self._context = context
         self._total_tokens: int = 0
+        # Recursion depth of the current executor when invoked as a child of a
+        # subworkflow node. 0 for a top-level workflow; the parent sets the
+        # child's value to parent_depth + 1 in ``_exec_subworkflow``.
+        self._subworkflow_depth: int = 0
         self._strict_tool_resolution = strict_tool_resolution
         self._workflow_total_sources_raw = 0
         self._workflow_total_sources_accepted = 0
@@ -669,6 +676,8 @@ class WorkflowExecutor:
                             error_message=str(exc),
                             will_retry=True,
                             retry_attempt=attempt + 1,
+                            # Not terminal: the node is about to retry.
+                            **make_status_kwargs("running"),
                         ))
                         await asyncio.sleep(error_cfg.retry_delay_seconds * (2 ** attempt))
                         try:
@@ -682,6 +691,7 @@ class WorkflowExecutor:
                         yield self._emit(NodeErrorEvent(
                             node_id=node.id, timestamp=_now(),
                             error_message=f"All {error_cfg.max_retries} retries exhausted: {exc}",
+                            **make_status_kwargs("failed"),
                         ))
                         raise
                     return
@@ -689,6 +699,7 @@ class WorkflowExecutor:
                     yield self._emit(NodeErrorEvent(
                         node_id=node.id, timestamp=_now(),
                         error_message=str(exc),
+                        **make_status_kwargs("failed"),
                     ))
                     if state.runtime_store is not None:
                         state.runtime_store.fail_node(node_id=node.id, duration_ms=0.0)
@@ -704,6 +715,7 @@ class WorkflowExecutor:
             yield self._emit(NodeCompletedEvent(
                 node_id=node.id, timestamp=_now(),
                 duration_ms=elapsed_ms,
+                **make_status_kwargs("completed"),
             ))
 
     def _record_step_completed(self) -> None:
@@ -855,6 +867,31 @@ class WorkflowExecutor:
                 errors.append(str(ref_name))
                 logger.warning("TOOL_NOT_FOUND ref=%s error=%s", ref, exc)
 
+        # Auto-attach read_skill when this agent declares skills (Feature 2.2).
+        # Built from the wired _skill_store and appended to the resolved tools so
+        # the ReAct loop (which maps tools by name from this list) can call it.
+        # run_skill_script is auto-attached only when BOTH the per-agent
+        # ``allow_skill_scripts`` and the global kill-switch are on (A2).
+        from databricks_deep_research.agents.skill_attach import (
+            maybe_attach_read_skill,
+            maybe_attach_run_skill_script,
+        )
+
+        _factory_ctx = getattr(self._resolver, "factory_context", None)
+        maybe_attach_read_skill(tools, config.skills, _factory_ctx)
+        maybe_attach_run_skill_script(
+            tools, config.skills, config.allow_skill_scripts, _factory_ctx
+        )
+
+        # Auto-attach discovered MCP tools for the servers this agent binds via
+        # ``config.mcp_servers`` (Feature 4.3). The host stashes a
+        # ``{server: [tools]}`` map in the factory context; without this step the
+        # injected tools stay orphaned in the resolver and no agent ever calls
+        # them. No-op when the agent binds no servers / no map is wired.
+        from databricks_deep_research.agents.mcp_attach import maybe_attach_mcp
+
+        maybe_attach_mcp(tools, config.mcp_servers, _factory_ctx)
+
         resolved_names = [t.definition.name for t in tools]
         logger.info(
             "AGENT_TOOLS_RESOLVED node=%s config_tool_refs=%d "
@@ -964,6 +1001,54 @@ class WorkflowExecutor:
 
         self._inject_compute_callables(tools, tool_declarations)
 
+        # GOVERNED spawn_agent runner (spec §3.3). Built ONLY when this node's
+        # config opts in (code/hybrid action_mode + a non-empty declared set + a
+        # positive budget); otherwise ``None`` so ``execute_agent`` is byte-
+        # identical and no spawn closure is ever injected. The runner runs a
+        # DECLARED inline subworkflow in an ISOLATED scratchpad scope (fresh
+        # compute namespace + private VFS) seeded with the spawn prompt as its
+        # query — so a spawned child cannot reach the parent Cell's compute
+        # namespace / VFS / variables; OBO identity is preserved (governed tools
+        # only). The same depth guard bounds spawn recursion.
+        spawn_runner: Callable[..., Awaitable[Any]] | None = None
+        spawn_enabled = (
+            config.action_mode in ("code", "hybrid")
+            and bool(config.spawnable_subagents)
+            and config.spawn_budget > 0
+        )
+        if spawn_enabled:
+            spawn_depth = self._subworkflow_depth + 1
+            max_spawn_depth = SubworkflowNodeConfig.model_fields[
+                "max_subworkflow_depth"
+            ].default
+
+            async def _spawn_runner(
+                *, name: str, prompt: str, inline: dict[str, Any]
+            ) -> Any:
+                # Depth guard — bounds a spawned child spawning further (spec
+                # §3.3 security invariant: spawn recursion is finite).
+                if spawn_depth > max_spawn_depth:
+                    raise WorkflowError(
+                        f"max_subworkflow_depth ({max_spawn_depth}) exceeded by "
+                        f"spawn_agent('{name}') at node '{node.id}'"
+                    )
+                result_sink: dict[str, Any] = {}
+                # Drive to completion. v1 spawns are synchronous/sequential; we
+                # consume the child's events to drive it (parallel fan-out +
+                # event re-emission are deferred — see config.max_concurrent_spawns).
+                async for _event in self._run_inline_subworkflow(
+                    inline,
+                    query=prompt,
+                    depth=spawn_depth,
+                    parent_state=state,
+                    pool_mode="isolate",
+                    result_sink=result_sink,
+                ):
+                    pass
+                return result_sink.get("primary")
+
+            spawn_runner = _spawn_runner
+
         output = await execute_agent(
             node_id=node.id,
             config=config,
@@ -975,6 +1060,7 @@ class WorkflowExecutor:
             table_registry=self._table_registry,
             tool_call_cache=self._context.tool_call_cache if self._context else None,
             execution_context=self._context,
+            spawn_runner=spawn_runner,
         )
 
         # Track token usage
@@ -1051,12 +1137,237 @@ class WorkflowExecutor:
         return
         yield  # pragma: no cover — make this an async generator
 
-    async def _exec_subworkflow(
-        self, _node: WorkflowNode, _state: WorkflowState
+    def _build_isolated_child_resolver(
+        self, child_defn: WorkflowDefinition
+    ) -> ToolResolver:
+        """Build a private resolver for an ``isolate`` subworkflow child.
+
+        Gives the child its own scratchpad: a FRESH compute namespace and a
+        PRIVATE VFS, so child scratchpad writes never leak to the parent and the
+        parent's scratchpad state is hidden from the child.
+
+        How isolation is achieved (two extras keys diverge; identity preserved):
+
+        * ``_framework_vfs`` is OVERRIDDEN with a fresh in-memory filesystem so
+          the VFS tools (``ls``/``read_file``/``write_file``/…) read the child's
+          private store rather than the parent's.
+        * ``_resolver_cache`` is EXCLUDED from the copied extras. The
+          :class:`ToolResolver` constructor installs a fresh ``_resolver_cache``,
+          so the child resolves ``compute`` to a NEW :class:`PythonComputeTool`
+          with an empty namespace (and ``compute_namespace`` finds that fresh
+          sibling via the fresh cache). Carrying the parent's cache over would
+          re-share the parent's compute singleton and defeat isolation.
+
+        Every OTHER :class:`ToolFactoryContext` field is preserved verbatim by
+        ``dataclasses.replace`` — crucially the identity fields
+        (``workspace_client``, ``user_token``, ``serving_client_provider``) and
+        host-injected extras like ``_skill_store`` — so the isolated child runs
+        as the SAME principal (OBO) as the parent; only its scratchpad differs.
+        """
+        from databricks_deep_research.api.vfs.in_memory import InMemoryBackend
+
+        parent_ctx = self._resolver.factory_context
+        # Copy the parent extras MINUS the per-resolver cache (the ToolResolver
+        # ctor installs a fresh one), then point the VFS at a private backend.
+        child_extras: dict[str, Any] = {
+            key: value
+            for key, value in parent_ctx.extras.items()
+            if key != "_resolver_cache"
+        }
+        child_extras["_framework_vfs"] = InMemoryBackend()
+        child_factory_ctx = dataclasses.replace(parent_ctx, extras=child_extras)
+        return ToolResolver(
+            declarations=list(child_defn.tools) if child_defn.tools else None,
+            factories=self._resolver._factories,
+            factory_context=child_factory_ctx,
+            legacy_registry=self._resolver._legacy,
+        )
+
+    async def _run_inline_subworkflow(
+        self,
+        inline: dict[str, Any],
+        *,
+        query: str,
+        depth: int,
+        parent_state: WorkflowState,
+        pool_mode: str = "inherit",
+        seed_inputs: dict[str, Any] | None = None,
+        result_sink: dict[str, Any] | None = None,
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Execute a subworkflow (deferred to P2)."""
-        raise NotImplementedError("Subworkflow execution is deferred to P2")
-        yield  # Make this an async generator  # noqa: B033
+        """Run a DECLARED inline subworkflow as a child, yielding its events.
+
+        The single shared spine behind BOTH ``_exec_subworkflow`` (the
+        subworkflow node) and the GOVERNED ``spawn_agent`` runner (spec §3.3), so
+        the two cannot drift. It validates ``inline``, builds the child resolver
+        per ``pool_mode`` (``isolate`` => fresh compute namespace + private VFS;
+        identity/OBO preserved), constructs a fresh child :class:`WorkflowState`
+        seeded with ``query`` + ``seed_inputs``, wires pools per ``pool_mode``,
+        drives the child root directly (never ``execute()``), folds ``merge``
+        pools back, and stashes ``{"primary": <value>, "child_state": <state>}``
+        into ``result_sink`` (when provided) for the caller to read AFTER the
+        generator is fully consumed.
+
+        ``depth`` is the child's ``_subworkflow_depth`` — callers pass
+        ``self._subworkflow_depth + 1`` AFTER applying their own recursion guard,
+        so the bound is enforced identically on both paths.
+        """
+        child_defn = WorkflowDefinition.model_validate(inline)
+
+        # Scratchpad (compute namespace + VFS) scope follows ``pool_mode``:
+        #   * inherit / merge — share the parent resolver, so the child sees the
+        #     SAME cached ``compute`` singleton (one namespace) and the SAME
+        #     ``_framework_vfs``. Producer→consumer by handle, no re-serialisation.
+        #   * isolate — give the child its OWN resolver with a fresh compute
+        #     namespace and a private VFS, so child scratchpad writes never leak to
+        #     the parent and parent scratchpad state is hidden from the child. Only
+        #     ``output_mapping`` / the primary ``output_key`` (and ``submit()``)
+        #     surface results back across the boundary.
+        if pool_mode == "isolate":
+            child_resolver = self._build_isolated_child_resolver(child_defn)
+        else:
+            child_resolver = self._resolver
+
+        # Child executor shares parent tool/identity context (isolate swaps in a
+        # private resolver above; URL/table registries + ExecutionContext, hence
+        # OBO identity, always carry over).
+        child_exec = WorkflowExecutor(
+            child_defn,
+            self._llm,
+            tool_resolver=child_resolver,
+            url_registry=self._url_registry,
+            table_registry=self._table_registry,
+            context=self._context,
+        )
+        child_exec._subworkflow_depth = depth
+
+        # Fresh child state carrying the parent's caller identity/config. A clean
+        # log/index keeps the child's dataflow scoped (no wholesale log copy).
+        child_state = WorkflowState(
+            query=query,
+            model_overrides=dict(parent_state.model_overrides),
+            enterprise_tools=list(parent_state.enterprise_tools),
+            user_token=parent_state.user_token,
+            domain_filter=parent_state.domain_filter,
+            conversation_history=list(parent_state.conversation_history),
+            is_cancelled=parent_state.is_cancelled,
+        )
+
+        # Seed declared inputs (subworkflow node: input_mapping + params; spawn:
+        # nothing — the prompt rides on ``query``).
+        for child_key, value in (seed_inputs or {}).items():
+            child_state.append(child_defn.id, child_key, value)
+
+        # Pool wiring per pool_mode (the compute scratchpad + VFS were already
+        # scoped per pool_mode above via the child resolver choice).
+        if pool_mode == "inherit":
+            # Bind the child to the parent's pools so child nodes read and write
+            # the SAME pools the parent sees. Agent nodes write via the harness'
+            # ``pools`` argument, which the child ``_exec_agent`` sources from
+            # ``child_exec._pools`` (NOT ``child_state.pools``) — so we must point
+            # BOTH the child executor's pools and the child state's pools at the
+            # parent pools for inheritance to actually take effect.
+            child_exec._pools = parent_state.pools
+            child_state.pools = parent_state.pools
+        else:
+            # ``isolate`` and ``merge`` both run against the child's own fresh
+            # pools (built from child_defn.pools); ``merge`` reconciles after.
+            child_state.pools = child_exec._pools
+
+        # Drive the child's root directly, propagating parent cancellation in.
+        async for event in child_exec._exec_node(child_defn.root, child_state):
+            if parent_state.is_cancelled:
+                child_state.is_cancelled = True
+            yield event
+
+        # ``merge``: fold child pool contents back into the parent pools.
+        if pool_mode == "merge":
+            for pool_name, child_pool in child_state.pools.items():
+                parent_pool = parent_state.pools.get(pool_name)
+                if parent_pool is None:
+                    continue
+                for item in child_pool.snapshot():
+                    parent_pool.add(item)
+
+        # Compute the child's primary result: the last declared output key of the
+        # child definition (``output_keys`` always has at least the default
+        # "output"), falling back to the last log entry.
+        primary_value: Any = None
+        if child_defn.output_keys:
+            primary_value = child_state.get(child_defn.output_keys[-1])
+        if primary_value is None and child_state.log:
+            primary_value = child_state.log[-1].value
+
+        if result_sink is not None:
+            result_sink["primary"] = primary_value
+            result_sink["child_state"] = child_state
+
+    async def _exec_subworkflow(
+        self, node: WorkflowNode, state: WorkflowState
+    ) -> AsyncGenerator[StreamEvent, None]:
+        """Run a nested workflow as a child of this node.
+
+        The parent ``_exec_node`` that dispatched here already supplies this
+        node's ``NodeStarted``/``NodeCompleted`` events and full
+        ``error_handling`` — so this handler simply does its work and raises on
+        failure. Child node errors are handled by the *child's* ``_exec_node``
+        per each child's own ``error_handling`` policy.
+
+        The child runs against a SEPARATE :class:`WorkflowState` and a fresh
+        child :class:`WorkflowExecutor`. For ``pool_mode`` inherit/merge it shares
+        the parent's tool resolver (hence the parent's compute namespace + VFS);
+        for ``isolate`` it gets a private resolver with a fresh compute namespace
+        and a private VFS. URL/table registries and the :class:`ExecutionContext`
+        (so OBO identity and per-agent tool overrides) always carry over. We drive
+        the child's root directly (``_exec_node``), never ``execute()`` — that
+        would reset ``runtime_store`` and emit a nested ``WorkflowStartedEvent``.
+        """
+        config = SubworkflowNodeConfig(**node.config)
+
+        # Recursion guard.
+        next_depth = self._subworkflow_depth + 1
+        if next_depth > config.max_subworkflow_depth:
+            raise WorkflowError(
+                f"max_subworkflow_depth ({config.max_subworkflow_depth}) "
+                f"exceeded at node '{node.id}'"
+            )
+
+        # Resolve the child definition. ``inline`` is the primary path (written
+        # by api/compile.py). No named-subworkflow registry exists, so a bare
+        # ``ref`` is not resolvable.
+        if config.inline is None:
+            raise WorkflowError(
+                f"subworkflow ref '{config.ref}' is not resolvable; "
+                f"provide an inline definition"
+            )
+
+        # Seed declared inputs, then params (params override/augment). Built here
+        # so the shared spine stays node-agnostic.
+        seed_inputs: dict[str, Any] = {}
+        for child_key, parent_key in config.input_mapping.items():
+            seed_inputs[child_key] = state.get(parent_key)
+        for param_key, param_value in config.params.items():
+            seed_inputs[param_key] = param_value
+
+        result_sink: dict[str, Any] = {}
+        async for event in self._run_inline_subworkflow(
+            config.inline,
+            query=state.query,
+            depth=next_depth,
+            parent_state=state,
+            pool_mode=config.pool_mode,
+            seed_inputs=seed_inputs,
+            result_sink=result_sink,
+        ):
+            yield event
+
+        child_state: WorkflowState = result_sink["child_state"]
+
+        # Map outputs back to the PARENT state.
+        for parent_key, child_key in config.output_mapping.items():
+            state.append(node.id, parent_key, child_state.get(child_key))
+
+        # Always expose the child's primary result under ``output_key``.
+        state.append(node.id, config.output_key, result_sink["primary"])
 
     async def _exec_plan_and_execute(
         self, node: WorkflowNode, state: WorkflowState

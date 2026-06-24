@@ -338,7 +338,7 @@ class _DecoratedTool:
 
 
 @overload
-def tool(fn: Callable[..., Any]) -> "_DecoratedTool": ...
+def tool(fn: Callable[..., Any]) -> _DecoratedTool: ...
 @overload
 def tool(
     *,
@@ -348,7 +348,7 @@ def tool(
     requires_confirmation: bool = False,
     source_kind: str = SourceKind.builtin,
     source_type: str = "user_function",
-) -> Callable[[Callable[..., Any]], "_DecoratedTool"]: ...
+) -> Callable[[Callable[..., Any]], _DecoratedTool]: ...
 @overload
 def tool(
     fn: Callable[..., Any],
@@ -359,7 +359,7 @@ def tool(
     requires_confirmation: bool = False,
     source_kind: str = SourceKind.builtin,
     source_type: str = "user_function",
-) -> "_DecoratedTool": ...
+) -> _DecoratedTool: ...
 def tool(
     fn: Callable[..., Any] | None = None,
     *,
@@ -369,7 +369,7 @@ def tool(
     requires_confirmation: bool = False,
     source_kind: str = SourceKind.builtin,
     source_type: str = "user_function",
-) -> "_DecoratedTool | Callable[[Callable[..., Any]], _DecoratedTool]":
+) -> _DecoratedTool | Callable[[Callable[..., Any]], _DecoratedTool]:
     """Decorate a callable to expose it as a :class:`ResearchTool`.
 
     The decorator inspects the callable's signature, type hints, and Google-style

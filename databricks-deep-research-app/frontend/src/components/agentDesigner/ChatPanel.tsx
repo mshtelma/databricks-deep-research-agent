@@ -37,6 +37,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { useChatSession } from '@/hooks/useChatSession';
+import { SkillCompilePicker } from './SkillCompilePicker';
 import { useDesignerSettings } from '@/hooks/useDesignerSettings';
 import { PendingMutationCard } from './PendingMutationCard';
 import { MutationConflictModal } from './MutationConflictModal';
@@ -841,7 +842,13 @@ const SUGGESTIONS = [
 ];
 
 export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactElement {
-  const session = useChatSession({ sessionId, assets });
+  // Skill -> Workflow (P5): skills the user picked to compile into the draft.
+  const [compileSkills, setCompileSkills] = React.useState<string[]>([]);
+  const session = useChatSession({
+    sessionId,
+    assets,
+    skillNames: () => compileSkills,
+  });
   const { settings, setShowAutoRepairDetails } = useDesignerSettings();
 
   const [inputText, setInputText] = React.useState('');
@@ -1133,6 +1140,13 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
             ))}
           </div>
         )}
+        <div className="mb-1.5 flex items-center gap-1.5">
+          <SkillCompilePicker
+            selected={compileSkills}
+            onChange={setCompileSkills}
+            disabled={session.isStreaming}
+          />
+        </div>
         <div className="flex items-end gap-1.5 rounded-db-md border border-db-gray-lines bg-db-oat-light p-2 transition-colors focus-within:border-db-navy-400 focus-within:shadow-db-focus">
           <textarea
             className="flex-1 resize-none border-0 bg-transparent p-0 font-db-sans text-[13px] leading-[1.45] text-db-navy-800 outline-none placeholder:text-db-gray-text disabled:opacity-55"

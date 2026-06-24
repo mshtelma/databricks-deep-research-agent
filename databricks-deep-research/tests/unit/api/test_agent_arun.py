@@ -12,8 +12,7 @@ import pytest
 from pydantic import BaseModel
 
 from databricks_deep_research.api import Agent, AgentResult, tool
-from databricks_deep_research.events.types import StreamEvent
-from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse, ToolCall
+from databricks_deep_research.llm.client import LLMResponse
 
 
 class _CannedClient:

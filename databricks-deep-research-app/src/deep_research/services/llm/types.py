@@ -30,11 +30,24 @@ class ReasoningEffort(StrEnum):
 
 
 # Default thinking budget_tokens per effort level for Claude endpoints.
-# Overridden by endpoint.reasoning_budget or role.reasoning_budget when set.
+# LEGACY: Claude 4.x uses CLAUDE_ADAPTIVE_EFFORT below. Retained for the (now
+# unused) budget path and any external importers / re-exports.
 CLAUDE_THINKING_BUDGETS: dict[str, int] = {
     "low": 1024,
     "medium": 4096,
     "high": 10240,
+}
+
+# Adaptive-thinking effort per ReasoningEffort.value for Claude 4.x endpoints.
+# The Databricks/Anthropic gateway replaced {"type": "enabled", "budget_tokens": N}
+# with {"type": "adaptive"} + output_config.effort; valid efforts are low | high |
+# max (high is the default). NONE/MINIMAL disable thinking upstream so are absent;
+# MEDIUM rounds up to the "high" default (the adaptive API has no "medium" effort).
+CLAUDE_ADAPTIVE_EFFORT: dict[str, str] = {
+    "low": "low",
+    "medium": "high",
+    "high": "high",
+    "max": "max",
 }
 
 

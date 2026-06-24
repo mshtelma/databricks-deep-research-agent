@@ -173,6 +173,22 @@ class SubmitJobRequest(BaseModel):
         default=None,
         description="Output type for structured output (e.g., 'meeting_prep'). If not specified, uses default synthesis_report.",
     )
+    tone: str | None = Field(
+        default=None,
+        description=(
+            "Optional writing tone for the synthesized report (e.g. 'objective', "
+            "'formal', 'analytical'). Lowercase framework Tone member name. "
+            "Unrecognized values are ignored; None => default synthesis tone."
+        ),
+    )
+    output_language: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Optional output language for the report (e.g. 'Spanish', "
+            "'Japanese'). Free-form language name. None => default (unchanged)."
+        ),
+    )
     # Source selection fields (Feature 008)
     source_scope: SourceScope | None = Field(
         default=None,
@@ -207,6 +223,23 @@ class SubmitJobRequest(BaseModel):
     enable_plan_review: bool = Field(
         default=False,
         description="If true, pause after plan creation for user review.",
+    )
+    # Chat-attached Skills + MCP servers (Feature 2.2 / 4.3 — E1)
+    enabled_mcp_servers: list[str] | None = Field(
+        default=None,
+        description="MCP server names attached to this query via the chat selector.",
+    )
+    enabled_skills: list[str] | None = Field(
+        default=None,
+        description="Skill names attached to this query via the chat selector.",
+    )
+    enable_cross_session_memory: bool | None = Field(
+        default=None,
+        description="Per-run override: recall facts from prior chats (None = inherit global).",
+    )
+    allow_live_search: bool | None = Field(
+        default=None,
+        description="Per-run override: allow the live-web-search follow-up escape hatch (None = inherit global).",
     )
 
 
@@ -342,6 +375,8 @@ async def submit_job(
         conversation_history=conversation_history,
         system_instructions=system_instructions,
         output_type=body.output_type,
+        tone=body.tone,
+        output_language=body.output_language,
         source_scope=body.source_scope.value if body.source_scope else None,
         enabled_sources=body.enabled_sources,
         disabled_sources=body.disabled_sources,
@@ -353,6 +388,10 @@ async def submit_job(
         turn_intent=body.turn_intent,
         enable_plan_review=body.enable_plan_review,
         approval_broker=approval_broker,
+        enabled_mcp_servers=body.enabled_mcp_servers,
+        enabled_skills=body.enabled_skills,
+        enable_cross_session_memory=body.enable_cross_session_memory,
+        allow_live_search=body.allow_live_search,
     )
 
     logger.info(

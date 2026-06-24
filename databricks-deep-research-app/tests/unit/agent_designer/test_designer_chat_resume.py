@@ -66,6 +66,7 @@ class _FakeOrchestrator:
         user_token: str,
         current_user_id: str = "",
         assets: list[Any] | None = None,
+        skill_names: list[str] | None = None,
     ) -> AsyncIterator[DesignerSSEEvent]:
         yield MessageEvent(content="hi")
         yield DoneEvent()

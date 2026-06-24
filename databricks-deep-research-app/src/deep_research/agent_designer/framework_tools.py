@@ -353,6 +353,27 @@ def _error_result(message: str) -> ToolResult:
     )
 
 
+def _coerce_expected_count(raw: Any) -> int | None:
+    """Coerce an LLM-supplied ``expected_count`` arg to ``int | None``.
+
+    Absent / null ⇒ ``None`` (patch-count assertion disabled, byte-identical to
+    the prior behavior). A numeric string ("1") or float (1.0) is coerced to an
+    int; anything non-coercible falls back to ``None`` so a malformed optional
+    arg never hard-fails the edit (the loud failure path is a real mismatch, not
+    a typo'd assertion).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):  # bool is an int subclass — exclude explicitly
+        return None
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def _read_assets(asset_getter: AssetGetter | None) -> Any:
     if asset_getter is None:
         return None
@@ -3165,8 +3186,9 @@ class SelectTopologyTool:
             name="select_topology",
             description=(
                 "Return the topology (single_agent / parallel_lanes / "
-                "plan_and_execute / best_of_n / iterative_refinement / router) for "
-                "the current TaskSignature. Deterministic — call once per design pass."
+                "plan_and_execute / best_of_n / iterative_refinement / router / "
+                "tree_search) for the current TaskSignature. Deterministic — call "
+                "once per design pass."
             ),
             parameters={
                 "type": "object",
@@ -3255,7 +3277,10 @@ class EditUpdateBlockTool:
                 "set any non-structural field (system_prompt, user_prompt_template, "
                 "model_tier, max_tool_calls, output_format, provider, model, ...). "
                 "Structural keys (subtype/type/children/body) are rejected — use "
-                "clone_block / add_block / delete_block / move_block. DO NOT pass "
+                "clone_block / add_block / delete_block / move_block. Pass "
+                "'expected_count' (almost always 1) to assert how many nodes 'path' "
+                "should resolve to; the patch fails loudly if it would match a "
+                "different number, instead of silently mis-applying. DO NOT pass "
                 "'current_ast' — the framework reads it from state."
             ),
             parameters={
@@ -3268,6 +3293,14 @@ class EditUpdateBlockTool:
                     "patches": {
                         "type": "object",
                         "description": "Shallow-merged patches; config is deep-merged.",
+                    },
+                    "expected_count": {
+                        "type": "integer",
+                        "description": (
+                            "Optional. Assert the patch matches exactly this many "
+                            "nodes (use 1 for a single-node edit). Fails loudly on "
+                            "mismatch."
+                        ),
                     },
                 },
                 "required": ["path", "patches"],
@@ -3290,9 +3323,12 @@ class EditUpdateBlockTool:
         patches = arguments.get("patches") or {}
         if not isinstance(patches, dict):
             return _error_result("edit_update_block 'patches' must be a dict")
+        expected_count = _coerce_expected_count(arguments.get("expected_count"))
         patches = _brace_escape_patches(patches)
         try:
-            new_ast = mutations.edit_update_block(ast, path, patches)
+            new_ast = mutations.edit_update_block(
+                ast, path, patches, expected_count=expected_count
+            )
         except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
             return _error_result(f"edit_update_block failed: {exc}")
         new_ast = _commit_to_cache(new_ast, self._state_setter)

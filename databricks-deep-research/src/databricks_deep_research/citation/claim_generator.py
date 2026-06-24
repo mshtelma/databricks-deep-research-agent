@@ -477,6 +477,7 @@ class InterleavedGenerator:
         target_word_count: int = 600,
         max_tokens: int = 2000,
         generation_instructions: str = "",
+        output_language: str | None = None,
     ) -> AsyncGenerator[tuple[str, InterleavedClaim | None], None]:
         """Generate content with interleaved claims and streaming.
 
@@ -585,6 +586,21 @@ class InterleavedGenerator:
                 "every factual claim MUST be followed by one or more [N] citation markers "
                 "from the evidence pool. Do NOT continue the research notes verbatim; "
                 "do NOT produce a citation-free narrative."
+            )
+
+        # Re-force the output language LAST (redundant with any language clause
+        # already inside ``generation_instructions``) so the model does not drift
+        # back to English on a long generation. ``None``/empty => no-op. Numeric
+        # values, units, currencies, dates, and proper names are explicitly held
+        # invariant so this never collides with the hard numeric/unit rules.
+        language = (output_language or "").strip()
+        if language:
+            prompt += (
+                f"\n\n## OUTPUT LANGUAGE (BINDING)\nWrite the ENTIRE response in "
+                f"{language}. Every heading, sentence, and analysis block MUST be "
+                f"in {language}. Do NOT translate or alter numeric values, units, "
+                "currencies, dates, or proper names — reproduce them exactly as the "
+                "evidence states them."
             )
 
         try:

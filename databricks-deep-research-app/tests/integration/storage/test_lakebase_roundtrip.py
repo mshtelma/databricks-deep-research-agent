@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
@@ -26,7 +26,7 @@ pytestmark = [
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 async def test_full_lifecycle() -> None:
@@ -52,9 +52,8 @@ async def test_full_lifecycle() -> None:
     schema_name = f"deep_research_test_{uuid.uuid4().hex[:12]}"
 
     async def _run_schema(sql: str) -> None:
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(sql))
+        async with sm() as session, session.begin():
+            await session.execute(text(sql))
 
     await _run_schema(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
 
@@ -62,14 +61,12 @@ async def test_full_lifecycle() -> None:
 
     try:
         # Apply DDL under the temp schema via `SET search_path`.
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(f'SET search_path TO "{schema_name}"'))
-                for stmt in _split_sql(backend._ddl_path.read_text()):
-                    await session.execute(text(stmt))
+        async with sm() as session, session.begin():
+            await session.execute(text(f'SET search_path TO "{schema_name}"'))
+            for stmt in _split_sql(backend._ddl_path.read_text()):
+                await session.execute(text(stmt))
 
         # Scope every subsequent backend session to the temp schema.
-        from sqlalchemy.ext.asyncio import async_sessionmaker
 
         class _Scoped:
             def __call__(self, *args, **kwargs):

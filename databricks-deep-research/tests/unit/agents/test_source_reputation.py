@@ -7,8 +7,6 @@ end-to-end, and the tests treat the domain values as opaque illustrations.
 """
 from __future__ import annotations
 
-import pytest
-
 from databricks_deep_research.agents.source_aware import _score_source_relevance
 from databricks_deep_research.agents.source_reputation import (
     DEPRECATED_DELTA,
@@ -17,7 +15,6 @@ from databricks_deep_research.agents.source_reputation import (
     ReputationAdjustment,
     SourceReputationScorer,
 )
-
 
 # ---------------------------------------------------------------------------
 # SourceReputationScorer — direct tests

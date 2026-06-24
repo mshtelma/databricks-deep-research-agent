@@ -23,6 +23,25 @@ from databricks_deep_research.workflow.state import WorkflowState
 logger = logging.getLogger(__name__)
 
 
+def _coerce_optional_str(value: Any) -> str | None:
+    """Coerce an LLM-produced field to ``str | None`` for the event schema.
+
+    ``ReflectionDecisionEvent`` types ``decision``/``reasoning``/
+    ``evidence_sufficiency``/``failure_mode`` as strings, but a stochastic LLM
+    occasionally returns a structured object (e.g. ``{"completeness": 8, ...}``)
+    under one of those keys. Strings pass through untouched; ``None`` stays
+    ``None``; anything else is compactly stringified (capped) so a malformed
+    value degrades gracefully instead of raising a ``ValidationError`` that would
+    fail the whole already-completed research run. Mirrors
+    ``extract_evidence_sufficiency`` in the plan-and-execute runtime, which
+    already stringifies non-string output.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    text = str(value).strip()
+    return text[:500] or None
+
+
 def _post_process(
     node_id: str,
     output: Any,
@@ -46,15 +65,23 @@ def _post_process(
         getattr(output, "failure_mode", None) if not isinstance(output, dict) else output.get("failure_mode"),
     )
 
-    evidence_sufficiency = getattr(output, "evidence_sufficiency", None) if not isinstance(output, dict) else output.get("evidence_sufficiency")
-    failure_mode = getattr(output, "failure_mode", None) if not isinstance(output, dict) else output.get("failure_mode")
+    evidence_sufficiency = _coerce_optional_str(
+        getattr(output, "evidence_sufficiency", None)
+        if not isinstance(output, dict)
+        else output.get("evidence_sufficiency")
+    )
+    failure_mode = _coerce_optional_str(
+        getattr(output, "failure_mode", None)
+        if not isinstance(output, dict)
+        else output.get("failure_mode")
+    )
 
     return [
         ReflectionDecisionEvent(
             node_id=node_id,
             timestamp=datetime.now(tz=UTC).isoformat(),
-            decision=decision,
-            reasoning=reasoning,
+            decision=_coerce_optional_str(decision) or "continue",
+            reasoning=_coerce_optional_str(reasoning) or "",
             evidence_sufficiency=evidence_sufficiency,
             failure_mode=failure_mode,
         )

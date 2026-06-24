@@ -108,6 +108,7 @@ TopologyName = Literal[
     "best_of_n",
     "iterative_refinement",
     "router",
+    "tree_search",
 ]
 
 # Framework topology names. Kept as a tuple so ``select_topology`` and the
@@ -119,6 +120,7 @@ TOPOLOGIES: tuple[TopologyName, ...] = (
     "best_of_n",
     "iterative_refinement",
     "router",
+    "tree_search",
 )
 
 # Coordination patterns. Kept as a type alias so it stays INLINED in
@@ -126,7 +128,12 @@ TOPOLOGIES: tuple[TopologyName, ...] = (
 # rejects $ref in parameter schemas. ``iterative_refinement`` is the critic-gated
 # improvement loop (participants=1 self-critique / >=2 ensemble); ``router``
 # classifies the query and branches to one of N research sub-pipelines.
-CoordinationPattern = Literal["best_of_n", "iterative_refinement", "router"]
+# ``tree_search`` is the breadth x gap-driven-depth survey: B researchers per
+# level, a gap-finding reflector between levels, narrowing breadth per level,
+# unrolled statically over depth D (no runtime recursion).
+CoordinationPattern = Literal[
+    "best_of_n", "iterative_refinement", "router", "tree_search"
+]
 
 
 def _collapse_optional_anyof(prop: dict[str, Any]) -> None:
@@ -348,6 +355,36 @@ class TaskSignature(BaseModel):
         ),
     )
 
+    # tree_search coordination axis. FLAT optional fields (NOT a nested model) so
+    # ``tool_schema`` stays $ref-free. ``tree_breadth`` is the first level's
+    # parallel-researcher fan-out (it narrows automatically per level); ``tree_depth``
+    # is the number of breadth levels (depth D-1 gap-finding reflectors are inserted
+    # between them). All optional so legacy payloads load unchanged.
+    tree_breadth: int | None = Field(
+        default=None,
+        ge=2,
+        le=6,
+        description=(
+            "For coordination_pattern='tree_search': how many research lanes run in "
+            "parallel at the FIRST level (2-6). Breadth narrows automatically at each "
+            "deeper level (next = max(2, breadth // 2)). Map an explicit count in the "
+            "request here (e.g. 'survey 6 angles' -> 6). Omit to default (the builder "
+            "defaults it)."
+        ),
+    )
+    tree_depth: int | None = Field(
+        default=None,
+        ge=1,
+        le=3,
+        description=(
+            "For coordination_pattern='tree_search': how many breadth levels to run "
+            "(1-3). D=1 is a single parallel survey (no reflector); D>=2 inserts a "
+            "gap-finding reflector before each deeper level so the next level targets "
+            "the prior level's knowledge gaps. Omit to default (the builder "
+            "defaults it)."
+        ),
+    )
+
     # Defaults applied ONLY by ``load_from_storage`` for legacy payloads
     # that predate the structural-axis extension. Kept as a class-level
     # constant so the migration surface is auditable from one place.
@@ -365,6 +402,8 @@ class TaskSignature(BaseModel):
         "refine_max_iterations": None,
         "proposer_families": None,
         "router_cases": None,
+        "tree_breadth": None,
+        "tree_depth": None,
     }
 
     @classmethod

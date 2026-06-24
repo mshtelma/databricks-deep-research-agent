@@ -3,7 +3,6 @@
 All database interactions are mocked — no live DB required.
 """
 
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 

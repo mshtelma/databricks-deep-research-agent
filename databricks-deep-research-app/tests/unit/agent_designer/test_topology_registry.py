@@ -29,7 +29,13 @@ from deep_research.agent_designer.topology_registry import (
     topology_registry,
 )
 
-_FAMILIES = {"single_agent", "parallel_lanes", "plan_and_execute", "router"}
+_FAMILIES = {
+    "single_agent",
+    "parallel_lanes",
+    "plan_and_execute",
+    "router",
+    "tree_search",
+}
 
 
 def test_registry_parity_with_enums() -> None:
@@ -93,6 +99,9 @@ _TOPOLOGY_SIGS: dict[str, dict[str, Any]] = {
     "plan_and_execute": _sig(step_dependencies_present=True),
     "best_of_n": _sig(
         coordination_pattern="best_of_n", coordination_candidate_count=4
+    ),
+    "tree_search": _sig(
+        coordination_pattern="tree_search", tree_breadth=4, tree_depth=2
     ),
 }
 
