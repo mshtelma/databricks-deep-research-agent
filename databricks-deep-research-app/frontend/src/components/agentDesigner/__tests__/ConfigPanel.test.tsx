@@ -624,4 +624,54 @@ describe('ConfigPanel', () => {
     expect(lavaStar).toBeInTheDocument();
     expect(lavaStar?.textContent).toBe('*');
   });
+
+  // Direction 1: Approvals is its own tab again (no longer folded into Tools).
+  it('renders the Approvals tab with timeout and broker for an agent', () => {
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /approvals/i }));
+
+    expect(screen.getByText('Approval timeout')).toBeInTheDocument();
+    expect(screen.getByText('Approval broker')).toBeInTheDocument();
+    expect(screen.getByText(/no gated tools bound/i)).toBeInTheDocument();
+  });
+
+  // Direction 1: discovered MCP servers render as expandable cards and bind at
+  // server granularity into config.mcp_servers (no per-tool checkboxes).
+  it('renders a discovered MCP server as a card and binds it at server granularity', async () => {
+    vi.mocked(listDesignerResources).mockResolvedValue({
+      resources: [
+        {
+          kind: 'mcp_server',
+          source_id: 'weather',
+          name: 'weather',
+          full_name: null,
+          description: null,
+          status: 'connected',
+          capabilities: [],
+          metadata: { url: 'https://mcp.example/weather' },
+        },
+      ],
+      total: 1,
+    });
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByRole('button', { name: /tools/i }));
+
+    const bindBtn = await screen.findByRole('button', { name: /^bind weather$/i });
+    fireEvent.click(bindBtn);
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      'root.children.0',
+      expect.objectContaining({
+        config: expect.objectContaining({ mcp_servers: ['weather'] }),
+      }),
+    );
+    updateSpy.mockRestore();
+    // Restore the file-wide default mock so test ordering can't leak this server.
+    vi.mocked(listDesignerResources).mockResolvedValue({ resources: [], total: 0 });
+  });
 });

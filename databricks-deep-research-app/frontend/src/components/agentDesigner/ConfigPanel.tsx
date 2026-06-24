@@ -24,13 +24,16 @@ import {
   Check,
   Info,
   Box,
+  Boxes,
   RefreshCw,
   FlaskConical,
   Pencil,
   Save,
+  Sparkles,
   ChevronRight,
+  Link,
 } from 'lucide-react';
-import type { RegistryResponse, ToolKindSpec } from '@/types/agentDesigner';
+import type { RegistryResponse, ToolKindSpec, DesignerResource } from '@/types/agentDesigner';
 import type { ToolDecl } from '@/types/ast';
 import {
   refreshCatalog,
@@ -47,6 +50,7 @@ import { TypePill, LayerChip } from './atoms';
 import { SchemaField } from './SchemaField';
 import { AddToolDialog } from './AddToolDialog';
 import { WorkflowSettingsPanel } from './WorkflowSettingsPanel';
+import { ChatPanel } from './ChatPanel';
 
 // ---------------------------------------------------------------------------
 // AJV factory
@@ -125,24 +129,75 @@ function toolSummary(decl: ToolDecl): string {
   return primary === undefined || primary === null || primary === '' ? 'Not configured' : String(primary);
 }
 
+/**
+ * Layer letter → human group label, matching the LayerChip colour taxonomy
+ * (atoms.tsx LAYER_CMAP): A=Web, B=Knowledge, C=Data, D=Filesystem, E=MCP/Custom.
+ * Used to bucket an agent's declared tools into the design's "Built-in & custom"
+ * grouped checklist. Generic tool-category vocabulary — no domain coupling.
+ */
+const LAYER_GROUP_LABEL: Record<string, string> = {
+  A: 'Web',
+  B: 'Knowledge',
+  C: 'Data',
+  D: 'Files',
+  E: 'Custom',
+};
+const LAYER_ORDER = ['A', 'B', 'C', 'D', 'E'];
+
+/** Group declared tools by their kind's layer, ordered A→E (unknown layers last). */
+function groupDeclaredToolsByLayer(
+  tools: ToolDecl[],
+  registry: RegistryResponse,
+): Array<[string, ToolDecl[]]> {
+  const byLayer = new Map<string, ToolDecl[]>();
+  for (const decl of tools) {
+    const layer = findToolKind(registry, decl.kind)?.layer ?? 'A';
+    const bucket = byLayer.get(layer);
+    if (bucket) bucket.push(decl);
+    else byLayer.set(layer, [decl]);
+  }
+  const ordered: Array<[string, ToolDecl[]]> = [];
+  for (const layer of LAYER_ORDER) {
+    const arr = byLayer.get(layer);
+    if (arr) {
+      ordered.push([LAYER_GROUP_LABEL[layer] ?? layer, arr]);
+      byLayer.delete(layer);
+    }
+  }
+  // Any unknown layers (forward-compat) appended in insertion order.
+  for (const [layer, arr] of byLayer) {
+    ordered.push([LAYER_GROUP_LABEL[layer] ?? layer, arr]);
+  }
+  return ordered;
+}
+
 // ---------------------------------------------------------------------------
 // Props
 // ---------------------------------------------------------------------------
 
 export interface ConfigPanelProps {
   registry: RegistryResponse;
+  /**
+   * Session id for the embedded co-pilot tab (Direction 2 redesign — the
+   * separate Designer Chat column folds into the inspector). Typically the
+   * agent id; undefined for a brand-new draft.
+   */
+  chatSessionId?: string;
 }
 
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-export function ConfigPanel({ registry }: ConfigPanelProps): React.ReactElement {
+export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): React.ReactElement {
   const selectedPath = useAgentEditorStore((s) => s.selectedPath);
   const ast = useAgentEditorStore((s) => s.ast);
 
   const [showAddTool, setShowAddTool] = React.useState(false);
   const [selectedToolName, setSelectedToolName] = React.useState<string | null>(null);
+  // No-selection view tab: the Workspace tool registry, or the workflow co-pilot
+  // (which used to be a separate column; Direction 2 folds it into the inspector).
+  const [noSelTab, setNoSelTab] = React.useState<'tools' | 'chat'>('tools');
 
   const block = React.useMemo(() => {
     if (!ast || !selectedPath) return null;
@@ -165,44 +220,69 @@ export function ConfigPanel({ registry }: ConfigPanelProps): React.ReactElement 
   if (!selectedPath || !block) {
     return (
       <>
-        <aside className="db-root flex w-[340px] shrink-0 flex-col border-l border-db-gray-lines bg-white font-db-sans">
-          <div className="flex items-center gap-2 border-b border-db-gray-lines px-4 py-3.5">
-            <Wrench size={15} className="text-db-navy-800" />
-            <span className="text-[13px] font-medium text-db-navy-800">Workspace tools</span>
-            <span className="ml-auto font-db-mono text-[11px] text-db-gray-text">
-              {declaredTools.length}
-            </span>
-            <button
-              type="button"
-              onClick={() => setShowAddTool(true)}
-              className="inline-flex items-center gap-1 rounded-db-md bg-db-lava-600 px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-db-lava-700"
-            >
-              <Plus size={11} /> Add
-            </button>
-          </div>
-          <div className="border-b border-db-gray-lines bg-db-oat-light px-3.5 py-2.5 text-[11px] leading-[1.5] text-db-gray-text">
-            Tools available to any agent in this workflow. Select an agent block to bind tools to
-            it.
-          </div>
-          <div className="min-h-0 flex-1 overflow-auto p-3">
-            <ToolsRegistryList
-              tools={declaredTools}
-              registry={registry}
-              mode="workspace"
-              selectedName={selectedToolName}
-              onSelect={setSelectedToolName}
-            />
-            {selectedTool && (
-              <ToolDeclarationEditor
-                key={selectedTool.name}
-                tool={selectedTool}
-                registry={registry}
-                onRename={setSelectedToolName}
-                onClose={() => setSelectedToolName(null)}
+        <aside className="db-root flex w-[430px] shrink-0 flex-col border-l border-db-gray-lines bg-white font-db-sans">
+          <div className="border-b border-db-gray-lines px-4 pt-3.5">
+            <div className="mb-3 flex items-center gap-2">
+              <Wrench size={15} className="text-db-navy-800" />
+              <span className="text-[13px] font-medium text-db-navy-800">Workspace</span>
+              <span className="ml-auto font-db-mono text-[11px] text-db-gray-text">
+                {declaredTools.length}
+              </span>
+              {noSelTab === 'tools' && (
+                <button
+                  type="button"
+                  onClick={() => setShowAddTool(true)}
+                  className="inline-flex items-center gap-1 rounded-db-md bg-db-lava-600 px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-db-lava-700"
+                >
+                  <Plus size={11} /> Add
+                </button>
+              )}
+            </div>
+            <div className="flex gap-0">
+              <InspectorTabButton
+                active={noSelTab === 'tools'}
+                onClick={() => setNoSelTab('tools')}
+                label="Workspace tools"
               />
-            )}
-            <WorkflowSettingsPanel />
+              <InspectorTabButton
+                active={noSelTab === 'chat'}
+                onClick={() => setNoSelTab('chat')}
+                label="Co-pilot"
+                icon={<Sparkles size={13} />}
+              />
+            </div>
           </div>
+          {noSelTab === 'chat' ? (
+            <div className="flex min-h-0 flex-1 flex-col">
+              <ChatPanel embedded sessionId={chatSessionId} />
+            </div>
+          ) : (
+            <>
+              <div className="border-b border-db-gray-lines bg-db-oat-light px-3.5 py-2.5 text-[11px] leading-[1.5] text-db-gray-text">
+                Tools available to any agent in this workflow. Select an agent block to bind tools
+                to it.
+              </div>
+              <div className="min-h-0 flex-1 overflow-auto p-3">
+                <ToolsRegistryList
+                  tools={declaredTools}
+                  registry={registry}
+                  mode="workspace"
+                  selectedName={selectedToolName}
+                  onSelect={setSelectedToolName}
+                />
+                {selectedTool && (
+                  <ToolDeclarationEditor
+                    key={selectedTool.name}
+                    tool={selectedTool}
+                    registry={registry}
+                    onRename={setSelectedToolName}
+                    onClose={() => setSelectedToolName(null)}
+                  />
+                )}
+                <WorkflowSettingsPanel />
+              </div>
+            </>
+          )}
         </aside>
         {showAddTool && (
           <AddToolDialog open={showAddTool} onOpenChange={setShowAddTool} registry={registry} />
@@ -223,6 +303,7 @@ export function ConfigPanel({ registry }: ConfigPanelProps): React.ReactElement 
         registry={registry}
         declaredTools={declaredTools}
         onShowAddTool={() => setShowAddTool(true)}
+        chatSessionId={chatSessionId}
       />
       {showAddTool && (
         <AddToolDialog open={showAddTool} onOpenChange={setShowAddTool} registry={registry} />
@@ -241,9 +322,15 @@ interface SelectedInspectorProps {
   registry: RegistryResponse;
   declaredTools: ToolDecl[];
   onShowAddTool: () => void;
+  chatSessionId?: string;
 }
 
-type InspectorTab = 'config' | 'tools' | 'hitl';
+// Direction 1 (Tabbed Inspector): the separate Designer Chat column is gone —
+// the co-pilot is the 4th tab. The docked panel carries four tabs:
+// Configure · Tools · Approvals · Co-pilot. Tools is a single grouped scroll
+// (declared tools bucketed by layer + MCP servers as expandable cards), and
+// Approvals is its own tab again (no longer folded into Tools).
+type InspectorTab = 'config' | 'tools' | 'hitl' | 'chat';
 
 function SelectedInspector({
   block,
@@ -251,15 +338,17 @@ function SelectedInspector({
   registry,
   declaredTools,
   onShowAddTool,
+  chatSessionId,
 }: SelectedInspectorProps): React.ReactElement {
   const [tab, setTab] = React.useState<InspectorTab>('config');
 
-  // Reset to "config" tab whenever the selected block changes
+  // Reset to "config" when the selected block changes — UNLESS the user is in
+  // the co-pilot tab, which is workflow-level and stays put across selections.
   const prevPathRef = React.useRef<string | null>(null);
   React.useEffect(() => {
     if (selectedPath !== prevPathRef.current) {
       prevPathRef.current = selectedPath;
-      setTab('config');
+      setTab((t) => (t === 'chat' ? 'chat' : 'config'));
     }
   }, [selectedPath]);
 
@@ -269,7 +358,7 @@ function SelectedInspector({
     : [];
 
   return (
-    <aside className="db-root flex w-[340px] shrink-0 flex-col border-l border-db-gray-lines bg-white font-db-sans">
+    <aside className="db-root flex w-[384px] shrink-0 flex-col border-l border-db-gray-lines bg-white font-db-sans">
       {/* Header */}
       <div className="border-b border-db-gray-lines px-4 pt-3.5">
         <div className="mb-3 flex items-center gap-2">
@@ -297,31 +386,47 @@ function SelectedInspector({
               label="Approvals"
             />
           )}
+          <InspectorTabButton
+            active={tab === 'chat'}
+            onClick={() => setTab('chat')}
+            label="Co-pilot"
+            icon={<Sparkles size={13} />}
+          />
         </div>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-auto p-4">
-        {tab === 'config' && <ConfigureForm block={block} selectedPath={selectedPath} registry={registry} />}
-        {tab === 'tools' && isAgent && (
-          <ToolsBindingForm
-            block={block}
-            selectedPath={selectedPath}
-            registry={registry}
-            declaredTools={declaredTools}
-            boundToolNames={boundToolNames}
-            onShowAddTool={onShowAddTool}
-          />
-        )}
-        {tab === 'hitl' && isAgent && (
-          <ApprovalsForm
-            block={block}
-            selectedPath={selectedPath}
-            registry={registry}
-            declaredTools={declaredTools}
-            boundToolNames={boundToolNames}
-          />
-        )}
-      </div>
+      {tab === 'chat' ? (
+        // The embedded co-pilot manages its own scroll + composer, so give it
+        // the full pane with no padding/overflow wrapper.
+        <div className="flex min-h-0 flex-1 flex-col">
+          <ChatPanel embedded sessionId={chatSessionId} />
+        </div>
+      ) : (
+        <div className="min-h-0 flex-1 overflow-auto p-4">
+          {tab === 'config' && (
+            <ConfigureForm block={block} selectedPath={selectedPath} registry={registry} />
+          )}
+          {tab === 'tools' && isAgent && (
+            <ToolsPane
+              block={block}
+              selectedPath={selectedPath}
+              registry={registry}
+              declaredTools={declaredTools}
+              boundToolNames={boundToolNames}
+              onShowAddTool={onShowAddTool}
+            />
+          )}
+          {tab === 'hitl' && isAgent && (
+            <ApprovalsForm
+              block={block}
+              selectedPath={selectedPath}
+              registry={registry}
+              declaredTools={declaredTools}
+              boundToolNames={boundToolNames}
+            />
+          )}
+        </div>
+      )}
     </aside>
   );
 }
@@ -331,25 +436,30 @@ function InspectorTabButton({
   onClick,
   label,
   count,
+  icon,
 }: {
   active: boolean;
   onClick: () => void;
   label: string;
   count?: number;
+  icon?: React.ReactNode;
 }): React.ReactElement {
   return (
     <button
       type="button"
       onClick={onClick}
-      className={`-mb-px border-b-2 px-4 py-2.5 font-db-sans text-[13px] font-medium transition-colors ${
+      className={`-mb-px inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2.5 font-db-sans text-[13px] font-medium transition-colors ${
         active
           ? 'border-db-lava-600 text-db-navy-800'
           : 'border-transparent text-db-gray-text hover:text-db-navy-800'
       }`}
     >
+      {icon && (
+        <span className={active ? 'text-db-lava-600' : 'text-db-gray-text'}>{icon}</span>
+      )}
       {label}
       {count !== undefined && (
-        <span className="ml-1 text-[11px] text-db-gray-text">{count}</span>
+        <span className="text-[11px] text-db-gray-text">{count}</span>
       )}
     </button>
   );
@@ -735,12 +845,71 @@ function ToolsBindingForm({
     setCatalogEditing(false);
   };
 
+  // One bind row (a <div> holding two sibling buttons: the bind toggle and the
+  // inline-config edit toggle). Rendered grouped by layer below.
+  const renderToolRow = (decl: ToolDecl): React.ReactElement => {
+    const bound = boundToolNames.includes(decl.name);
+    const kind = findToolKind(registry, decl.kind);
+    const requiresApproval = toolRequiresApproval(decl);
+    const editing = editingToolName === decl.name;
+    return (
+      <div
+        key={decl.name}
+        className={`flex items-center gap-1 rounded-db-md border pr-1 transition-colors ${
+          bound || editing
+            ? 'border-db-navy-300 bg-db-oat-medium'
+            : 'border-transparent hover:bg-db-oat-light'
+        }`}
+      >
+        <button
+          type="button"
+          onClick={() => toggleBinding(decl.name)}
+          className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
+        >
+          <LayerChip layer={kind?.layer ?? 'A'} />
+          <Wrench size={14} className="text-db-navy-800" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate font-db-mono text-[12px] font-medium text-db-navy-800">
+              {decl.name}
+            </div>
+            {kind?.label && (
+              <div className="truncate text-[10px] text-db-gray-text">{kind.label}</div>
+            )}
+          </div>
+          {requiresApproval && <Lock size={11} className="text-db-yellow-700" />}
+          {bound && <Check size={12} className="text-db-green-700" strokeWidth={2.5} />}
+        </button>
+        <button
+          type="button"
+          aria-label="Edit tool config"
+          aria-expanded={editing}
+          title="Edit tool config"
+          onClick={() =>
+            setEditingToolName((prev) => (prev === decl.name ? null : decl.name))
+          }
+          className={`rounded p-1 transition-colors hover:bg-db-oat-light ${
+            editing ? 'text-db-navy-800' : 'text-db-gray-text'
+          }`}
+        >
+          <Pencil size={12} />
+        </button>
+      </div>
+    );
+  };
+
   return (
     <div>
-      <div className="mb-2.5 text-[11px] text-db-gray-text">
-        Tools the agent can call during its ReAct loop. Click a tool to bind/unbind, or the
-        pencil to edit its config. Edits apply to the shared workflow tool — every agent bound
-        to it sees the change.
+      <div className="mb-2 flex items-center gap-2">
+        <span className="font-db-sans text-[10px] font-semibold uppercase tracking-[0.06em] text-db-navy-400">
+          Built-in &amp; custom
+        </span>
+        <span className="ml-auto font-db-mono text-[11px] text-db-gray-text">
+          {boundToolNames.length} on
+        </span>
+      </div>
+      <div className="mb-2.5 text-[11px] leading-[1.5] text-db-gray-text">
+        Bind tools to this agent. Editing a tool&apos;s config changes it for every agent bound
+        to it.
       </div>
       {declaredTools.length === 0 ? (
         <div className="rounded-db-md border border-dashed border-db-gray-lines p-4 text-center text-[12px] leading-[1.55] text-db-gray-text">
@@ -757,60 +926,15 @@ function ToolsBindingForm({
           to wire a builtin, MCP server, or @tool function.
         </div>
       ) : (
-        <div className="flex flex-col gap-1">
-          {declaredTools.map((decl) => {
-            const bound = boundToolNames.includes(decl.name);
-            const kind = findToolKind(registry, decl.kind);
-            const requiresApproval = toolRequiresApproval(decl);
-            const editing = editingToolName === decl.name;
-            return (
-              // Row is a <div> (not a <button>) so it can hold two sibling
-              // buttons: the bind toggle and the inline-config edit toggle.
-              <div
-                key={decl.name}
-                className={`flex items-center gap-1 rounded-db-md border pr-1 transition-colors ${
-                  bound || editing
-                    ? 'border-db-navy-300 bg-db-oat-medium'
-                    : 'border-transparent hover:bg-db-oat-light'
-                }`}
-              >
-                <button
-                  type="button"
-                  onClick={() => toggleBinding(decl.name)}
-                  className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left"
-                >
-                  <LayerChip layer={kind?.layer ?? 'A'} />
-                  <Wrench size={14} className="text-db-navy-800" />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate font-db-mono text-[12px] font-medium text-db-navy-800">
-                      {decl.name}
-                    </div>
-                    {kind?.label && (
-                      <div className="truncate text-[10px] text-db-gray-text">{kind.label}</div>
-                    )}
-                  </div>
-                  {requiresApproval && <Lock size={11} className="text-db-yellow-700" />}
-                  {bound && (
-                    <Check size={12} className="text-db-green-700" strokeWidth={2.5} />
-                  )}
-                </button>
-                <button
-                  type="button"
-                  aria-label="Edit tool config"
-                  aria-expanded={editing}
-                  title="Edit tool config"
-                  onClick={() =>
-                    setEditingToolName((prev) => (prev === decl.name ? null : decl.name))
-                  }
-                  className={`rounded p-1 transition-colors hover:bg-db-oat-light ${
-                    editing ? 'text-db-navy-800' : 'text-db-gray-text'
-                  }`}
-                >
-                  <Pencil size={12} />
-                </button>
+        <div className="flex flex-col gap-3">
+          {groupDeclaredToolsByLayer(declaredTools, registry).map(([groupLabel, decls]) => (
+            <div key={groupLabel}>
+              <div className="px-1 pb-1 font-db-mono text-[10.5px] text-db-gray-text">
+                {groupLabel}
               </div>
-            );
-          })}
+              <div className="flex flex-col gap-1">{decls.map((decl) => renderToolRow(decl))}</div>
+            </div>
+          ))}
         </div>
       )}
       {editingTool && (
@@ -925,6 +1049,206 @@ function ToolsBindingForm({
               })}
             </div>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Tools tab (Direction 1, agent only) — a single grouped scroll. Declared tools
+// are bucketed by layer (Web / Knowledge / Data / Files / Custom) as a bind
+// checklist (reusing ToolsBindingForm), and discovered MCP servers render as
+// expandable cards bound at server granularity (config.mcp_servers). Approvals
+// are no longer folded in here — they have their own tab again.
+// ---------------------------------------------------------------------------
+
+interface ToolsPaneProps {
+  block: import('@/types/ast').Block;
+  selectedPath: string;
+  registry: RegistryResponse;
+  declaredTools: ToolDecl[];
+  boundToolNames: string[];
+  onShowAddTool: () => void;
+}
+
+function ToolsPane({
+  block,
+  selectedPath,
+  registry,
+  declaredTools,
+  boundToolNames,
+  onShowAddTool,
+}: ToolsPaneProps): React.ReactElement {
+  const boundMcpServers = Array.isArray(block.config['mcp_servers'])
+    ? (block.config['mcp_servers'] as string[])
+    : [];
+
+  // Discover MCP servers (graceful: empty on error → the MCP section just shows
+  // the connect affordance).
+  const [mcpServers, setMcpServers] = React.useState<DesignerResource[]>([]);
+  React.useEffect(() => {
+    let cancelled = false;
+    listDesignerResources(['mcp_server'])
+      .then((res) => {
+        if (!cancelled) {
+          setMcpServers(res.resources.filter((r) => r.kind === 'mcp_server'));
+        }
+      })
+      .catch(() => {
+        /* graceful: no MCP cards */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedPath]);
+
+  const toggleMcpServer = (name: string) => {
+    const next = boundMcpServers.includes(name)
+      ? boundMcpServers.filter((n) => n !== name)
+      : [...boundMcpServers, name];
+    useAgentEditorStore.getState().updateBlock(selectedPath, {
+      config: { ...block.config, mcp_servers: next },
+    });
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {/* Built-in & custom tools — grouped bind checklist */}
+      <ToolsBindingForm
+        block={block}
+        selectedPath={selectedPath}
+        registry={registry}
+        declaredTools={declaredTools}
+        boundToolNames={boundToolNames}
+        onShowAddTool={onShowAddTool}
+      />
+
+      {/* MCP servers — expandable cards, bound at server granularity */}
+      <div>
+        <div className="mb-2 flex items-center gap-2">
+          <span className="font-db-sans text-[10px] font-semibold uppercase tracking-[0.06em] text-db-navy-400">
+            MCP servers
+          </span>
+          {mcpServers.length > 0 && (
+            <span className="ml-auto font-db-mono text-[11px] text-db-gray-text">
+              {boundMcpServers.length}/{mcpServers.length}
+            </span>
+          )}
+        </div>
+        {mcpServers.length === 0 ? (
+          <div className="rounded-db-md border border-dashed border-db-gray-lines p-3 text-center text-[11px] leading-[1.5] text-db-gray-text">
+            No MCP servers discovered. Connect one to expose its tools to this agent.
+          </div>
+        ) : (
+          mcpServers.map((srv) => (
+            <McpServerCard
+              key={srv.name}
+              server={srv}
+              bound={boundMcpServers.includes(srv.name)}
+              onToggle={() => toggleMcpServer(srv.name)}
+            />
+          ))
+        )}
+        <button
+          type="button"
+          onClick={onShowAddTool}
+          className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-db-md border border-dashed border-db-navy-300 bg-db-oat-light px-2.5 py-2 text-[12px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-medium"
+        >
+          <Plus size={12} /> Connect MCP server
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// MCP server card — expandable. The header carries identity + status + a master
+// bind/unbind toggle; expanding reveals connection details. MCP binds at SERVER
+// granularity (config.mcp_servers), so there are no per-tool checkboxes — most
+// servers expose a single tool and the backend binds the whole server.
+// ---------------------------------------------------------------------------
+
+function McpServerCard({
+  server,
+  bound,
+  onToggle,
+}: {
+  server: DesignerResource;
+  bound: boolean;
+  onToggle: () => void;
+}): React.ReactElement {
+  const connected = server.status === 'connected' || server.status === 'ready';
+  const [open, setOpen] = React.useState(connected);
+  const metaUrl = typeof server.metadata['url'] === 'string' ? server.metadata['url'] : '';
+  const url = metaUrl || (server.full_name ?? '');
+  const statusLabel = server.status ?? 'available';
+
+  return (
+    <div className="mb-2 overflow-hidden rounded-db-md border border-db-gray-lines bg-white">
+      <div className="flex items-center bg-db-oat-light">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-2 px-2.5 py-2 text-left"
+        >
+          <ChevronRight
+            size={13}
+            className={`shrink-0 text-db-gray-text transition-transform ${open ? 'rotate-90' : ''}`}
+            aria-hidden="true"
+          />
+          <Boxes size={15} className="shrink-0 text-db-navy-800" />
+          <span className="min-w-0 flex-1 truncate font-db-mono text-[13px] font-medium text-db-navy-800">
+            {server.name}
+          </span>
+          <span
+            className={`inline-flex shrink-0 items-center gap-1 rounded-db-pill px-2 py-0.5 text-[10px] ${
+              connected ? 'bg-db-green-300 text-db-green-800' : 'bg-db-oat-medium text-db-gray-text'
+            }`}
+          >
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-db-green-700' : 'bg-db-navy-300'}`}
+            />
+            {statusLabel}
+          </span>
+        </button>
+        <button
+          type="button"
+          onClick={onToggle}
+          aria-label={bound ? `Unbind ${server.name}` : `Bind ${server.name}`}
+          className={`mr-2 inline-flex shrink-0 items-center gap-1 rounded-db-md border px-2 py-1 text-[11px] font-medium transition-colors ${
+            bound
+              ? 'border-db-navy-300 bg-db-oat-medium text-db-navy-800 hover:bg-white'
+              : 'border-db-navy-800 bg-db-navy-800 text-white hover:bg-db-navy-900'
+          }`}
+        >
+          {bound ? (
+            <>
+              <Check size={12} strokeWidth={2.5} /> Bound
+            </>
+          ) : (
+            <>
+              <Plus size={12} /> Bind
+            </>
+          )}
+        </button>
+      </div>
+      {open && (
+        <div className="border-t border-db-gray-lines px-3 py-2.5">
+          {url && (
+            <div className="flex items-center gap-1.5 font-db-mono text-[10.5px] text-db-gray-text">
+              <Link size={11} className="shrink-0" aria-hidden="true" />
+              <span className="truncate">{url}</span>
+            </div>
+          )}
+          {server.description && (
+            <p className="mt-1 text-[11px] leading-[1.5] text-db-gray-text">{server.description}</p>
+          )}
+          <p className="mt-1.5 text-[11px] leading-[1.5] text-db-gray-text">
+            Binding exposes this server&apos;s tools to the agent during its ReAct loop. MCP
+            servers are bound at server granularity.
+          </p>
         </div>
       )}
     </div>

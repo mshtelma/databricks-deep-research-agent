@@ -280,26 +280,28 @@ export function BlockNode({
               {modelTier}
             </Badge>
           )}
+          {/* Quiet tool indicator — a hammer + count instead of a loud chip
+              (declutter redesign). Right-aligned so blocks read calmly. */}
           {boundTools.length > 0 && (
-            <Badge
-              color="var(--db-navy-700)"
-              bg="var(--db-oat-medium)"
-              icon={<Wrench size={10} />}
-              className="hidden md:inline-flex"
-              title={boundTools.join(', ')}
+            <span
+              className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-db-navy-400"
+              title={`${boundTools.length} ${boundTools.length === 1 ? 'tool' : 'tools'} bound: ${boundTools.join(', ')}`}
             >
-              {boundTools.length} {boundTools.length === 1 ? 'tool' : 'tools'}
-            </Badge>
+              <Wrench size={12} />
+              {boundTools.length}
+            </span>
           )}
           {hasGatedTool && (
-            <Badge
-              color="var(--db-yellow-800)"
-              bg="var(--db-yellow-300)"
-              icon={<Lock size={10} />}
+            <span
+              className={cn(
+                'inline-flex shrink-0 items-center text-db-yellow-700',
+                boundTools.length > 0 ? 'ml-1.5' : 'ml-auto',
+              )}
               title="Has tools that require human approval"
+              aria-label="Requires human approval"
             >
-              HITL
-            </Badge>
+              <Lock size={12} />
+            </span>
           )}
         </div>
 

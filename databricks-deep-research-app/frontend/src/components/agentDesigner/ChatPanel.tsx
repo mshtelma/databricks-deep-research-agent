@@ -52,6 +52,13 @@ import type { AST } from '@/types/ast';
 export interface ChatPanelProps {
   sessionId?: string | null;
   assets?: DesignerAsset[] | (() => DesignerAsset[]);
+  /**
+   * Embedded mode: render as a flush tab pane (no fixed width, no left border,
+   * no collapse rail, no redundant "Designer Chat" title) so the co-pilot can
+   * live inside the Inspector's "Co-pilot" tab (Direction 2 redesign). The
+   * standalone column behaviour is unchanged when this is false/omitted.
+   */
+  embedded?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -841,7 +848,7 @@ const SUGGESTIONS = [
   'Make web_crawl HITL-gated',
 ];
 
-export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactElement {
+export function ChatPanel({ sessionId, assets, embedded = false }: ChatPanelProps): React.ReactElement {
   // Skill -> Workflow (P5): skills the user picked to compile into the draft.
   const [compileSkills, setCompileSkills] = React.useState<string[]>([]);
   const session = useChatSession({
@@ -928,7 +935,7 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
   // Collapsed rail
   // -------------------------------------------------------------------------
 
-  if (collapsed) {
+  if (!embedded && collapsed) {
     return (
       <aside className="db-root flex w-11 shrink-0 flex-col items-center gap-2 border-l border-db-gray-lines bg-white pt-2.5 font-db-sans">
         <button
@@ -970,16 +977,28 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
   // -------------------------------------------------------------------------
 
   return (
-    <aside className="db-root flex h-full min-h-0 w-[340px] shrink-0 flex-col border-l border-db-gray-lines bg-db-oat-light font-db-sans">
+    <aside
+      className={
+        embedded
+          ? 'db-root flex h-full min-h-0 flex-col bg-db-oat-light font-db-sans'
+          : 'db-root flex h-full min-h-0 w-[340px] shrink-0 flex-col border-l border-db-gray-lines bg-db-oat-light font-db-sans'
+      }
+    >
       {/* Header */}
       <div className="flex shrink-0 items-center gap-2 border-b border-db-gray-lines bg-white px-4 py-3.5">
-        <div className="flex h-6 w-6 items-center justify-center rounded-[5px] bg-db-lava-600">
-          <Sparkles size={13} className="text-white" />
-        </div>
-        <span className="text-[13px] font-medium text-db-navy-800">Designer Chat</span>
-        <span className="rounded-db-pill bg-db-blue-100 px-2 py-0.5 font-db-mono text-[10px] font-medium tracking-[0.02em] text-db-blue-700">
-          co-pilot
-        </span>
+        {embedded ? (
+          <span className="text-[12px] font-medium text-db-gray-text">Co-pilot</span>
+        ) : (
+          <>
+            <div className="flex h-6 w-6 items-center justify-center rounded-[5px] bg-db-lava-600">
+              <Sparkles size={13} className="text-white" />
+            </div>
+            <span className="text-[13px] font-medium text-db-navy-800">Designer Chat</span>
+            <span className="rounded-db-pill bg-db-blue-100 px-2 py-0.5 font-db-mono text-[10px] font-medium tracking-[0.02em] text-db-blue-700">
+              co-pilot
+            </span>
+          </>
+        )}
         {session.isStreaming && (
           <span className="ml-1 inline-flex min-w-0 items-center gap-1 text-[11px] text-db-blue-700">
             <span
@@ -1029,15 +1048,17 @@ export function ChatPanel({ sessionId, assets }: ChatPanelProps): React.ReactEle
         >
           <Trash2 size={13} />
         </button>
-        <button
-          type="button"
-          aria-label="Collapse designer chat"
-          title="Collapse designer chat"
-          onClick={() => setCollapsed(true)}
-          className="rounded p-1 text-db-gray-text hover:bg-db-oat-medium hover:text-db-navy-800"
-        >
-          <ChevronRight size={14} />
-        </button>
+        {!embedded && (
+          <button
+            type="button"
+            aria-label="Collapse designer chat"
+            title="Collapse designer chat"
+            onClick={() => setCollapsed(true)}
+            className="rounded p-1 text-db-gray-text hover:bg-db-oat-medium hover:text-db-navy-800"
+          >
+            <ChevronRight size={14} />
+          </button>
+        )}
       </div>
 
       {/* Transcript */}

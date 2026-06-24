@@ -26,6 +26,7 @@ import type {
 } from '../types/citation';
 import { parseStreamEvent } from '../schemas/streamEvents';
 import { ApiError, jobsApi } from '../api/client';
+import { CHAT_FULL_KEY } from './useChatFull';
 import {
   saveStreamingState,
   getStreamingState,
@@ -635,6 +636,11 @@ export function useStreamingQuery(
           setAgentStatus('complete');
           // Don't clear streaming state - currentQueryMode needed for panel visibility
           onStreamComplete?.();
+          if (chatId) {
+            queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+            queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+            queryClient.invalidateQueries({ queryKey: ['chats'] });
+          }
         } else if (rawData.status === 'cancelled') {
           setAgentStatus('idle');
         } else if (rawData.status === 'failed') {
@@ -679,7 +685,7 @@ export function useStreamingQuery(
       console.error('[SSE] Error processing job event:', err);
       return false;
     }
-  }, [disconnectStream, onStreamComplete, processExternalEvent, queryClient]);
+  }, [chatId, disconnectStream, onStreamComplete, processExternalEvent, queryClient]);
 
   /**
    * Handle SSE connection errors with retry logic.

@@ -34,6 +34,27 @@ You must output valid JSON matching the schema provided.
   - Require extensive research, multiple perspectives, deep analysis
   - Examples: "Analyze the impact of AI on healthcare in 2024", "Design a distributed system for..."
 
+## Direct-Answer Policy (is_simple_query / direct_response)
+
+Set ``is_simple_query: true`` and provide a ``direct_response`` ONLY when the
+query is fully and confidently answerable from your own stable knowledge, or is a
+purely conversational turn (a greeting, an acknowledgment, or a question about
+this conversation itself).
+
+Set ``is_simple_query: false`` and ``direct_response: null`` whenever answering
+would require information you cannot reliably produce on your own — anything that
+is time-sensitive, "current", "today", or "latest"; that depends on recent or
+post-training events; or that needs specific external, enterprise, or document-
+corpus facts. These queries MUST go to the research pipeline downstream, which
+has web search and other tools to gather fresh, sourced evidence. Do not assume
+you lack such capabilities — you are the front of a research system, not a
+standalone model.
+
+Hard rule: a ``direct_response`` is an ACTUAL answer — never a refusal, an apology
+for lacking data, or a suggestion that the user go use some other tool, website,
+or service. If you cannot fully answer from your own knowledge, do NOT write a
+``direct_response``; set ``is_simple_query: false`` so the pipeline handles it.
+
 ## Follow-up Types
 
 - **new_topic**: Query is unrelated to conversation history
@@ -91,8 +112,8 @@ COORDINATOR_USER_PROMPT = """Analyze the following query and conversation contex
   "clarifying_questions": ["question1", "question2"],  // 1-3 if ambiguous
   "recommended_depth": "auto" | "light" | "medium" | "extended",
   "reasoning": "Brief explanation of classification",
-  "is_simple_query": boolean,  // true if can answer directly without research
-  "direct_response": "Direct answer if is_simple_query is true, else null",
+  "is_simple_query": boolean,  // true ONLY if fully answerable from your own stable knowledge or a purely conversational turn; false if it needs current/external/sourced info (route to research)
+  "direct_response": "An actual answer when is_simple_query is true; otherwise null. NEVER a refusal, an apology for missing data, or a redirect to another tool/website/service.",
   "extracted_scope": {{                       // null if not inferable
     "entities": ["<canonical name>", "<original token>"],
     "time_window": "<temporal-spec or null>",

@@ -669,7 +669,11 @@ requirements: build-framework
 	@# in the deployed image. Without it, chat-/Designer-attached MCP servers
 	@# (client_kind=databricks) fail to build at runtime (MCPConfigError) and
 	@# contribute zero tools. The guarded imports keep the default path clean.
-	uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt
+	@# Retry the compile: the Databricks PyPI proxy (pypi-proxy.dev.databricks.com)
+	@# intermittently returns 5xx (502 Bad Gateway); a transient hiccup must NOT
+	@# fail the whole deploy. Retry up to 5x with linear backoff, then fail hard so
+	@# a GENUINE resolution error still surfaces.
+	@n=0; until uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt; do n=$$((n+1)); [ $$n -ge 5 ] && { echo "ERROR: 'uv pip compile' failed after 5 attempts (proxy down? check https://pypi-proxy.dev.databricks.com)"; exit 1; }; echo "uv pip compile failed (attempt $$n/5) — likely a transient proxy 5xx; retrying in $$((n*3))s..."; sleep $$((n*3)); done
 	@# Remove local editable installs (workspace deps installed via wheel below)
 	@sed -i '' '/^-e file:/d' requirements.txt
 	@# Tell pip to look in wheels/ for local packages (e.g. databricks-deep-research)

@@ -1124,7 +1124,7 @@ async def stream_workflow_via_framework(
                                     storage_stack=storage_stack,
                                 )
                                 if config.message_id is not None:
-                                    yield PersistenceCompletedEvent(
+                                    persistence_evt = PersistenceCompletedEvent(
                                         chat_id=str(chat_id),
                                         message_id=str(config.message_id),
                                         research_session_id=None,
@@ -1132,7 +1132,11 @@ async def stream_workflow_via_framework(
                                             query
                                         ),
                                         was_draft=config.is_draft,
+                                        counts={"messages": 1},
                                     )
+                                    yield persistence_evt
+                                    await _buffer_event(persistence_evt, event_buffer)
+                                    await _flush_event_buffer(event_buffer)
                                 logger.info(
                                     "FWK_FOLLOWUP_LIVE_SEARCH_DONE chat_id=%s "
                                     "answer_len=%d",
@@ -1169,13 +1173,17 @@ async def stream_workflow_via_framework(
                                 storage_stack=storage_stack,
                             )
                             if config.message_id is not None:
-                                yield PersistenceCompletedEvent(
+                                persistence_evt = PersistenceCompletedEvent(
                                     chat_id=str(chat_id),
                                     message_id=str(config.message_id),
                                     research_session_id=None,
                                     chat_title=derive_chat_title_from_query(query),
                                     was_draft=config.is_draft,
+                                    counts={"messages": 1},
                                 )
+                                yield persistence_evt
+                                await _buffer_event(persistence_evt, event_buffer)
+                                await _flush_event_buffer(event_buffer)
                             logger.info(
                                 "FWK_FOLLOWUP_CHAT_DONE chat_id=%s answer_len=%d",
                                 chat_id,
@@ -1610,8 +1618,23 @@ async def stream_workflow_via_framework(
                             # Capture the run's observed behavior for promotion
                             # (spec 6.1). Fail-soft; never affects the stream.
                             promotion_collector.observe(fw_event)
-                            # Detect simple query short-circuit (Step 2)
-                            if isinstance(fw_event, CoordinatorClassifiedEvent) and fw_event.is_simple and fw_event.direct_response:
+                            # Detect simple query short-circuit (Step 2).
+                            #
+                            # Honor the coordinator's direct-answer short-circuit
+                            # ONLY in Simple mode. Web Search / Deep Research run a
+                            # real researcher + synthesizer that produce the
+                            # authoritative report; a classifier ``direct_response``
+                            # in those modes is often a premature decline ("I can't
+                            # get real-time data, use <service>") and must NEVER
+                            # pre-empt and discard the report the pipeline goes on to
+                            # produce. (Diagnosed: backend produced a correct cited
+                            # answer but the user only ever saw the classifier decline.)
+                            if (
+                                config.query_mode == "simple"
+                                and isinstance(fw_event, CoordinatorClassifiedEvent)
+                                and fw_event.is_simple
+                                and fw_event.direct_response
+                            ):
                                 simple_response = fw_event.direct_response
                                 # Yield the direct response as synthesis chunks
                                 yield SynthesisStartedEvent(
@@ -1630,7 +1653,8 @@ async def stream_workflow_via_framework(
                                 # Skip remaining workflow events for simple mode
                                 continue
 
-                            # Skip remaining events after simple response detected
+                            # Skip remaining events after a simple response was
+                            # captured (only set above, i.e. only in Simple mode).
                             if simple_response is not None:
                                 continue
 
@@ -1861,7 +1885,7 @@ async def stream_workflow_via_framework(
                     and chat_id is not None
                 ):
                     chat_title = derive_chat_title_from_query(query)
-                    yield PersistenceCompletedEvent(
+                    persistence_evt = PersistenceCompletedEvent(
                         chat_id=str(chat_id),
                         message_id=str(config.message_id),
                         research_session_id=None,
@@ -1869,6 +1893,9 @@ async def stream_workflow_via_framework(
                         was_draft=config.is_draft,
                         counts={"messages": 1},
                     )
+                    yield persistence_evt
+                    await _buffer_event(persistence_evt, event_buffer)
+                    await _flush_event_buffer(event_buffer)
             else:
                 # Full research persistence
                 if event_buffer:
@@ -1934,7 +1961,7 @@ async def stream_workflow_via_framework(
                     )
                     if counts:
                         chat_title = derive_chat_title_from_query(query)
-                        yield PersistenceCompletedEvent(
+                        persistence_evt = PersistenceCompletedEvent(
                             chat_id=str(chat_id_uuid),
                             message_id=str(config.message_id),
                             research_session_id=str(config.research_session_id),
@@ -1942,6 +1969,9 @@ async def stream_workflow_via_framework(
                             was_draft=config.is_draft,
                             counts=counts,
                         )
+                        yield persistence_evt
+                        await _buffer_event(persistence_evt, event_buffer)
+                        await _flush_event_buffer(event_buffer)
                 else:
                     logger.warning(
                         "FWK_PERSISTENCE_GUARD_FAILED "
@@ -2004,7 +2034,7 @@ async def stream_workflow_via_framework(
     # 6. Final completion event (always emitted)
     # ------------------------------------------------------------------
     total_duration_ms = int((time.perf_counter() - start_time) * 1000)
-    yield ResearchCompletedEvent(
+    completed_evt = ResearchCompletedEvent(
         session_id=session_id or uuid4(),
         total_steps_executed=steps_executed,
         total_steps_skipped=steps_skipped,
@@ -2013,6 +2043,9 @@ async def stream_workflow_via_framework(
         final_report=final_report,
         structured_output=structured_output,
     )
+    yield completed_evt
+    await _buffer_event(completed_evt, event_buffer)
+    await _flush_event_buffer(event_buffer)
 
 
 async def stream_research_via_framework(
@@ -2246,6 +2279,16 @@ async def _buffer_event(
     if event and buffer:
         with contextlib.suppress(Exception):
             await buffer.add_event(event)
+
+
+async def _flush_event_buffer(buffer: EventBuffer | None) -> None:
+    """Flush buffered terminal events without failing the research response."""
+    if not buffer:
+        return
+    try:
+        await buffer.flush()
+    except Exception as e:
+        logger.warning("FWK_EVENT_BUFFER_FLUSH_FAILED error=%s", str(e)[:200])
 
 
 async def _resolve_uploaded_file_ids(

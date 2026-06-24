@@ -51,9 +51,9 @@ vi.mock('@/components/agentDesigner/ConfigPanel', () => ({
 vi.mock('@/components/agentDesigner/ToolsPanel', () => ({
   ToolsPanel: () => <div data-testid="tools-panel" />,
 }))
-vi.mock('@/components/agentDesigner/ChatPanel', () => ({
-  ChatPanel: () => <div data-testid="chat-panel" />,
-}))
+// The separate Designer Chat column was removed in the Direction 2 redesign —
+// the co-pilot is now a tab *inside* ConfigPanel (which is mocked as a stub
+// here), so the page no longer renders ChatPanel directly.
 
 // ---------------------------------------------------------------------------
 // Imports (after mocks are set up)
@@ -182,11 +182,12 @@ describe('AgentDesignerPage', () => {
     // Wait for registry to load
     await screen.findByTestId('block-editor')
 
-    // Check the remaining panels render. The dedicated ToolsPanel was
-    // removed in the Databricks redesign — its workspace-tools role lives
-    // inside ConfigPanel's no-selection view now.
+    // Check the inspector renders. The dedicated ToolsPanel was removed in the
+    // Databricks redesign (its workspace-tools role lives inside ConfigPanel's
+    // no-selection view), and the separate Designer Chat column was folded into
+    // ConfigPanel as a "Co-pilot" tab — so the inspector is the only docked
+    // side panel the page renders now.
     expect(screen.getByTestId('config-panel')).toBeInTheDocument()
-    expect(screen.getByTestId('chat-panel')).toBeInTheDocument()
 
     // Store should have a default AST (sequence root)
     const { ast } = useAgentEditorStore.getState()

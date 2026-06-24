@@ -13,6 +13,7 @@ import type { Chat, Message, MessageRole, PersistenceCompletedEvent } from '@/ty
 import type { Claim } from '@/types/citation';
 import type { QuerySubmission } from '@/types/querySubmission';
 import type { AvailableSource } from '@/types/dataSources';
+import { shouldFetchChatFullForChat } from './chatPageUtils';
 
 export default function ChatPage() {
   const { chatId } = useParams<{ chatId?: string }>();
@@ -30,8 +31,14 @@ export default function ChatPage() {
 
   // Data hooks
   const { data: chatsData, isLoading: isLoadingChats } = useChats();
+  const apiChats = useMemo(() => chatsData?.items ?? [], [chatsData?.items]);
+  const chatExistsInApi = !!chatId && apiChats.some((c) => c.id === chatId);
   // Skip messages fetch for drafts (they don't exist in DB)
-  const shouldFetchMessages = chatId && !isDraftChat(chatId);
+  const shouldFetchMessages = shouldFetchChatFullForChat(
+    chatId,
+    chatId ? isDraftChat(chatId) : false,
+    chatExistsInApi,
+  );
   const { data: chatFullData, error: chatFullError } = useChatFull(
     shouldFetchMessages ? chatId : undefined
   );
@@ -85,14 +92,13 @@ export default function ChatPage() {
   // Merge draft chats with API chats (drafts appear at top)
   // Filter out drafts that already exist in API (handles race condition during persistence)
   const chats: Chat[] = useMemo(() => {
-    const apiChats = chatsData?.items ?? [];
     const draftChats = getDraftList();
     // Deduplicate: filter out drafts that have been persisted to API
     const apiChatIds = new Set(apiChats.map(c => c.id));
     const uniqueDrafts = draftChats.filter(d => !apiChatIds.has(d.id));
     // Cast DraftChat to Chat (they're compatible for display)
     return [...uniqueDrafts as unknown as Chat[], ...apiChats];
-  }, [chatsData, getDraftList]);
+  }, [apiChats, getDraftList]);
 
   // Sync localStorage drafts with API state on load
   // Removes stale drafts (older than 60s) that don't exist in the database
@@ -103,6 +109,29 @@ export default function ChatPage() {
       clearStaleDrafts(apiChatIds);
     }
   }, [chatsData, isLoadingChats, clearStaleDrafts]);
+
+  // SSE-independent draft recovery. If the chat list proves the backend has
+  // persisted this chat, local draft state must not keep blocking chatFull.
+  useEffect(() => {
+    if (!chatId || !chatExistsInApi || !isDraftChat(chatId)) return;
+
+    removeDraft(chatId);
+    queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+    queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+    queryClient.invalidateQueries({ queryKey: ['chats'] });
+
+    if (location.search.includes('draft=1')) {
+      navigate(`/chat/${chatId}`, { replace: true });
+    }
+  }, [
+    chatId,
+    chatExistsInApi,
+    isDraftChat,
+    location.search,
+    navigate,
+    queryClient,
+    removeDraft,
+  ]);
 
   // Derive Message[] from chatFullData (FullMessage is a superset of Message)
   const apiMessages: Message[] = useMemo(() => {

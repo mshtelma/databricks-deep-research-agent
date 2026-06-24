@@ -149,6 +149,13 @@ resources:
         # NOTE: the bundle rejects the bare `unity-catalog` OAuth scope; the valid
         # app token is `catalog.connections` (see databricks-sdk-go#1528). If OBO
         # still 403s at runtime, discovery fail-softs to an empty attach list.
+        #
+        # ⚠️ External-MCP INVOKE (/api/2.0/mcp/external/{conn}) still 403s under
+        # OBO with this set. `all-apis` is NOT a valid Apps scope (real deploy
+        # rejects it: "The specified scope all-apis is not a valid scope"), and
+        # `catalog.connections` is list-only. The invoke fix is decided in
+        # docs/mcp-external-obo-scope.md (OBO-scope vs SP-identity) — do not
+        # re-add `all-apis`.
         - catalog.connections
 
       # ---- Config ----
@@ -208,6 +215,13 @@ resources:
             scope: ${var.brave_secret_scope}
             key: ${var.brave_secret_key}
             permission: READ
+
+        - name: tavily-mcp-connection
+          description: "Unity Catalog connection for Tavily MCP"
+          uc_securable:
+            securable_full_name: tavily_mcp
+            securable_type: CONNECTION
+            permission: USE_CONNECTION
 
         # =================================================================
         # Model Serving Endpoints

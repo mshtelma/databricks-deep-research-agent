@@ -42,7 +42,6 @@ import { AppShell } from '@/components/layout/AppShell';
 import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import { BlockEditor } from '@/components/agentDesigner/BlockEditor';
 import { ConfigPanel } from '@/components/agentDesigner/ConfigPanel';
-import { ChatPanel } from '@/components/agentDesigner/ChatPanel';
 import { EtagConflictModal } from '@/components/agentDesigner/EtagConflictModal';
 import {
   DeployDropdown,
@@ -822,8 +821,10 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             </div>
           </main>
 
-          <ConfigPanel registry={registry} />
-          <ChatPanel sessionId={isNew ? undefined : id} />
+          {/* Inspector — Direction 1 (Tabbed Inspector): Configure · Tools ·
+              Approvals · Co-pilot. The co-pilot is the 4th tab (the separate
+              Designer Chat column was removed). */}
+          <ConfigPanel registry={registry} chatSessionId={isNew ? undefined : id} />
         </div>
 
         {/* ETag conflict modal */}

@@ -14,11 +14,15 @@ Three guards are provided:
   ``postgres_branch`` or ``postgres_database_resource`` variables are
   still set to their ``"pending"`` defaults.
 * :func:`assert_no_drift` — compares the live app's resource list
-  against the resource list rendered by DAB. Drift means an out-of-band
-  writer (a manual Apps-API mutation, a previous deploy with the
-  retired ``configure_app_postgres_resource()`` write side) has changed
-  the live app. The deploy must be aborted so terraform's destructive
-  reconciliation never runs.
+  against the resource list rendered by DAB. *Destructive* drift — the
+  live app has resources DAB does not declare (a manual Apps-API
+  mutation, a previous deploy with the retired
+  ``configure_app_postgres_resource()`` write side), or a rebound
+  Postgres target — BLOCKS, so terraform's destructive reconciliation
+  never runs. *Additive* drift — DAB declares resources the live app
+  lacks (a freshly deleted/recreated app, a partially-applied prior
+  deploy, a manually-removed binding) — is logged and ALLOWED, because
+  terraform only binds the missing resources (no destructive apply).
 """
 
 from __future__ import annotations
@@ -402,16 +406,30 @@ def assert_no_drift(
     app_name: str,
     bundle_tf_json: Path,
 ) -> None:
-    """Block if live app has resources not in DAB desired state (or vice versa).
+    """Block on *destructive* drift; log and allow purely *additive* drift.
 
     Use BEFORE ``databricks bundle deploy`` so terraform never reaches an
     apply phase where it would try to reconcile (i.e. delete) an
     out-of-band-added resource.
+
+    Two drift directions exist; only one is dangerous:
+
+    * ``extra_in_live`` — the live app has resources DAB does NOT declare.
+      Terraform would **delete** them on the next apply (removing an
+      actively-bound Postgres returns the opaque "failed to update app"
+      this module exists to prevent). A Postgres rebind / target change
+      lands here too (it populates both lists), so rebinds still block.
+      This BLOCKS.
+    * ``missing_from_live`` — DAB declares resources the live app LACKS.
+      Terraform would only **add** them, which is the normal, safe deploy
+      action (a freshly deleted/recreated empty app, a partially-applied
+      prior deploy, or a manually-removed binding). This is logged and
+      ALLOWED.
     """
     desired = _load_dab_app_resources(bundle_tf_json)
     live = _load_live_app_resources(profile=profile, app_name=app_name)
     report = diff_resources(desired=desired, live=live)
-    if report.has_drift:
+    if report.extra_in_live:
         raise PreflightError(
             "Live app drifted from DAB desired state:\n"
             + report.format()
@@ -421,6 +439,19 @@ def assert_no_drift(
             "let terraform auto-correct: removing an actively-bound Postgres "
             "resource currently returns an opaque 'failed to update app' "
             "from the provider."
+        )
+    if report.missing_from_live:
+        # Purely additive drift: terraform will BIND these resources to the
+        # app (no destructive reconciliation). Common after the app is
+        # deleted/recreated out-of-band, or after a partially-applied deploy.
+        # Surface it for observability, but do not block. NOTE: this MUST go
+        # to stderr — the Makefile captures this command's stdout as the
+        # `--var ...` bundle-var string, so any stdout noise corrupts deploy.
+        print(
+            "INFO: additive drift — DAB will bind "
+            f"{len(report.missing_from_live)} resource(s) absent from the "
+            "live app (non-destructive). Proceeding.\n" + report.format(),
+            file=sys.stderr,
         )
 
 

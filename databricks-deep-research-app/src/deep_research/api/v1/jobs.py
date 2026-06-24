@@ -47,6 +47,10 @@ from deep_research.services.job_manager import get_job_manager
 router = APIRouter(prefix="/research/jobs", tags=["Jobs"])
 logger = get_logger(__name__)
 
+_TERMINAL_REPLAY_EVENT_TYPES = frozenset(
+    {"persistence_completed", "research_completed"}
+)
+
 
 # =============================================================================
 # Tolerant sub-read helpers
@@ -76,6 +80,54 @@ def _tolerant_tx_guard(
     if settings.storage_service_impl == "sqlalchemy_legacy":
         return db.begin_nested()
     return nullcontext()
+
+
+async def _drain_job_stream_events(
+    event_service: IResearchEventService,
+    research_session_id: UUID,
+    since_sequence: int,
+    *,
+    limit: int = 50,
+    max_batches: int = 10,
+) -> tuple[list[str], int, bool]:
+    """Return SSE lines for all currently visible events after `since_sequence`.
+
+    The job SSE endpoint emits a synthetic `job_completed` status event once the
+    session row becomes terminal. This helper gives the endpoint one bounded
+    chance to drain terminal replay events before closing, so clients see
+    `persistence_completed`/`research_completed` before `job_completed`.
+    """
+    lines: list[str] = []
+    last_seq = since_sequence
+    terminal_seen = False
+
+    for _ in range(max_batches):
+        events = await event_service.get_events_since_sequence(
+            research_session_id=research_session_id,
+            since_sequence=last_seq,
+            limit=limit,
+        )
+        if not events:
+            break
+
+        for event in events:
+            event_dict = event_service.event_to_dict(event)
+            event_type = event_dict.get("eventType") or event_dict.get("event_type")
+            terminal_seen = terminal_seen or event_type in _TERMINAL_REPLAY_EVENT_TYPES
+            lines.append(f"data: {json.dumps(event_dict)}\n\n")
+
+            sequence_number = (
+                getattr(event, "sequence_number", None)
+                or event_dict.get("sequenceNumber")
+                or event_dict.get("sequence_number")
+            )
+            if sequence_number:
+                last_seq = int(sequence_number)
+
+        if len(events) < limit:
+            break
+
+    return lines, last_seq, terminal_seen
 
 
 async def _load_conversation_history(
@@ -618,18 +670,17 @@ async def stream_job_events(
                     event_service = make_research_event_service(
                         settings, stack, session=independent_db
                     )
-                    events = await event_service.get_events_since_sequence(
-                        research_session_id=validated_session_id,
-                        since_sequence=last_seq,
-                        limit=50,
+                    event_lines, last_seq, terminal_event_seen = (
+                        await _drain_job_stream_events(
+                            event_service,
+                            validated_session_id,
+                            last_seq,
+                        )
                     )
 
                     # Emit each event
-                    for event in events:
-                        event_dict = event_service.event_to_dict(event)
-                        yield f"data: {json.dumps(event_dict)}\n\n"
-                        if event.sequence_number:
-                            last_seq = event.sequence_number
+                    for event_line in event_lines:
+                        yield event_line
 
                     current_view = await load_session_control_view(
                         validated_chat_id,
@@ -646,6 +697,38 @@ async def stream_job_events(
                     status_val = current_view.status.value
 
                     if status_val != ResearchStatus.IN_PROGRESS.value:
+                        drained_count = 0
+                        final_lines, last_seq, final_terminal_seen = (
+                            await _drain_job_stream_events(
+                                event_service,
+                                validated_session_id,
+                                last_seq,
+                            )
+                        )
+                        terminal_event_seen = terminal_event_seen or final_terminal_seen
+                        drained_count += len(final_lines)
+                        for event_line in final_lines:
+                            yield event_line
+
+                        if (
+                            status_val == ResearchStatus.COMPLETED.value
+                            and not terminal_event_seen
+                        ):
+                            await asyncio.sleep(0.2)
+                            retry_lines, last_seq, retry_terminal_seen = (
+                                await _drain_job_stream_events(
+                                    event_service,
+                                    validated_session_id,
+                                    last_seq,
+                                )
+                            )
+                            terminal_event_seen = (
+                                terminal_event_seen or retry_terminal_seen
+                            )
+                            drained_count += len(retry_lines)
+                            for event_line in retry_lines:
+                                yield event_line
+
                         # Emit final status event and close
                         final_event = {
                             "eventType": "job_completed",
@@ -656,6 +739,8 @@ async def stream_job_events(
                             "JOB_STREAM_COMPLETED",
                             session_id=str(validated_session_id),
                             status=status_val,
+                            terminal_event_seen=terminal_event_seen,
+                            drained_count=drained_count,
                         )
                         break
 

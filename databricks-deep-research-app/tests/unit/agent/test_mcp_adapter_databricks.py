@@ -80,9 +80,12 @@ def test_derive_rejects_invalid(kwargs: dict, host: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_databricks_mcp_fails_closed_without_token() -> None:
+def test_managed_databricks_mcp_fails_closed_without_token() -> None:
+    # Managed MCP (functions/vector-search/genie) runs strictly as the OBO user
+    # (per-user UC data; valid Apps scopes), so it stays fail-closed when no OBO
+    # token is available.
     server = MCPServerConfig(
-        name="ext", client_kind="databricks", connection_name="conn"
+        name="mgd", client_kind="databricks", managed_target="genie/abc123"
     )
     with pytest.raises(MCPConfigError):
         build_mcp_toolsets([server], sp_client=object(), user_token=None)
@@ -93,13 +96,30 @@ class _FakeToolset:
         return 0
 
 
-def test_databricks_branch_builds_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def _identity_aware_resolve(sp_sentinel: object, obo_sentinel: object):
+    """A ``resolve_workspace_client`` fake returning a DISTINCT client per
+    identity: the OBO sentinel when a token is present, else the SP sentinel.
+    Lets a test assert which identity a server was built with."""
+
+    def _resolve(*, sp_client: object, user_token: str | None) -> object:
+        return obo_sentinel if user_token else sp_sentinel
+
+    return _resolve
+
+
+def test_external_databricks_built_as_service_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # EXTERNAL MCP must be built with the SP client EVEN WHEN an OBO token is
+    # present: Databricks authorizes the external proxy via the SP's
+    # USE_CONNECTION grant, and no user scope authorizes the OBO invoke.
     server = MCPServerConfig(
         name="ext", client_kind="databricks", connection_name="conn"
     )
-    fake_obo = SimpleNamespace(config=SimpleNamespace(host=_HOST))
+    sp = SimpleNamespace(config=SimpleNamespace(host=_HOST), kind="sp")
+    obo = SimpleNamespace(config=SimpleNamespace(host=_HOST), kind="obo")
     monkeypatch.setattr(
-        mcp_adapter, "resolve_workspace_client", lambda **_: fake_obo
+        mcp_adapter, "resolve_workspace_client", _identity_aware_resolve(sp, obo)
     )
 
     captured: dict[str, object] = {}
@@ -116,12 +136,66 @@ def test_databricks_branch_builds_client(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(mcp_adapter, "_build_databricks_mcp_client", _fake_client)
     monkeypatch.setattr(mcp_adapter, "build_mcp_toolset", _fake_build)
 
-    toolsets = build_mcp_toolsets([server], sp_client=object(), user_token="tok")
+    toolsets = build_mcp_toolsets([server], sp_client=sp, user_token="tok")
 
     assert len(toolsets) == 1
     assert captured["url"] == f"{_HOST}/api/2.0/mcp/external/conn"
     assert captured["client"] == "FAKE_MCP_CLIENT"
-    assert captured["ws"] is fake_obo
+    assert captured["ws"] is sp  # SP identity, NOT obo
+
+
+def test_managed_databricks_built_as_obo_user(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # MANAGED MCP must be built with the OBO user client.
+    server = MCPServerConfig(
+        name="mgd", client_kind="databricks", managed_target="genie/abc123"
+    )
+    sp = SimpleNamespace(config=SimpleNamespace(host=_HOST), kind="sp")
+    obo = SimpleNamespace(config=SimpleNamespace(host=_HOST), kind="obo")
+    monkeypatch.setattr(
+        mcp_adapter, "resolve_workspace_client", _identity_aware_resolve(sp, obo)
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_client(url: str, ws: object) -> str:
+        captured["url"] = url
+        captured["ws"] = ws
+        return "FAKE_MCP_CLIENT"
+
+    monkeypatch.setattr(mcp_adapter, "_build_databricks_mcp_client", _fake_client)
+    monkeypatch.setattr(
+        mcp_adapter, "build_mcp_toolset", lambda cfg, **kw: _FakeToolset()
+    )
+
+    toolsets = build_mcp_toolsets([server], sp_client=sp, user_token="tok")
+
+    assert len(toolsets) == 1
+    assert captured["url"] == f"{_HOST}/api/2.0/mcp/genie/abc123"
+    assert captured["ws"] is obo  # OBO user identity
+
+
+def test_external_databricks_allowed_without_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # External (UC-connection) MCP is invoked as the app SP, so it does NOT
+    # require an OBO token — it must build even when user_token is None.
+    server = MCPServerConfig(
+        name="ext", client_kind="databricks", connection_name="conn"
+    )
+    sp = SimpleNamespace(config=SimpleNamespace(host=_HOST))
+    monkeypatch.setattr(mcp_adapter, "resolve_workspace_client", lambda **_: sp)
+    monkeypatch.setattr(
+        mcp_adapter, "_build_databricks_mcp_client", lambda url, ws: "C"
+    )
+    monkeypatch.setattr(
+        mcp_adapter, "build_mcp_toolset", lambda cfg, **kw: _FakeToolset()
+    )
+
+    toolsets = build_mcp_toolsets([server], sp_client=sp, user_token=None)
+
+    assert len(toolsets) == 1
 
 
 def test_empty_servers_noop() -> None:
