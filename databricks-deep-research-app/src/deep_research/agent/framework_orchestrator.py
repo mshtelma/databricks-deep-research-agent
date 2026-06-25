@@ -687,8 +687,17 @@ def _apply_source_scope_to_workflow_declarations(
         return workflow_def
 
     web_kinds = {"web_search", "web_crawl", "brave_search"}
-    enterprise_kinds = {"vector_search", "genie", "knowledge_assistant", "sql_analytics", "qa_assistant"}
+    enterprise_kinds = {
+        "vector_search",
+        "genie",
+        "knowledge_assistant",
+        "sql_analytics",
+        "qa_assistant",
+        "mcp",
+        "mcp_server",
+    }
     blocked_tool_names: set[str] = set()
+    blocked_mcp_server_names: set[str] = set()
     kept_declarations = []
     for tool in workflow_def.tools:
         kind = getattr(tool.kind, "value", str(tool.kind))
@@ -699,7 +708,18 @@ def _apply_source_scope_to_workflow_declarations(
             blocked_tool_names.add(tool.name)
             continue
         kept_declarations.append(tool)
-    if not blocked_tool_names:
+
+    if config.source_scope == "web_only":
+        mcp_servers = list(getattr(workflow_def, "mcp_servers", []) or [])
+        blocked_mcp_server_names = {
+            name
+            for server in mcp_servers
+            if (name := getattr(server, "name", None))
+        }
+        if blocked_mcp_server_names:
+            workflow_def.mcp_servers = []
+
+    if not blocked_tool_names and not blocked_mcp_server_names:
         return workflow_def
 
     workflow_def.tools = kept_declarations
@@ -712,12 +732,25 @@ def _apply_source_scope_to_workflow_declarations(
                 for tool in tools
                 if not (isinstance(tool, str) and tool in blocked_tool_names)
             ]
+        if blocked_mcp_server_names:
+            mcp_servers = agent_config.get("mcp_servers")
+            if isinstance(mcp_servers, list):
+                agent_config["mcp_servers"] = [
+                    server
+                    for server in mcp_servers
+                    if not (
+                        isinstance(server, str)
+                        and server in blocked_mcp_server_names
+                    )
+                ]
 
     _visit_workflow_agent_configs(workflow_def, filter_agent_tools)
     logger.info(
-        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s",
+        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s "
+        "blocked_mcp_servers=%s",
         config.source_scope,
         sorted(blocked_tool_names),
+        sorted(blocked_mcp_server_names),
     )
     return workflow_def
 
@@ -1337,7 +1370,8 @@ async def stream_workflow_via_framework(
                 if config.source_scope == "enterprise_only":
                     web_names = {"web_search", "web_crawl"}
                     enterprise_names = [n for n in tool_names if n not in web_names]
-                    if not enterprise_names:
+                    has_mcp_attachments = bool(getattr(config, "enabled_mcp_servers", None))
+                    if not enterprise_names and not has_mcp_attachments:
                         logger.error(
                             "FWK_NO_ENTERPRISE_TOOLS source_scope=enterprise_only "
                             "tool_names=%s — research will proceed with no enterprise data",
@@ -2812,7 +2846,11 @@ async def _load_enterprise_tools(
         [tool.definition.name for tool in tools if hasattr(tool, "definition")],
     )
 
-    if config.source_scope == "enterprise_only" and not tools:
+    if (
+        config.source_scope == "enterprise_only"
+        and not tools
+        and not getattr(config, "enabled_mcp_servers", None)
+    ):
         logger.error(
             "FWK_ENTERPRISE_TOOLS_REQUIRED_BUT_EMPTY source_scope=%s "
             "enabled_sources=%s — enterprise_only mode has no tools",

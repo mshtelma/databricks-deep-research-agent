@@ -1,15 +1,14 @@
 /**
- * ChatAttachmentsSelector — attach Skills + MCP servers to a chat query (E1).
+ * ChatAttachmentsSelector — attach Skills to a chat query (E1).
  *
  * Reuses the Designer resource-discovery endpoint (`listDesignerResources`,
- * OBO-scoped) to list the skills and MCP servers available to the user, lets the
- * user toggle which to attach to THIS query, and supports registering a new
+ * OBO-scoped) to list the skills available to the user, lets the user toggle
+ * which to attach to THIS query, and supports registering a new
  * skill folder inline (persisted via `skillFoldersApi`; applied to the user's
  * next research run by the runtime skill store).
  *
  * The selection is lifted to the parent (MessageInput) and threaded into the
- * QuerySubmission as `enabledSkills` / `enabledMcpServers`; the backend merges
- * them into the run (skills → agent configs, MCP names → UC-connection servers).
+ * QuerySubmission as `enabledSkills`; the backend merges them into the run.
  *
  * Overlay: a portaled, edge-flipping Radix Popover (the `DeployDropdown`
  * pattern). The composer is pinned to the bottom of an `h-screen` column, so a
@@ -25,8 +24,7 @@ import { skillFoldersApi } from '@/api/client';
 
 export interface ChatAttachmentsSelectorProps {
   selectedSkills: string[];
-  selectedMcpServers: string[];
-  onChange: (next: { skills: string[]; mcpServers: string[] }) => void;
+  onChange: (nextSkills: string[]) => void;
   disabled?: boolean;
 }
 
@@ -38,13 +36,11 @@ function toggle(list: string[], value: string): string[] {
 
 export function ChatAttachmentsSelector({
   selectedSkills,
-  selectedMcpServers,
   onChange,
   disabled = false,
 }: ChatAttachmentsSelectorProps): React.ReactElement | null {
   const [open, setOpen] = React.useState(false);
   const [skills, setSkills] = React.useState<string[]>([]);
-  const [mcpServers, setMcpServers] = React.useState<string[]>([]);
   const [loading, setLoading] = React.useState(false);
   const [folderPath, setFolderPath] = React.useState('');
   const [folderBusy, setFolderBusy] = React.useState(false);
@@ -52,13 +48,10 @@ export function ChatAttachmentsSelector({
 
   const load = React.useCallback(() => {
     setLoading(true);
-    listDesignerResources(['skill', 'mcp_server'])
+    listDesignerResources(['skill'])
       .then((res) => {
         setSkills(
           res.resources.filter((r) => r.kind === 'skill').map((r) => r.name),
-        );
-        setMcpServers(
-          res.resources.filter((r) => r.kind === 'mcp_server').map((r) => r.name),
         );
       })
       .catch(() => {
@@ -68,12 +61,12 @@ export function ChatAttachmentsSelector({
   }, []);
 
   React.useEffect(() => {
-    if (open && !loading && skills.length === 0 && mcpServers.length === 0) {
+    if (open && !loading && skills.length === 0) {
       load();
     }
-  }, [open, load, loading, skills.length, mcpServers.length]);
+  }, [open, load, loading, skills.length]);
 
-  const selectedCount = selectedSkills.length + selectedMcpServers.length;
+  const selectedCount = selectedSkills.length;
 
   const handleAddFolder = async () => {
     const path = folderPath.trim();
@@ -102,7 +95,7 @@ export function ChatAttachmentsSelector({
           disabled={disabled}
           className="inline-flex items-center gap-1 rounded-db-md border border-db-gray-lines px-2 py-1 text-[12px] text-db-navy-800 hover:bg-db-oat-light disabled:opacity-50"
         >
-          Skills &amp; MCP
+          Skills
           {selectedCount > 0 && (
             <span className="ml-1 rounded-full bg-db-navy-800 px-1.5 text-[10px] text-white">
               {selectedCount}
@@ -137,39 +130,7 @@ export function ChatAttachmentsSelector({
               <input
                 type="checkbox"
                 checked={selectedSkills.includes(name)}
-                onChange={() =>
-                  onChange({
-                    skills: toggle(selectedSkills, name),
-                    mcpServers: selectedMcpServers,
-                  })
-                }
-              />
-              {name}
-            </label>
-          ))}
-
-          <p className="mb-1 mt-3 font-db-mono text-[10px] font-medium uppercase tracking-[0.06em] text-db-gray-text">
-            MCP servers
-          </p>
-          {!loading && mcpServers.length === 0 && (
-            <p className="mb-2 text-[11px] italic text-db-gray-text">
-              No MCP servers found.
-            </p>
-          )}
-          {mcpServers.map((name) => (
-            <label
-              key={`mcp-${name}`}
-              className="flex items-center gap-2 py-0.5 text-[12px] text-db-navy-800"
-            >
-              <input
-                type="checkbox"
-                checked={selectedMcpServers.includes(name)}
-                onChange={() =>
-                  onChange({
-                    skills: selectedSkills,
-                    mcpServers: toggle(selectedMcpServers, name),
-                  })
-                }
+                onChange={() => onChange(toggle(selectedSkills, name))}
               />
               {name}
             </label>

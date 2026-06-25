@@ -16,6 +16,7 @@ export type DataSourceType =
   | 'knowledge_assistant'
   | 'web_search'
   | 'uploaded_file'
+  | 'mcp_server'
   | 'custom';
 
 /** Data source visibility options */
@@ -262,6 +263,7 @@ export const DATA_SOURCE_TYPE_LABELS: Record<DataSourceType, string> = {
   knowledge_assistant: 'Knowledge Assistant',
   web_search: 'Web Search',
   uploaded_file: 'Uploaded File',
+  mcp_server: 'MCP Server',
   custom: 'Custom',
 };
 
@@ -287,6 +289,7 @@ export const SOURCE_TYPE_COLORS: Record<DataSourceType, string> = {
   knowledge_assistant: 'emerald',
   web_search: 'orange',
   uploaded_file: 'gray',
+  mcp_server: 'indigo',
   custom: 'slate',
 };
 

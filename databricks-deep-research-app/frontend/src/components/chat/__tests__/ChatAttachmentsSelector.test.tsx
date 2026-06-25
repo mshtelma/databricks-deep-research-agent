@@ -30,23 +30,19 @@ beforeEach(() => {
 });
 
 describe('ChatAttachmentsSelector', () => {
-  it('discovers and lists skills + MCP servers when opened', async () => {
+  it('discovers and lists skills when opened', async () => {
     render(
       <ChatAttachmentsSelector
         selectedSkills={[]}
-        selectedMcpServers={[]}
         onChange={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /skills & mcp/i }));
+    fireEvent.click(screen.getByRole('button', { name: /skills/i }));
     await waitFor(() =>
-      expect(vi.mocked(listDesignerResources)).toHaveBeenCalledWith([
-        'skill',
-        'mcp_server',
-      ]),
+      expect(vi.mocked(listDesignerResources)).toHaveBeenCalledWith(['skill']),
     );
     expect(await screen.findByText('market-research')).toBeInTheDocument();
-    expect(screen.getByText('weather')).toBeInTheDocument();
+    expect(screen.queryByText('weather')).not.toBeInTheDocument();
   });
 
   it('emits the toggled skill via onChange', async () => {
@@ -54,28 +50,23 @@ describe('ChatAttachmentsSelector', () => {
     render(
       <ChatAttachmentsSelector
         selectedSkills={[]}
-        selectedMcpServers={[]}
         onChange={onChange}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /skills & mcp/i }));
+    fireEvent.click(screen.getByRole('button', { name: /skills/i }));
     const skillBox = await screen.findByText('market-research');
     fireEvent.click(skillBox.querySelector('input')!);
-    expect(onChange).toHaveBeenCalledWith({
-      skills: ['market-research'],
-      mcpServers: [],
-    });
+    expect(onChange).toHaveBeenCalledWith(['market-research']);
   });
 
   it('registers a skill folder via the API', async () => {
     render(
       <ChatAttachmentsSelector
         selectedSkills={[]}
-        selectedMcpServers={[]}
         onChange={() => {}}
       />,
     );
-    fireEvent.click(screen.getByRole('button', { name: /skills & mcp/i }));
+    fireEvent.click(screen.getByRole('button', { name: /skills/i }));
     const input = await screen.findByLabelText(/skill folder path/i);
     fireEvent.change(input, { target: { value: '/Volumes/c/s/v/skills' } });
     fireEvent.click(screen.getByRole('button', { name: /^add$/i }));

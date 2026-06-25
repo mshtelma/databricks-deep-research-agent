@@ -9,7 +9,11 @@ from databricks_deep_research.workflow.definition import (
 )
 
 from deep_research.agent.adapters.config_translator import translate
-from deep_research.agent.framework_orchestrator import _merge_chat_attachments
+from deep_research.agent.framework_orchestrator import (
+    _apply_source_scope_to_workflow_declarations,
+    _merge_chat_attachments,
+)
+from deep_research.agent.orchestration_config import OrchestrationConfig
 
 
 def _agent_def() -> WorkflowDefinition:
@@ -140,6 +144,20 @@ def test_mcp_agent_binding_dedups_with_existing() -> None:
     defn.root.config["mcp_servers"] = ["tavily_mcp"]
     _merge_chat_attachments(defn, None, ["tavily_mcp", "sales"])
     assert defn.root.config["mcp_servers"] == ["tavily_mcp", "sales"]
+
+
+def test_web_only_scope_removes_saved_mcp_servers() -> None:
+    """Saved workflow MCP declarations must not bypass web-only source scope."""
+    defn = _agent_def()
+    _merge_chat_attachments(defn, None, ["tavily_mcp"])
+
+    _apply_source_scope_to_workflow_declarations(
+        defn,
+        OrchestrationConfig(source_scope="web_only"),
+    )
+
+    assert defn.mcp_servers == []
+    assert defn.root.config["mcp_servers"] == []
 
 
 def test_mcp_only_lightweight_search_binds_researcher_without_web_tools() -> None:

@@ -44,6 +44,7 @@ from deep_research.schemas.discovery import (
     VectorSearchMetadata,
 )
 from deep_research.services.discovery_cache import DiscoveryCache, get_discovery_cache
+from deep_research.services.mcp_discovery import discover_mcp_connections
 
 logger = get_logger(__name__)
 
@@ -51,6 +52,7 @@ logger = get_logger(__name__)
 DISCOVERY_TIMEOUT_VS = timedelta(seconds=15)  # Vector Search can be slow
 DISCOVERY_TIMEOUT_GENIE = timedelta(seconds=10)
 DISCOVERY_TIMEOUT_SERVING = timedelta(seconds=10)
+DISCOVERY_TIMEOUT_MCP = timedelta(seconds=5)
 CACHE_TTL = timedelta(minutes=5)  # Cache TTL
 
 # Genie pagination - SDK does NOT auto-paginate list_spaces()
@@ -752,6 +754,79 @@ class DiscoveryService:
         return False
 
     # =========================================================================
+    # MCP Server Discovery
+    # =========================================================================
+
+    async def discover_mcp_server_sources(
+        self,
+        user_token: str | None,
+    ) -> tuple[list[DiscoveredSource], DiscoveryError | None]:
+        """Discover MCP servers visible to the user.
+
+        MCP servers are surfaced as normal selectable sources in the chat source
+        browser. The runtime still attaches them through ``enabled_mcp_servers``;
+        discovery only provides stable ``mcp:<connection_name>`` source IDs for
+        selection.
+        """
+        sources: list[DiscoveredSource] = []
+
+        try:
+            client = await self._get_client(user_token)
+            loop = asyncio.get_event_loop()
+            servers = await loop.run_in_executor(
+                None,
+                lambda: discover_mcp_connections(client),
+            )
+
+            for server in servers:
+                connection_name = (server.connection_name or server.name).strip()
+                if not connection_name:
+                    continue
+
+                metadata = dict(server.metadata or {})
+                metadata.update(
+                    {
+                        "client_kind": server.client_kind,
+                        "connection_name": server.connection_name,
+                        "managed_target": server.managed_target,
+                    }
+                )
+
+                sources.append(
+                    DiscoveredSource(
+                        source_id=f"mcp:{connection_name}",
+                        source_type=DataSourceType.MCP_SERVER,
+                        name=server.name or connection_name,
+                        endpoint_name=connection_name,
+                        description=server.description or "MCP server",
+                        status=DiscoveryStatus.READY,
+                        capabilities=["mcp", "tools"],
+                        metadata=metadata,
+                        discovered_at=datetime.now(UTC),
+                    )
+                )
+
+            logger.info("MCP_DISCOVERY_COMPLETE", source_count=len(sources))
+            return sources, None
+
+        except Exception as e:
+            error_msg = str(e)
+            error_code = "UNKNOWN_ERROR"
+
+            if "PERMISSION_DENIED" in error_msg or "403" in error_msg:
+                error_code = "PERMISSION_DENIED"
+            elif "unavailable" in error_msg.lower() or "503" in error_msg:
+                error_code = "SERVICE_UNAVAILABLE"
+
+            logger.error("MCP_DISCOVERY_FAILED", error=error_msg[:200])
+            return sources, DiscoveryError(
+                source_type=DataSourceType.MCP_SERVER,
+                error_code=error_code,
+                error_message=f"Failed to discover MCP server sources: {error_msg[:200]}",
+                retryable=error_code != "PERMISSION_DENIED",
+            )
+
+    # =========================================================================
     # Main Discovery Methods
     # =========================================================================
 
@@ -794,6 +869,7 @@ class DiscoveryService:
             DataSourceType.VECTOR_SEARCH,
             DataSourceType.GENIE,
             DataSourceType.KNOWLEDGE_ASSISTANT,
+            DataSourceType.MCP_SERVER,
         ]
 
         # Helper function to run discovery with per-type timeout
@@ -842,6 +918,14 @@ class DiscoveryService:
                     self.discover_serving_endpoints(user_token, include_all=include_all_endpoints),
                     DISCOVERY_TIMEOUT_SERVING,
                     DataSourceType.KNOWLEDGE_ASSISTANT,
+                )
+            )
+        if DataSourceType.MCP_SERVER in types_to_discover:
+            tasks.append(
+                run_with_timeout(
+                    self.discover_mcp_server_sources(user_token),
+                    DISCOVERY_TIMEOUT_MCP,
+                    DataSourceType.MCP_SERVER,
                 )
             )
 

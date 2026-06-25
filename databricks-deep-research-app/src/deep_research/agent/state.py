@@ -535,6 +535,7 @@ class ResearchState:
             self.source_scope_config.is_type_enabled("vector_search")
             or self.source_scope_config.is_type_enabled("genie")
             or self.source_scope_config.is_type_enabled("knowledge_assistant")
+            or self.source_scope_config.is_type_enabled("mcp_server")
         )
 
     def get_active_scope(self) -> str:

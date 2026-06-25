@@ -72,6 +72,10 @@ from typing import Any, Literal, cast
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from databricks_deep_research.tools.mcp_auth import ApiKey, BearerToken, MCPAuth
+from databricks_deep_research.tools.mcp_compat import (
+    normalize_mcp_arguments,
+    normalize_mcp_schema,
+)
 from databricks_deep_research.tools.mcp_security import (
     MCPSecurityError,
     validate_mcp_url,
@@ -214,14 +218,19 @@ class _MCPTool:
         return self._definition
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        return dict(arguments or {})
+        normalized = dict(arguments or {})
+        return normalize_mcp_arguments(
+            self._original_name,
+            self._source_label,
+            normalized,
+        )
 
     async def execute(
         self,
         arguments: dict[str, Any],
         context: ToolContext,  # noqa: ARG002 — protocol surface
     ) -> ToolResult:
-        result = await self._call(self._original_name, arguments)
+        result = await self._call(self._original_name, self.validate_arguments(arguments))
         return self._normalize_result(result)
 
     async def _call(self, tool_name: str, arguments: dict[str, Any]) -> Any:
@@ -475,7 +484,11 @@ class MCPToolset:
                 item.get("description", "") if isinstance(item, dict) else ""
             )
             try:
-                inlined = _inline_refs(dict(input_schema))
+                inlined = normalize_mcp_schema(
+                    tool_name,
+                    self._source_label,
+                    _inline_refs(dict(input_schema)),
+                )
                 _validate_openai_compatible(inlined)
             except MCPSchemaError:
                 logger.warning(

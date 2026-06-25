@@ -80,6 +80,49 @@ class _CountingDiscoveryClient(_FakeResearchClient):
         return super().list_tools()
 
 
+class _FakeTavilyClient:
+    """Duck-typed Tavily MCP client exposing the live schema shape."""
+
+    def __init__(self, tool_name: str = "tavily_search") -> None:
+        self._tool_name = tool_name
+        self.last_arguments: dict[str, object] | None = None
+
+    def list_tools(self):  # type: ignore[no-untyped-def]
+        return [
+            type(
+                "T",
+                (),
+                {
+                    "name": self._tool_name,
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "country": {"type": "string", "default": ""},
+                            "search_depth": {
+                                "type": "string",
+                                "default": "basic",
+                                "enum": ["basic", "advanced", "fast", "ultra-fast"],
+                                "description": (
+                                    "The depth of the search. 'basic' for generic "
+                                    "results, 'advanced' for more thorough search, "
+                                    "'fast' for optimized low latency with high "
+                                    "relevance, 'ultra-fast' for prioritizing latency"
+                                ),
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    "description": "Search the web for current information on any topic.",
+                },
+            )()
+        ]
+
+    def call_tool(self, name, arguments):  # type: ignore[no-untyped-def]
+        self.last_arguments = dict(arguments or {})
+        return _FakeTextResult("Tavily search completed.")
+
+
 class _SyncClientWithInternalAsyncRun(_FakeResearchClient):
     """Mimics sync SDK clients that drive async internals themselves."""
 
@@ -132,6 +175,74 @@ async def test_sync_mcp_client_with_internal_asyncio_run_executes_in_thread() ->
     assert result.success
     assert "45.2 billion" in result.content
     assert client.last_arguments == {"query": "2024 revenue"}
+
+
+def test_tavily_search_schema_hides_fast_depths() -> None:
+    """The model should not see Tavily low-latency depths as legal options."""
+    ts = MCPToolset(client=_FakeTavilyClient())
+    tool = ts.tools[0]
+
+    search_depth = tool.definition.parameters["properties"]["search_depth"]
+
+    assert search_depth["enum"] == ["basic", "advanced"]
+    assert search_depth["default"] == "basic"
+    assert "fast" not in search_depth["description"]
+    assert "Low-latency Tavily depths are disabled" in search_depth["description"]
+
+
+@pytest.mark.asyncio
+async def test_tavily_search_fast_depth_normalized_before_transport() -> None:
+    """Defense in depth: normalize forbidden Tavily depths even if emitted."""
+    client = _FakeTavilyClient()
+    ts = MCPToolset(client=client)
+    tool = ts.tools[0]
+
+    validated = tool.validate_arguments({
+        "query": "Frankfurt weather today",
+        "country": "Germany",
+        "search_depth": "fast",
+    })
+    result = await tool.execute(
+        {
+            "query": "Frankfurt weather today",
+            "country": "Germany",
+            "search_depth": "ultra-fast",
+        },
+        ToolContext(),
+    )
+
+    assert validated["search_depth"] == "basic"
+    assert result.success
+    assert client.last_arguments == {
+        "query": "Frankfurt weather today",
+        "country": "Germany",
+        "search_depth": "basic",
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_tavily_mcp_search_depth_is_untouched() -> None:
+    """Compatibility rules must not rewrite unrelated MCP tools."""
+    client = _FakeTavilyClient(tool_name="custom_search")
+    ts = MCPToolset(client=client)
+    tool = ts.tools[0]
+
+    search_depth = tool.definition.parameters["properties"]["search_depth"]
+    validated = tool.validate_arguments({
+        "query": "Frankfurt weather today",
+        "country": "Germany",
+        "search_depth": "fast",
+    })
+    result = await tool.execute(validated, ToolContext())
+
+    assert search_depth["enum"] == ["basic", "advanced", "fast", "ultra-fast"]
+    assert validated["search_depth"] == "fast"
+    assert result.success
+    assert client.last_arguments == {
+        "query": "Frankfurt weather today",
+        "country": "Germany",
+        "search_depth": "fast",
+    }
 
 
 @pytest.mark.asyncio

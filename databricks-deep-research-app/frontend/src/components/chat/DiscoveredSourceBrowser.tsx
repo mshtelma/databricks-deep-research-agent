@@ -11,6 +11,7 @@
  */
 
 import * as React from 'react';
+import { Boxes } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
@@ -78,6 +79,12 @@ const SOURCE_CATEGORIES: SourceCategory[] = [
     label: 'Web Search',
     icon: <GlobeIcon className="h-4 w-4" />,
     description: 'Public web search',
+  },
+  {
+    type: 'mcp_server',
+    label: 'MCP Servers',
+    icon: <Boxes className="h-4 w-4" />,
+    description: 'Model Context Protocol tool servers',
   },
 ];
 
@@ -147,6 +154,7 @@ export function DiscoveredSourceBrowser({
       knowledge_assistant: [],
       web_search: [],
       uploaded_file: [],
+      mcp_server: [],
       custom: [],
     };
     filteredSources.forEach((s) => {

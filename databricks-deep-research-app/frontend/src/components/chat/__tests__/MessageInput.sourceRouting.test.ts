@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { AvailableSource } from '@/types/dataSources';
 import {
+  deriveEnabledMcpServerNamesForSubmit,
   deriveEnabledSourceIdsForSubmit,
   deriveQueryModeFromComposerState,
   deriveSourceScopeFromComposerSources,
@@ -18,6 +19,13 @@ const sources: AvailableSource[] = [
     id: 'vs:catalog.schema.index',
     name: 'Finance Docs',
     type: 'vector_search',
+    description: null,
+    isEnabled: true,
+  },
+  {
+    id: 'mcp:tavily_mcp',
+    name: 'tavily_mcp',
+    type: 'mcp_server',
     description: null,
     isEnabled: true,
   },
@@ -42,22 +50,47 @@ describe('MessageInput source routing', () => {
     ).toBe('deep_research');
   });
 
-  it('maps MCP-only selection to no-web scope and no enabled built-in sources', () => {
+  it('maps MCP-only selection to no-web scope and selected MCP source IDs', () => {
     const composerSources = { web: false, ent: false, mcp: true };
 
     expect(deriveSourceScopeFromComposerSources(composerSources)).toBe('enterprise_only');
-    expect(deriveEnabledSourceIdsForSubmit(sources, composerSources)).toEqual([]);
+    expect(deriveEnabledSourceIdsForSubmit(sources, composerSources)).toEqual([
+      'mcp:tavily_mcp',
+    ]);
+    expect(deriveEnabledMcpServerNamesForSubmit(sources, composerSources)).toEqual([
+      'tavily_mcp',
+    ]);
+  });
+
+  it('maps Web plus MCP to all scope so MCP is not disabled as web-only', () => {
+    expect(
+      deriveSourceScopeFromComposerSources({ web: true, ent: false, mcp: true }),
+    ).toBe('all');
   });
 
   it('keeps selected enterprise sources only when the enterprise channel is enabled', () => {
     expect(
-      deriveEnabledSourceIdsForSubmit(sources, { web: false, ent: true, mcp: true }),
+      deriveEnabledSourceIdsForSubmit(sources, { web: false, ent: true, mcp: false }),
     ).toEqual(['vs:catalog.schema.index']);
   });
 
   it('keeps web search only when the web channel is enabled', () => {
     expect(
-      deriveEnabledSourceIdsForSubmit(sources, { web: true, ent: false, mcp: true }),
+      deriveEnabledSourceIdsForSubmit(sources, { web: true, ent: false, mcp: false }),
     ).toEqual(['web_search']);
+  });
+
+  it('keeps MCP sources only when the MCP channel is enabled', () => {
+    expect(
+      deriveEnabledSourceIdsForSubmit(sources, { web: false, ent: true, mcp: true }),
+    ).toEqual(['vs:catalog.schema.index', 'mcp:tavily_mcp']);
+
+    expect(
+      deriveEnabledMcpServerNamesForSubmit(sources, {
+        web: false,
+        ent: true,
+        mcp: false,
+      }),
+    ).toEqual([]);
   });
 });

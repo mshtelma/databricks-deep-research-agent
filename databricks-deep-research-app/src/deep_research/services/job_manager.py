@@ -39,6 +39,78 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MCP_SOURCE_PREFIX = "mcp:"
+
+
+def _mcp_server_name_from_source_id(source_id: str) -> str | None:
+    """Return the MCP server name encoded in a discovery source ID."""
+    if not isinstance(source_id, str) or not source_id.startswith(_MCP_SOURCE_PREFIX):
+        return None
+    name = source_id[len(_MCP_SOURCE_PREFIX):].strip()
+    return name or None
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def normalize_mcp_source_selection(
+    *,
+    source_scope: str | None,
+    enabled_sources: list[str] | None,
+    disabled_sources: list[str] | None,
+    enabled_mcp_servers: list[str] | None,
+) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
+    """Normalize MCP discovery source IDs into runtime MCP attachments.
+
+    The chat source browser now treats MCP servers as sources with IDs like
+    ``mcp:tavily_mcp``. The execution framework, however, attaches MCP via
+    ``enabled_mcp_servers`` and must never hand ``mcp:*`` IDs to the enterprise
+    tool factory. This helper keeps both client contracts compatible.
+    """
+    disabled_source_ids = list(disabled_sources or [])
+    disabled_mcp_names = {
+        name
+        for source_id in disabled_source_ids
+        if (name := _mcp_server_name_from_source_id(source_id)) is not None
+    }
+
+    normalized_enabled_sources: list[str] | None
+    mcp_names_from_sources: list[str] = []
+    if enabled_sources is None:
+        normalized_enabled_sources = None
+    else:
+        normalized_enabled_sources = []
+        for source_id in enabled_sources:
+            mcp_name = _mcp_server_name_from_source_id(source_id)
+            if mcp_name is None:
+                normalized_enabled_sources.append(source_id)
+            else:
+                mcp_names_from_sources.append(mcp_name)
+
+    requested_mcp_names = mcp_names_from_sources + list(enabled_mcp_servers or [])
+    normalized_mcp_servers = [
+        name
+        for name in _dedupe_preserving_order(requested_mcp_names)
+        if name not in disabled_mcp_names
+    ]
+
+    if source_scope == "web_only":
+        normalized_mcp_servers = []
+
+    return (
+        normalized_enabled_sources,
+        disabled_sources,
+        normalized_mcp_servers or None,
+    )
+
 
 def _get_max_concurrent_jobs() -> int:
     """Get max concurrent jobs per user from config."""
@@ -243,6 +315,13 @@ class JobManager:
                 "a StorageStack attached; wire set_storage_stack() in app "
                 "lifespan before accepting jobs."
             )
+
+        enabled_sources, disabled_sources, enabled_mcp_servers = normalize_mcp_source_selection(
+            source_scope=source_scope,
+            enabled_sources=enabled_sources,
+            disabled_sources=disabled_sources,
+            enabled_mcp_servers=enabled_mcp_servers,
+        )
 
         # Check concurrency limit
         max_jobs = _get_max_concurrent_jobs()
@@ -596,6 +675,17 @@ class JobManager:
         )
 
         try:
+            (
+                enabled_sources,
+                disabled_sources,
+                enabled_mcp_servers,
+            ) = normalize_mcp_source_selection(
+                source_scope=source_scope,
+                enabled_sources=enabled_sources,
+                disabled_sources=disabled_sources,
+                enabled_mcp_servers=enabled_mcp_servers,
+            )
+
             # Get output configuration from registry if output_type is specified
             output_schema = None
             output_format = "markdown"

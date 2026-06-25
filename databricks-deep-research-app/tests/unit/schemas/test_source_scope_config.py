@@ -28,6 +28,7 @@ class TestIsTypeEnabled:
         assert config.is_type_enabled("vector_search") is True
         assert config.is_type_enabled("genie") is True
         assert config.is_type_enabled("knowledge_assistant") is True
+        assert config.is_type_enabled("mcp_server") is True
 
     def test_web_only_blocks_enterprise_types(self) -> None:
         """WEB_ONLY scope blocks all enterprise source types."""
@@ -36,6 +37,8 @@ class TestIsTypeEnabled:
         assert config.is_type_enabled("vector_search") is False
         assert config.is_type_enabled("genie") is False
         assert config.is_type_enabled("knowledge_assistant") is False
+        assert config.is_type_enabled("mcp_server") is False
+        assert config.is_type_enabled("mcp") is False
 
     def test_web_only_allows_web_search(self) -> None:
         """WEB_ONLY scope allows web_search."""
@@ -60,6 +63,7 @@ class TestIsTypeEnabled:
         assert config.is_type_enabled("knowledge_assistant") is True
         assert config.is_type_enabled("web_search") is True
         assert config.is_type_enabled("uploaded_file") is True
+        assert config.is_type_enabled("mcp_server") is True
 
     def test_unknown_type_defaults_to_true(self) -> None:
         """Unknown source type defaults to enabled."""
@@ -72,6 +76,13 @@ class TestIsTypeEnabled:
         config = SourceScopeConfig(enable_uploaded_files=False)
 
         assert config.is_type_enabled("uploaded_file") is False
+
+    def test_mcp_server_toggle(self) -> None:
+        """MCP server toggle can be disabled."""
+        config = SourceScopeConfig(enable_mcp_server=False)
+
+        assert config.is_type_enabled("mcp_server") is False
+        assert config.is_type_enabled("mcp") is False
 
 
 # =========================================================================
@@ -187,6 +198,7 @@ class TestFilterSources:
             _MockSource("vs1", "vector_search"),
             _MockSource("web1", "web_search"),
             _MockSource("genie1", "genie"),
+            _MockSource("mcp1", "mcp_server"),
         ]
 
         filtered = config.filter_sources(sources)
@@ -213,6 +225,7 @@ class TestToDict:
         assert d["disabled_sources"] == []
         assert d["enable_vector_search"] is True
         assert d["enable_web_search"] is True
+        assert d["enable_mcp_server"] is True
 
     def test_custom_config_to_dict(self) -> None:
         """Custom config values are preserved in dict."""

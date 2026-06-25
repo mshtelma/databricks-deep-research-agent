@@ -30,9 +30,11 @@ import type { InputConfig } from '@/core/plugins/types';
 import type { QuerySubmission } from '@/types/querySubmission';
 import type { QueryMode } from '@/types';
 import {
+  deriveEnabledMcpServerNamesForSubmit,
   deriveEnabledSourceIdsForSubmit,
   deriveQueryModeFromComposerState,
   deriveSourceScopeFromComposerSources,
+  isEnterpriseAvailableSource,
   type ComposerMode,
   type ComposerSources,
 } from './sourceRouting';
@@ -211,9 +213,9 @@ export function MessageInput({
     : deriveQueryModeFromComposerState(composerMode, composerSources);
   const queryMode = derivedQueryMode;
 
-  // Derive the legacy SourceScope from the web/ent checkboxes (used only for
-  // web_search/deep_research). MCP is a separate channel handled via
-  // enabledMcpServers (gated by composerSources.mcp at submit time).
+  // Derive the legacy SourceScope from source channels. MCP counts as non-web,
+  // and the concrete MCP server selection is sent through enabledSources plus a
+  // derived enabledMcpServers compatibility field.
   const derivedSourceScope = deriveSourceScopeFromComposerSources(composerSources);
 
   // Keep the persisted queryMode preference in sync with the derived value.
@@ -391,9 +393,9 @@ export function MessageInput({
   // research) and for non-agent chats.
   const [turnIntent, setTurnIntent] = React.useState<'auto' | 'chat' | 'research'>('auto');
 
-  // Chat-attached skills + MCP servers for THIS query (Feature 2.2 / 4.3 — E1).
+  // Chat-attached skills for THIS query (Feature 2.2 — E1). MCP is selected in
+  // the unified Sources browser as mcp_server sources.
   const [enabledSkills, setEnabledSkills] = React.useState<string[]>([]);
-  const [enabledMcpServers, setEnabledMcpServers] = React.useState<string[]>([]);
 
   // Run-level overrides surfaced in the Options panel (P2). Default false =>
   // inherit the global flag; the user opts in per query.
@@ -460,7 +462,7 @@ export function MessageInput({
   React.useEffect(() => {
     if (!discoveryData?.sources) return;
 
-    const readyEnterpriseSourceIds = discoveryData.sources
+    const readySelectableNonWebSourceIds = discoveryData.sources
       .filter(
         (source) =>
           source.status === 'ready' &&
@@ -469,10 +471,10 @@ export function MessageInput({
       )
       .map((source) => source.source_id);
 
-    if (readyEnterpriseSourceIds.length === 0) return;
+    if (readySelectableNonWebSourceIds.length === 0) return;
 
     const enabledSet = readEnabledEnterpriseSources();
-    const shouldDisable = readyEnterpriseSourceIds.filter((id) => !enabledSet.has(id));
+    const shouldDisable = readySelectableNonWebSourceIds.filter((id) => !enabledSet.has(id));
 
     if (shouldDisable.length === 0) return;
 
@@ -493,16 +495,19 @@ export function MessageInput({
 
   // T053-T054: Validation - Check if submission should be blocked due to source scope issues
   const enterpriseSources = React.useMemo(() => {
-    return availableSources.filter(
-      (s) => s.type !== 'web_search' && s.type !== 'uploaded_file'
-    );
+    return availableSources.filter(isEnterpriseAvailableSource);
   }, [availableSources]);
 
   const enabledEnterpriseSources = React.useMemo(() => {
     return enterpriseSources.filter((s) => s.isEnabled);
   }, [enterpriseSources]);
 
-  const hasEnabledMcpServer = composerSources.mcp && enabledMcpServers.length > 0;
+  const enabledMcpServerNames = React.useMemo(
+    () => deriveEnabledMcpServerNamesForSubmit(availableSources, composerSources),
+    [availableSources, composerSources],
+  );
+
+  const hasEnabledMcpServer = composerSources.mcp && enabledMcpServerNames.length > 0;
 
   // Determine if we should block submission due to source configuration
   const sourceValidation = React.useMemo(() => {
@@ -587,11 +592,11 @@ export function MessageInput({
         tone: tone || undefined,
         outputLanguage: outputLanguage || undefined,
         enabledSkills: enabledSkills.length > 0 ? enabledSkills : undefined,
-        // MCP is a VariantA source channel: only forward attached servers when
-        // the MCP checkbox is on.
+        // Compatibility field for the backend MCP attachment path. The source
+        // browser is now the source of truth via enabledSources mcp:* IDs.
         enabledMcpServers:
-          composerSources.mcp && enabledMcpServers.length > 0
-            ? enabledMcpServers
+          enabledMcpServerNames.length > 0
+            ? enabledMcpServerNames
             : undefined,
         enableCrossSessionMemory: enableCrossSessionMemory || undefined,
         allowLiveSearch: allowLiveSearch || undefined,
@@ -767,14 +772,10 @@ export function MessageInput({
           </label>
         )}
 
-        {/* Skills & MCP attachments for this query */}
+        {/* Skills attachments for this query */}
         <ChatAttachmentsSelector
           selectedSkills={enabledSkills}
-          selectedMcpServers={enabledMcpServers}
-          onChange={({ skills, mcpServers }) => {
-            setEnabledSkills(skills);
-            setEnabledMcpServers(mcpServers);
-          }}
+          onChange={setEnabledSkills}
           disabled={disabled || isLoading}
         />
 
@@ -972,7 +973,9 @@ export function MessageInput({
           const nextDisabled = allIds.filter((id) => !ids.includes(id));
           setDisabledSources(nextDisabled);
 
-          // Update enabled enterprise sources tracking
+          // Update persisted non-web source tracking. Databricks enterprise
+          // sources and MCP servers are opt-in, while web stays controlled by
+          // the high-level Web channel.
           const enabledSet = new Set<string>();
           for (const id of ids) {
             const source = discoveredSources.find((s) => s.source_id === id);

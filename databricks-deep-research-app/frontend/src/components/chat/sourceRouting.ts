@@ -19,12 +19,29 @@ export function deriveQueryModeFromComposerState(
   return sources.web || sources.ent || sources.mcp ? 'web_search' : 'simple';
 }
 
-function isEnterpriseAvailableSource(source: AvailableSource): boolean {
-  return source.type !== 'web_search' && source.type !== 'uploaded_file';
+export function isMcpAvailableSource(source: AvailableSource): boolean {
+  return source.type === 'mcp_server' || source.id.startsWith('mcp:');
+}
+
+export function isEnterpriseAvailableSource(source: AvailableSource): boolean {
+  return (
+    source.type !== 'web_search' &&
+    source.type !== 'uploaded_file' &&
+    !isMcpAvailableSource(source)
+  );
+}
+
+export function mcpServerNameFromSource(source: AvailableSource): string | null {
+  if (!isMcpAvailableSource(source)) return null;
+  if (source.id.startsWith('mcp:')) {
+    const name = source.id.slice('mcp:'.length).trim();
+    return name || null;
+  }
+  return source.name.trim() || null;
 }
 
 export function deriveSourceScopeFromComposerSources(sources: ComposerSources): SourceScope {
-  if (sources.web && sources.ent) return 'all';
+  if (sources.web && (sources.ent || sources.mcp)) return 'all';
   if (sources.web) return 'web_only';
   // MCP-only still needs the legacy no-web scope. Fine-grained enabledSources
   // then decides whether any non-MCP enterprise tools are attached.
@@ -40,7 +57,26 @@ export function deriveEnabledSourceIdsForSubmit(
     .filter((source) => {
       if (source.type === 'web_search') return sources.web;
       if (isEnterpriseAvailableSource(source)) return sources.ent;
+      if (isMcpAvailableSource(source)) return sources.mcp;
       return false;
     })
     .map((source) => source.id);
+}
+
+export function deriveEnabledMcpServerNamesForSubmit(
+  availableSources: AvailableSource[],
+  sources: ComposerSources,
+): string[] {
+  if (!sources.mcp) return [];
+
+  const seen = new Set<string>();
+  const names: string[] = [];
+  for (const source of availableSources) {
+    if (!source.isEnabled) continue;
+    const name = mcpServerNameFromSource(source);
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    names.push(name);
+  }
+  return names;
 }
