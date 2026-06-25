@@ -16,10 +16,12 @@ dependencies; a clear error is raised at execution time if they are missing.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import logging
 import random
 import socket
+import time
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -174,6 +176,84 @@ class ContentCrawler(Protocol):
     async def __call__(self, url: str) -> tuple[str, str | None]:
         """Fetch *url* and return ``(extracted_text, page_title)``."""
         ...
+
+
+class PdfParser(Protocol):
+    """Protocol for the PDF-parsing callable injected into ``WebCrawlTool``.
+
+    Same shape as :class:`ContentCrawler` — receives a URL pointing at a PDF
+    and returns ``(extracted_text, title | None)``.  Kept structurally
+    identical so the same routing path can dispatch to either backend.
+    """
+
+    async def __call__(self, url: str) -> tuple[str, str | None]:
+        """Fetch the PDF at *url* and return ``(extracted_text, title)``."""
+        ...
+
+
+# ---------------------------------------------------------------------------
+# Content-type / URL routing (ported from gpt-researcher ``get_scraper``)
+# ---------------------------------------------------------------------------
+
+
+def _is_pdf_url(url: str) -> bool:
+    """Return ``True`` when *url*'s path ends in ``.pdf`` (case-insensitive).
+
+    Ported from gpt-researcher's ``Scraper.get_scraper`` content-type routing
+    (``link.endswith(".pdf")``), but matched against the parsed *path* so
+    query strings / fragments (``…/doc.pdf?dl=1``) still route correctly.
+    """
+    try:
+        path = urlparse(url).path
+    except Exception:
+        return False
+    return path.lower().endswith(".pdf")
+
+
+# ---------------------------------------------------------------------------
+# Per-domain rate limiter (algorithm ported from gpt-researcher's
+# ``GlobalRateLimiter.wait_if_needed``; keyed per-domain instead of global)
+# ---------------------------------------------------------------------------
+
+
+class _DomainRateLimiter:
+    """Throttle same-domain request bursts to a minimum inter-request interval.
+
+    Ports gpt-researcher's ``GlobalRateLimiter.wait_if_needed`` timing
+    algorithm — compute the elapsed time since the last request and
+    ``asyncio.sleep`` the remainder when it is under the configured delay —
+    but tracks the last-request timestamp **per registrable domain** (the
+    spec calls for per-domain throttling) instead of a single global clock.
+
+    A *min_interval* of ``0`` disables throttling entirely (the
+    ``wait_if_needed`` early-return), so the default crawl path performs no
+    sleeping and stays byte-identical.
+    """
+
+    __slots__ = ("_min_interval", "_last_request", "_lock")
+
+    def __init__(self, min_interval: float) -> None:
+        self._min_interval = max(min_interval, 0.0)
+        self._last_request: dict[str, float] = {}
+        self._lock = asyncio.Lock()
+
+    async def acquire(self, url: str) -> None:
+        """Block until *url*'s domain is allowed to be requested again."""
+        if self._min_interval <= 0.0:
+            return  # Disabled — no throttling, no sleeping.
+
+        domain = (urlparse(url).netloc or "").lower()
+        async with self._lock:
+            now = time.monotonic()
+            last = self._last_request.get(domain, 0.0)
+            elapsed = now - last
+            if last and elapsed < self._min_interval:
+                sleep_for = self._min_interval - elapsed
+                logger.debug(
+                    "WEB_CRAWL_RATE_LIMIT domain=%s sleep=%.3fs", domain, sleep_for
+                )
+                await asyncio.sleep(sleep_for)
+            self._last_request[domain] = time.monotonic()
 
 
 # ---------------------------------------------------------------------------
@@ -337,6 +417,22 @@ class WebCrawlTool:
             When *None*, the built-in httpx + trafilatura pipeline is used.
         timeout: HTTP timeout in seconds (used by the default crawler).
         max_content_length: Maximum extracted text length in characters.
+        js_render: Opt-in JS/SPA rendering (spec §4.6, Tier 3). When *True*
+            and a *js_crawler* is supplied, pages route through the
+            JS-capable backend (the already-integrated Jina path) instead of
+            httpx + trafilatura. Default *False* — the default crawl path is
+            untouched and byte-identical. (Playwright is the heavier
+            alternative and is intentionally NOT shipped here.)
+        js_crawler: The JS-capable :class:`ContentCrawler` used when
+            *js_render* is enabled (e.g. a ``JinaCrawlAdapter``). When *None*,
+            *js_render* has no effect and the normal path is used.
+        pdf_parser: Optional :class:`PdfParser` for content-type routing. When
+            supplied, ``.pdf`` URLs route to this parser instead of the HTML
+            crawler. When *None*, ``.pdf`` URLs follow the normal path (which
+            already rejects non-HTML content) — byte-identical default.
+        min_domain_interval: Minimum seconds between requests to the same
+            domain (per-domain rate limiting, ported from gpt-researcher).
+            Default ``0.0`` disables throttling — no sleeping, byte-identical.
     """
 
     def __init__(
@@ -346,11 +442,19 @@ class WebCrawlTool:
         timeout: float = 30.0,
         max_content_length: int = 50_000,
         extract_tables: bool = True,
+        js_render: bool = False,
+        js_crawler: ContentCrawler | None = None,
+        pdf_parser: PdfParser | None = None,
+        min_domain_interval: float = 0.0,
     ) -> None:
         self._crawler = crawler
         self._timeout = timeout
         self._max_content_length = max_content_length
         self._extract_tables = extract_tables
+        self._js_render = js_render
+        self._js_crawler = js_crawler
+        self._pdf_parser = pdf_parser
+        self._rate_limiter = _DomainRateLimiter(min_domain_interval)
 
         self._definition = ToolDefinition(
             name="web_crawl",
@@ -414,6 +518,32 @@ class WebCrawlTool:
             raise ValueError(f"'url_index' must be non-negative, got {raw_index}")
 
         return {"url_index": raw_index}
+
+    def _select_crawler(self, url: str) -> ContentCrawler | None:
+        """Pick the backend for *url*, or ``None`` to use the default crawler.
+
+        Routing precedence (each gate is opt-in and OFF by default, so when no
+        knob is set this returns whatever ``self._crawler`` already was —
+        preserving the byte-identical default path):
+
+        1. **Content-type routing** — a ``.pdf`` URL routes to ``pdf_parser``
+           when one is configured (ported from gpt-researcher's ``get_scraper``).
+        2. **JS-rendering option** — when ``js_render`` is enabled and a
+           ``js_crawler`` (the Jina JS-capable backend) is supplied, route
+           there instead of httpx + trafilatura.
+        3. **Fallback** — the constructor-injected ``self._crawler`` (which is
+           ``None`` for the default httpx + trafilatura pipeline).
+
+        Returning ``None`` signals :meth:`execute` to call :func:`_default_crawl`
+        with its IP-pinning / timeout / length kwargs, exactly as before.
+        """
+        if self._pdf_parser is not None and _is_pdf_url(url):
+            logger.info("WEB_CRAWL_ROUTE backend=pdf url=%s", url[:80])
+            return self._pdf_parser
+        if self._js_render and self._js_crawler is not None:
+            logger.info("WEB_CRAWL_ROUTE backend=js url=%s", url[:80])
+            return self._js_crawler
+        return self._crawler
 
     async def execute(
         self,
@@ -495,10 +625,16 @@ class WebCrawlTool:
                 },
             )
 
+        # -- per-domain rate limiting (no-op when min_domain_interval == 0) ---
+        await self._rate_limiter.acquire(url)
+
         # -- fetch and extract -----------------------------------------------
+        # Route to the PDF parser / JS backend / injected crawler as configured;
+        # ``None`` means fall through to the default httpx + trafilatura path.
+        crawler = self._select_crawler(url)
         try:
-            if self._crawler is not None:
-                text, title = await self._crawler(url)
+            if crawler is not None:
+                text, title = await crawler(url)
             else:
                 text, title = await _default_crawl(
                     url,

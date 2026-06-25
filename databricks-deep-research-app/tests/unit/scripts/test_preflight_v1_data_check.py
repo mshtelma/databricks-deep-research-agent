@@ -4,7 +4,6 @@ All database interactions are mocked — no live DB required.
 """
 
 import json
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 

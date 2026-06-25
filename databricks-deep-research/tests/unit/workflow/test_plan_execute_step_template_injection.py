@@ -16,7 +16,6 @@ from databricks_deep_research.workflow.runtime.plan_execute_runner import (
     _patch_researcher_user_prompt,
 )
 
-
 _DEFAULT_RESEARCHER_BODY = {
     "id": "lane-researcher",
     "type": "agent",

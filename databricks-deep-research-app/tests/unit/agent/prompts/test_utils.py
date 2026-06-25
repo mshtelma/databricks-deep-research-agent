@@ -1,6 +1,6 @@
 """Tests for prompt utility functions — XML boundary escape."""
 
-from deep_research.agent.prompts.utils import build_system_prompt, _sanitize_user_input
+from deep_research.agent.prompts.utils import _sanitize_user_input, build_system_prompt
 
 
 class TestSanitizeUserInput:

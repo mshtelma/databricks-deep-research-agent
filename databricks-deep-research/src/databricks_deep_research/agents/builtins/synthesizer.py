@@ -70,6 +70,7 @@ from databricks_deep_research.citation.pipeline import (
 from databricks_deep_research.citation.types import (
     ClaimInfo,
     ClaimRole,
+    RankedEvidence,
     VerificationSummaryInfo,
 )
 from databricks_deep_research.citation.verification_retriever import (
@@ -84,6 +85,7 @@ from databricks_deep_research.events.types import (
     SynthesisStartedEvent,
     VerificationSummaryEvent,
 )
+from databricks_deep_research.tools.protocol import UrlRegistry
 from databricks_deep_research.workflow.runtime_core.selectors import (
     select_analysis_summary,
     select_claims,
@@ -128,6 +130,13 @@ class _EvidenceSelectorAdapter:
     def __init__(self, selector: EvidenceSelector) -> None:
         self._selector = selector
 
+    @property
+    def small_corpus_skip_threshold(self) -> int:
+        """Surface the wrapped selector's small-corpus fast-path threshold so
+        ``pipeline.preselect_evidence`` (which only sees this adapter) can read
+        it. ``0`` (default) keeps the fast-path off."""
+        return self._selector.small_corpus_skip_threshold
+
     async def select_evidence_spans(
         self,
         query: str,
@@ -141,11 +150,6 @@ class _EvidenceSelectorAdapter:
             filter_quality=False,
         )
         return result.evidence
-
-
-def _is_reclaim_mode(config: AgentNodeConfig) -> bool:
-    """Determine whether the synthesizer should run in reclaim mode."""
-    return resolve_grounding_mode(config) == "reclaim"
 
 
 def _get_reclaim_config(config: AgentNodeConfig) -> dict[str, Any]:
@@ -245,6 +249,18 @@ def _build_citation_config(config: AgentNodeConfig) -> CitationConfig:
         "synthesis_mode": synthesis_mode,
         "react_synthesis": react_synthesis,
         "enable_verification_retrieval": bool(reclaim_cfg["enable_are_retrieval"]),
+        # Grounding-only lane (classical_lite cheap tier): the app sets these
+        # False to generate + link citations without the expensive NLI overlay
+        # / correction / numeric stages. Default True preserves full reclaim.
+        "enable_isolated_verification": bool(
+            schema.get("enable_isolated_verification", True)
+        ),
+        "enable_citation_correction": bool(
+            schema.get("enable_citation_correction", True)
+        ),
+        "enable_numeric_qa_verification": bool(
+            schema.get("enable_numeric_qa_verification", True)
+        ),
         "isolated_verification": IsolatedVerificationConfig(
             **isolated_verification_kwargs
         ),
@@ -391,6 +407,36 @@ def _extract_prompt_section(prompt: str, heading: str) -> str:
     return prompt.split(heading, 1)[1].strip()
 
 
+def _build_tone_language_clause(config: AgentNodeConfig) -> str:
+    """Return a per-run tone + output-language directive, or ``""`` if unset.
+
+    Prompts-over-knobs: this clause is the entire leverage of the per-run
+    ``tone``/``output_language`` knobs. It is APPENDED AFTER the report-contract
+    sections by the caller and never replaces or reorders the hard numeric/unit
+    citation rules (which live downstream in the claim-generation prompt). The
+    self-describing ``Tone`` value carries its own definition, so no glossary is
+    needed. Both knobs default ``None`` => this returns ``""`` => byte-identical.
+    """
+    lines: list[str] = []
+    tone = config.tone
+    if tone is not None:
+        lines.append(f"- Write in this tone: {tone.directive()}.")
+    language = (config.output_language or "").strip()
+    if language:
+        lines.append(
+            f"- Write the ENTIRE report in {language}. Every section, heading, "
+            f"sentence, and analysis MUST be written in {language}, regardless of "
+            "the language of the evidence. Do NOT translate or alter quoted "
+            "numeric values, units, currencies, dates, or proper names."
+        )
+    if not lines:
+        return ""
+    return (
+        "### Report Style (apply WITHOUT relaxing any citation, numeric, or unit "
+        "rule below)\n" + "\n".join(lines)
+    )
+
+
 def _build_reclaim_generation_instructions(config: AgentNodeConfig) -> str:
     """Return workflow-specific report instructions for ReClaim generation.
 
@@ -398,6 +444,11 @@ def _build_reclaim_generation_instructions(config: AgentNodeConfig) -> str:
     synthesizer user prompt is not the generation prompt. This extracts the
     Designer-authored report contract and threads it into Stage 2 without
     changing evidence selection.
+
+    Per-run ``tone``/``output_language`` knobs are APPENDED LAST (after the
+    Designer contract), so they constrain style only and sit ahead of the hard
+    numeric/unit citation rules baked into the claim-generation prompt — those
+    rules are never weakened or reordered.
     """
     parts: list[str] = []
     schema = config.output_schema or {}
@@ -418,6 +469,12 @@ def _build_reclaim_generation_instructions(config: AgentNodeConfig) -> str:
     )
     if user_specific:
         parts.append("### Workflow-Specific Instructions\n" + user_specific)
+
+    # Per-run style knobs go LAST so they never displace the Designer contract
+    # and remain ahead of the downstream hard numeric/unit citation rules.
+    tone_language = _build_tone_language_clause(config)
+    if tone_language:
+        parts.append(tone_language)
 
     instructions = "\n\n".join(part for part in parts if part.strip()).strip()
     if not instructions:
@@ -637,6 +694,14 @@ def _build_reclaim_pipeline(
                     chunk_overlap=evidence_cfg.chunk_overlap,
                     max_chunks_per_source=evidence_cfg.max_chunks_per_source,
                     max_sources=evidence_cfg.max_sources,
+                    # Small-corpus fast-path skip (Wave 1.5). Not yet surfaced on
+                    # the app's EvidencePreselectionConfig, so this resolves to 0
+                    # (fast-path OFF) today -> behavior is byte-identical. Read
+                    # defensively so a future config field auto-wires without a
+                    # synthesizer change.
+                    small_corpus_skip_threshold=int(
+                        getattr(evidence_cfg, "small_corpus_skip_threshold", 0) or 0
+                    ),
                 ),
             )
         ),
@@ -784,6 +849,126 @@ def _replace_human_citations_with_numeric(
             f"[{key_to_numeric[key]}]",
         )
     return numeric_report
+
+
+# Heading text for the deterministic reference list appended to the report body.
+_SOURCES_SECTION_HEADING = "## Sources"
+
+
+def _append_sources_section_enabled(config: AgentNodeConfig) -> bool:
+    """Whether to append the deterministic ``## Sources`` block to the report.
+
+    Default ON.  Overridable per-agent via ``output_schema.append_sources_section``
+    (``False`` to suppress, e.g. for non-research synthesizers).
+    """
+    schema = config.output_schema or {}
+    return bool(schema.get("append_sources_section", True))
+
+
+def _evidence_numeric_index(
+    evidence: Any,
+    url_to_index: dict[str, str],
+) -> str | None:
+    """Resolve a piece of evidence to its numeric source-pool index.
+
+    Mirrors the resolution used by ``_build_key_to_numeric_index_map`` /
+    ``_claim_to_state_dict`` so the cited/consulted partition never drifts from
+    the numeric markers the persist path stamps into the report.
+    """
+    source_pool_index = getattr(evidence, "source_pool_index", None)
+    if isinstance(source_pool_index, int):
+        return str(source_pool_index)
+    canonical = getattr(evidence, "canonical_source_url", None)
+    source_url = (
+        canonical
+        if isinstance(canonical, str) and canonical
+        else getattr(evidence, "source_url", "")
+    )
+    if not source_url:
+        return None
+    return url_to_index.get(str(source_url))
+
+
+def render_sources_section(
+    report_content: str,
+    sources: list[dict[str, Any]],
+    evidence_pool: list[RankedEvidence] | None,
+    url_registry: UrlRegistry | None = None,
+) -> str:
+    """Render a deterministic ``## Sources`` block for the report body.
+
+    The block lists *cited* sources first (those whose numeric marker actually
+    appears in ``report_content``), then *consulted* sources (everything visited
+    that was not cited).  It travels with the report content so it renders
+    identically live and on reload, independent of the REST claims/sources
+    tables.
+
+    Args:
+        report_content: The final report body carrying numeric ``[N]`` markers.
+        sources: Normalized source dicts from the shared sources pool
+            (``{"url", "canonical_url", "title", ...}``), index-aligned with the
+            numeric citation markers.
+        evidence_pool: The pipeline's last evidence pool, used to determine which
+            sources were actually cited.  ``None``/empty -> nothing is treated as
+            cited and every source is listed as consulted.
+        url_registry: Optional shared URL registry, used only to annotate failed
+            crawls.  Synthesis runs that don't thread a registry pass ``None``.
+
+    Returns:
+        A ``## Sources`` markdown block (leading blank line included), or an
+        empty string when there are no sources to render.
+    """
+    if not sources:
+        return ""
+
+    present_markers = set(_re.findall(r"\[(\d+)\]", report_content or ""))
+    url_to_index = _build_url_to_index_map(sources)
+
+    # Numeric indices that are both backed by evidence and actually cited.
+    cited_indices: set[str] = set()
+    for evidence in evidence_pool or []:
+        numeric_index = _evidence_numeric_index(evidence, url_to_index)
+        if numeric_index is not None and numeric_index in present_markers:
+            cited_indices.add(numeric_index)
+
+    def _failure_note(url: str) -> str:
+        if url_registry is None:
+            return ""
+        failure = url_registry.get_failure(url)
+        if not failure:
+            return ""
+        failure_class = failure.get("failure_class", "unavailable")
+        return f" _(crawl failed: {failure_class})_"
+
+    def _format_entry(index: int, source: dict[str, Any]) -> str:
+        url = str(source.get("url") or source.get("canonical_url") or "")
+        title = str(source.get("title") or "").strip() or url or "Source"
+        marker = f"[{index}]"
+        entry = f"{marker} [{title}]({url})" if url else f"{marker} {title}"
+        return entry + _failure_note(url)
+
+    cited_lines: list[str] = []
+    consulted_lines: list[str] = []
+    for index, source in enumerate(sources):
+        line = _format_entry(index, source)
+        if str(index) in cited_indices:
+            cited_lines.append(line)
+        else:
+            consulted_lines.append(line)
+
+    parts: list[str] = ["", _SOURCES_SECTION_HEADING, ""]
+    if cited_lines:
+        parts.append("### Cited")
+        parts.append("")
+        parts.extend(cited_lines)
+        parts.append("")
+    if consulted_lines:
+        parts.append("### Consulted")
+        parts.append("")
+        parts.extend(consulted_lines)
+        parts.append("")
+
+    return "\n".join(parts).rstrip() + "\n"
 
 
 def _claim_to_state_dict(
@@ -1723,6 +1908,7 @@ async def _execute(
         max_tokens=int(reclaim_cfg["max_tokens"]),
         draft_content=draft_content or None,
         generation_instructions=generation_instructions,
+        output_language=config.output_language,
     ):
         if isinstance(item, str):
             report_content = item
@@ -1784,6 +1970,21 @@ async def _execute(
         )
         if state.runtime_store is not None:
             state.runtime_store.set_synthesis_mode("insufficient")
+    elif not citation_config.enable_isolated_verification:
+        # Grounding-only (classical_lite cheap) lane: citations were generated
+        # and linked (Stages 1-3) but intentionally NOT NLI-verified, so the
+        # verdict-based soft-warn / fail-closed gates below do not apply. Keep
+        # the cited report as-is; claims persist as resolvable-but-unverified
+        # (a normal clickable citation, no verdict).
+        logger.info(
+            "SYNTHESIZER_%s_GROUNDING_ONLY node_id=%s claims=%d sources=%d",
+            mode_label,
+            node_id,
+            len(pipeline.last_generated_claims),
+            len(sources),
+        )
+        if state.runtime_store is not None:
+            state.runtime_store.set_synthesis_mode("full")
     else:
         verdict = _classify_grounding(
             pipeline.last_generated_claims,
@@ -1854,6 +2055,24 @@ async def _execute(
         len(str(report_content)),
         token_usage,
     )
+
+    # Deterministic reference list appended to the report BODY (so it renders
+    # identically live and on reload, independent of the REST sources table).
+    # Placed after all grounding gates so soft-warn / insufficient-evidence
+    # templated reports also carry their sources. Gated by ``append_sources_section``
+    # (default on); the idempotency guard prevents a duplicate heading.
+    if _append_sources_section_enabled(config) and report_content and (
+        _SOURCES_SECTION_HEADING not in report_content
+    ):
+        url_registry = getattr(_tool_context, "url_registry", None)
+        sources_section = render_sources_section(
+            report_content,
+            sources,
+            pipeline.last_evidence_pool,
+            url_registry,
+        )
+        if sources_section:
+            report_content = report_content.rstrip() + "\n\n" + sources_section
 
     return AgentOutput(
         content=report_content,
@@ -1936,11 +2155,22 @@ def _enrich_config(
     _state: WorkflowState,
     _runtime_context: dict[str, Any] | None = None,
 ) -> AgentNodeConfig:
-    """Fill in synthesizer defaults; switch prompts for reclaim mode."""
+    """Fill in synthesizer defaults; switch prompts for grounded modes.
+
+    Both ``reclaim`` (verified) and ``classical_lite`` (cheap grounding-only)
+    need the strict-cite system/user prompt so the draft contains ``[N]``
+    citation markers for Stage 2 parsing — without it the cheap lane would
+    produce uncited prose and the pipeline would extract zero claims.
+    """
     updates: dict[str, Any] = {}
 
-    if _is_reclaim_mode(config):
-        logger.info("SYNTHESIZER_ENRICH_RECLAIM node_subtype=%s", config.subtype)
+    _grounding = resolve_grounding_mode(config)
+    if _grounding in {"reclaim", "classical_lite"}:
+        logger.info(
+            "SYNTHESIZER_ENRICH_GROUNDED node_subtype=%s grounding_mode=%s",
+            config.subtype,
+            _grounding,
+        )
         updates["system_prompt"] = _compose_reclaim_prompt(
             _build_reclaim_system_prompt(),
             config.system_prompt,

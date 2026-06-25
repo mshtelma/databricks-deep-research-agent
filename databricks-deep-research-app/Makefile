@@ -665,7 +665,15 @@ quickstart:
 # Generate requirements.txt for Databricks Apps
 requirements: build-framework
 	@echo "Generating requirements.txt from pyproject.toml..."
-	uv pip compile pyproject.toml --python-platform x86_64-unknown-linux-gnu -o requirements.txt
+	@# --extra mcp ships the Model Context Protocol client (mcp + databricks-mcp)
+	@# in the deployed image. Without it, chat-/Designer-attached MCP servers
+	@# (client_kind=databricks) fail to build at runtime (MCPConfigError) and
+	@# contribute zero tools. The guarded imports keep the default path clean.
+	@# Retry the compile: the Databricks PyPI proxy (pypi-proxy.dev.databricks.com)
+	@# intermittently returns 5xx (502 Bad Gateway); a transient hiccup must NOT
+	@# fail the whole deploy. Retry up to 5x with linear backoff, then fail hard so
+	@# a GENUINE resolution error still surfaces.
+	@n=0; until uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt; do n=$$((n+1)); [ $$n -ge 5 ] && { echo "ERROR: 'uv pip compile' failed after 5 attempts (proxy down? check https://pypi-proxy.dev.databricks.com)"; exit 1; }; echo "uv pip compile failed (attempt $$n/5) — likely a transient proxy 5xx; retrying in $$((n*3))s..."; sleep $$((n*3)); done
 	@# Remove local editable installs (workspace deps installed via wheel below)
 	@sed -i '' '/^-e file:/d' requirements.txt
 	@# Tell pip to look in wheels/ for local packages (e.g. databricks-deep-research)
@@ -912,10 +920,12 @@ deploy: build requirements
 # Skips: DB migrations, Lakebase provisioning, permission grants, frontend build.
 # Use for Python/yaml/databricks.yml-only changes after a successful `make deploy`.
 # Usage: make app-deploy TARGET=dev
-#        make app-deploy TARGET=dev BUILD=1          # Also rebuild frontend + requirements.txt
+#        make app-deploy TARGET=dev BUILD=0          # Skip rebuild (config-only; wheel/UI unchanged)
 #        make app-deploy TARGET=dev BRAVE_SCOPE=msh  # Override Brave secret scope
-BUILD ?=
-app-deploy: $(if $(BUILD),build requirements,)
+# Rebuilds wheels + UI by DEFAULT; the app runs from the installed wheel, so a
+# stale wheel ships stale code. Pass BUILD=0 (or no/false/off) to skip the rebuild.
+BUILD ?= 1
+app-deploy: $(if $(filter-out 0 no false off,$(BUILD)),build requirements,)
 	@if [ ! -f $(ROOT_DIR)/.env.$(TARGET) ]; then \
 		echo "ERROR: $(ROOT_DIR)/.env.$(TARGET) not found. Run 'make deploy TARGET=$(TARGET)' first."; \
 		exit 1; \

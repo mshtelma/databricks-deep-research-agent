@@ -24,6 +24,8 @@ class DataSourceType(StrEnum):
     - KNOWLEDGE_ASSISTANT: Domain expert Q&A
     - WEB_SEARCH: External web search (Brave)
     - UPLOADED_FILE: User-uploaded documents
+    - MCP_SERVER: Model Context Protocol server (managed / UC-connection / 3rd-party)
+    - SKILL: Progressive-disclosure capability pack (governed Markdown)
     - CUSTOM: Plugin-provided custom sources
     """
 
@@ -32,6 +34,8 @@ class DataSourceType(StrEnum):
     KNOWLEDGE_ASSISTANT = "knowledge_assistant"
     WEB_SEARCH = "web_search"
     UPLOADED_FILE = "uploaded_file"
+    MCP_SERVER = "mcp_server"
+    SKILL = "skill"
     CUSTOM = "custom"
 
 

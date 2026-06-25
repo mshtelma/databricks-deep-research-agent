@@ -20,7 +20,6 @@ from databricks_deep_research.agents.revision import (
     parse_reflection_output,
 )
 
-
 # ---------------------------------------------------------------------------
 # ReflectionDirective + ReflectionOutput defaulting
 # ---------------------------------------------------------------------------

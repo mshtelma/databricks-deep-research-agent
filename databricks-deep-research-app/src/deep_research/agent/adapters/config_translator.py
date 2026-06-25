@@ -341,33 +341,44 @@ def _build_synthesizer(config: OrchestrationConfig) -> WorkflowNode:
     # ------------------------------------------------------------------
     synthesis_mode = config.synthesis_mode
     verify_sources = config.verify_sources
-    enable_post_verification = config.enable_post_verification
 
-    # Determine effective mode — verify_sources=True implies reclaim
-    # for backward compatibility with the legacy toggle.
-    use_reclaim = synthesis_mode == "reclaim" or verify_sources
+    # Citations are ALWAYS produced via a grounded synthesis mode (the cheap
+    # "grounding-only" floor). ``verify_sources`` now controls ONLY the
+    # expensive per-claim NLI verification overlay — NOT whether citations
+    # exist:
+    #   verify on  → grounding_mode=reclaim        (cite + NLI verify + disposition)
+    #   verify off → grounding_mode=classical_lite (cite; skip NLI/correction/numeric)
+    # Both grounded modes use the strict-cite prompt and parse ``[N]`` markers;
+    # the framework synthesizer selects the prompt from ``grounding_mode``
+    # (set on the node config below — the source of truth for cite-vs-verify).
+    full_verify = synthesis_mode == "reclaim" or verify_sources
 
-    synth_schema: dict[str, Any] = {}
-    if use_reclaim:
-        synth_schema["synthesis_mode"] = "reclaim"
-        synth_schema["enable_citation_verification"] = True
-
-        # Post-verification stages (stages 4-6) are opt-in even in
-        # reclaim mode; they add claim-level verification after the
-        # initial citation-grounded synthesis.
-        if enable_post_verification:
-            synth_schema["enable_post_verification"] = True
-
-        logger.debug(
-            "SYNTHESIZER_RECLAIM_MODE enabled "
-            "(synthesis_mode=%s, verify_sources=%s, post_verify=%s)",
-            synthesis_mode,
-            verify_sources,
-            enable_post_verification,
-        )
+    # ``interleaved`` is the only generation strategy used here. The legacy
+    # ``synthesis_mode="reclaim"`` alias was an invalid SynthesisMode that
+    # silently fell back to interleaved; setting it explicitly drops that
+    # warning with no behavior change.
+    synth_schema: dict[str, Any] = {
+        "synthesis_mode": "interleaved",
+        "enable_citation_verification": True,
+    }
+    if full_verify:
+        synth_config["grounding_mode"] = "reclaim"
+        synth_schema["enable_isolated_verification"] = True
     else:
-        synth_schema["synthesis_mode"] = "simple"
-        synth_schema["enable_citation_verification"] = False
+        synth_config["grounding_mode"] = "classical_lite"
+        # Cheap grounding-only: generate + link + render citations, then skip
+        # the expensive verification overlay (Stage 4 NLI / 5 correction /
+        # 6 numeric) and Stage 8 disposition. Claims persist as resolvable-
+        # but-unverified (a normal clickable citation, no verdict).
+        synth_schema["enable_isolated_verification"] = False
+        synth_schema["enable_citation_correction"] = False
+        synth_schema["enable_numeric_qa_verification"] = False
+
+    logger.debug(
+        "SYNTHESIZER_GROUNDING_MODE grounding=%s verify_sources=%s",
+        synth_config["grounding_mode"],
+        verify_sources,
+    )
 
     # ------------------------------------------------------------------
     # Report limits → framework synthesizer
@@ -414,6 +425,26 @@ def _build_synthesizer(config: OrchestrationConfig) -> WorkflowNode:
         synth_config["user_prompt_template"] = config.structured_user_prompt
     if config.system_instructions and "system_prompt" not in synth_config:
         synth_config["system_prompt"] = config.system_instructions
+
+    # ------------------------------------------------------------------
+    # Per-run report-style knobs (tone + output language). Prompts-over-knobs:
+    # these reach the synthesizer's generation instructions via AgentNodeConfig.
+    # An unrecognized tone name degrades to unset (None) rather than raising.
+    # ------------------------------------------------------------------
+    if config.tone:
+        from databricks_deep_research.agents.config import Tone
+
+        resolved_tone = Tone.from_name(config.tone)
+        if resolved_tone is not None:
+            synth_config["tone"] = resolved_tone
+        else:
+            logger.warning(
+                "SYNTH_TONE_UNRECOGNIZED tone=%s (ignored; valid: %s)",
+                config.tone,
+                ", ".join(Tone.names()),
+            )
+    if config.output_language:
+        synth_config["output_language"] = config.output_language
 
     return WorkflowNode(
         id="synthesizer",

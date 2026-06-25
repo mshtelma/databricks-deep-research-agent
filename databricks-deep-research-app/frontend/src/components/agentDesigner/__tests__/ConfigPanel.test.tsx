@@ -26,6 +26,11 @@ vi.mock('@/api/agentDesigner', async (importOriginal) => {
       resources: [],
       total: 0,
     }),
+    getDesignerCapabilities: vi.fn().mockResolvedValue({
+      skill_scripts_global: false,
+      cross_session_memory_global: false,
+      live_search_global: false,
+    }),
     startDesignerSqlWarehouse: vi.fn().mockResolvedValue({
       kind: 'sql_warehouse',
       source_id: 'wh-default',
@@ -302,6 +307,65 @@ describe('ConfigPanel', () => {
     };
   }
 
+  it('fetches skills + mcp_servers discovery for an agent inspector (D1)', async () => {
+    vi.mocked(listDesignerResources).mockResolvedValueOnce({
+      resources: [
+        {
+          kind: 'skill',
+          source_id: 'market-research',
+          name: 'market-research',
+          full_name: null,
+          description: 'how to research',
+          status: null,
+          capabilities: [],
+          metadata: {},
+        },
+        {
+          kind: 'mcp_server',
+          source_id: 'weather',
+          name: 'weather',
+          full_name: null,
+          description: null,
+          status: null,
+          capabilities: [],
+          metadata: {},
+        },
+      ],
+      total: 2,
+    });
+    const agentNodeType = {
+      ...FIXTURE_REGISTRY.node_types[0]!,
+      config_schema: {
+        type: 'object',
+        properties: {
+          skills: { type: 'array', title: 'Skills', items: { type: 'string' } },
+          mcp_servers: {
+            type: 'array',
+            title: 'MCP Servers',
+            items: { type: 'string' },
+          },
+        },
+      },
+    };
+    const registry: RegistryResponse = {
+      ...FIXTURE_REGISTRY,
+      node_types: [agentNodeType, ...FIXTURE_REGISTRY.node_types.slice(1)],
+    };
+    useAgentEditorStore.setState({
+      ast: astWithWebSearch([]),
+      selectedPath: 'root.children.0',
+    });
+    renderWithQuery(<ConfigPanel registry={registry} />);
+    // The agent inspector fetches the two opt-in discovery kinds to populate the
+    // skills / mcp_servers dropdowns.
+    await waitFor(() =>
+      expect(vi.mocked(listDesignerResources)).toHaveBeenCalledWith([
+        'skill',
+        'mcp_server',
+      ]),
+    );
+  });
+
   it('edits a declared tool inline from the agent Tools tab', () => {
     useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
     const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateTool');
@@ -559,5 +623,55 @@ describe('ConfigPanel', () => {
     const lavaStar = container.querySelector('.text-db-lava-600');
     expect(lavaStar).toBeInTheDocument();
     expect(lavaStar?.textContent).toBe('*');
+  });
+
+  // Direction 1: Approvals is its own tab again (no longer folded into Tools).
+  it('renders the Approvals tab with timeout and broker for an agent', () => {
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /approvals/i }));
+
+    expect(screen.getByText('Approval timeout')).toBeInTheDocument();
+    expect(screen.getByText('Approval broker')).toBeInTheDocument();
+    expect(screen.getByText(/no gated tools bound/i)).toBeInTheDocument();
+  });
+
+  // Direction 1: discovered MCP servers render as expandable cards and bind at
+  // server granularity into config.mcp_servers (no per-tool checkboxes).
+  it('renders a discovered MCP server as a card and binds it at server granularity', async () => {
+    vi.mocked(listDesignerResources).mockResolvedValue({
+      resources: [
+        {
+          kind: 'mcp_server',
+          source_id: 'weather',
+          name: 'weather',
+          full_name: null,
+          description: null,
+          status: 'connected',
+          capabilities: [],
+          metadata: { url: 'https://mcp.example/weather' },
+        },
+      ],
+      total: 1,
+    });
+    useAgentEditorStore.setState({ ast: astWithWebSearch([]), selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByRole('button', { name: /tools/i }));
+
+    const bindBtn = await screen.findByRole('button', { name: /^bind weather$/i });
+    fireEvent.click(bindBtn);
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      'root.children.0',
+      expect.objectContaining({
+        config: expect.objectContaining({ mcp_servers: ['weather'] }),
+      }),
+    );
+    updateSpy.mockRestore();
+    // Restore the file-wide default mock so test ordering can't leak this server.
+    vi.mocked(listDesignerResources).mockResolvedValue({ resources: [], total: 0 });
   });
 });

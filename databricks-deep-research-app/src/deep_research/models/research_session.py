@@ -222,6 +222,14 @@ class ResearchSession(BaseModel):
         doc="JSONB blob containing claims and verification summary",
     )
 
+    # Value-free promotion trace captured at run completion (spec 6.1). NULL =
+    # "not promotable" (every legacy row + simple runs). See promotion_capture.py.
+    promotion_trace: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB,
+        nullable=True,
+        doc="Value-free ordered step/tool-shape trace for workflow promotion",
+    )
+
     # =====================================================================
     # Relationships
     # =====================================================================

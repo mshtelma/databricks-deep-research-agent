@@ -34,6 +34,19 @@ def select_discovered_sources(state: Any) -> list[Any]:
     return fallback if isinstance(fallback, list) else []
 
 
+def select_prior_sources(state: Any) -> list[Any]:
+    """Prior-turn sources the app explicitly staged for bounded pool seeding,
+    under the dedicated ``prior_sources_for_seed`` key.
+
+    Distinct from ``discovered_sources`` (this-run background investigator) and
+    from ``existing_sources`` (durable history for the appendix/retrieval tool —
+    NOT a seed instruction). Only ever a state key set by the app's read-path
+    builder, so there is no runtime-capability source to consult.
+    """
+    fallback = state.get("prior_sources_for_seed") if hasattr(state, "get") else None
+    return fallback if isinstance(fallback, list) else []
+
+
 def select_current_plan_title(state: Any) -> str:
     runtime = get_runtime(state)
     planning = getattr(runtime.capabilities, "planning", None) if runtime else None

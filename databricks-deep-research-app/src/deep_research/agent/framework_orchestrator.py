@@ -42,6 +42,7 @@ from databricks_deep_research.workflow.context import (
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
+    WorkflowNode,
 )
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
@@ -54,9 +55,17 @@ from deep_research.agent.adapters.domain_context import (
 from deep_research.agent.adapters.llm_adapter import create_framework_llm_client
 from deep_research.agent.adapters.tool_adapter import create_framework_tools
 from deep_research.agent.chat_title import derive_chat_title_from_query
+from deep_research.agent.followup import (
+    LiveSearchUnavailable,
+    TurnIntent,
+    decide_turn_intent,
+    stream_chat_about_results,
+    stream_live_search_answer,
+)
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
+from deep_research.agent.tools.search_chat_memory import SearchChatMemoryTool
 from deep_research.agent.workflow_runner_factory import build_app_workflow_runner
 from deep_research.core.tracing import safe_mlflow_run, safe_tool_span, safe_update_trace
 from deep_research.plugins.base import ContextEnricher
@@ -73,6 +82,7 @@ from deep_research.schemas.streaming import (
 )
 from deep_research.services._impl_factory import make_chat_memory_service, make_file_upload_service
 from deep_research.services._protocols import IChatMemoryService
+from deep_research.services.chat_memory_service import APPENDIX_AGENT_TYPE
 from deep_research.services.llm.client import LLMClient
 from deep_research.services.llm.embedder import DEFAULT_EMBEDDING_ENDPOINT
 from deep_research.services.research_event_buffer import EventBuffer
@@ -114,6 +124,256 @@ class MissingOBOTokenError(RuntimeError):
 # Regex matching [N] numeric citation markers produced by the framework synthesizer.
 # Captures the integer N.  Matches [1], [12], [1][2], etc.
 _NUMERIC_CITATION_RE = __import__("re").compile(r"\[(\d+)\]")
+
+
+def _resolve_turn_intent(config: OrchestrationConfig) -> TurnIntent:
+    """Resolve the requested per-turn routing for a custom-agent chat.
+
+    Back-compat: the legacy ``query_mode == "simple"`` selection on a
+    custom-agent chat historically meant "answer directly, don't run the full
+    workflow" — which the custom-agent path silently ignored. Treat it as an
+    explicit chat turn so that selection regains meaning. Otherwise honor the
+    explicit ``turn_intent`` (defaulting to AUTO on any unknown value).
+    """
+    raw = (getattr(config, "turn_intent", "auto") or "auto").lower()
+    # An explicit per-turn intent from the client (the chat UI's Auto/Chat/
+    # Research control — now surfaced in every mode for agent chats, not just
+    # Deep Research) wins over the legacy ``query_mode == "simple"`` → chat
+    # shorthand. So Simple + an explicit "research" re-runs the agent instead of
+    # being silently forced into a chat turn.
+    if raw in ("chat", "research"):
+        try:
+            return TurnIntent(raw)
+        except ValueError:
+            pass
+    # Back-compat: legacy clients that only sent ``query_mode`` used Simple on a
+    # custom-agent chat to mean "answer from gathered data, don't re-run".
+    if config.query_mode == "simple" and config.agent_id:
+        return TurnIntent.CHAT
+    try:
+        return TurnIntent(raw)
+    except ValueError:
+        return TurnIntent.AUTO
+
+
+def _definition_has_skills(definition: Any) -> bool:
+    """True if any agent node in the workflow declares attached skills.
+
+    Gates the (identity-lookup-touching) runtime skill-store build so skill-less
+    runs stay byte-identical: no ``current_user.me()`` call, no store wired.
+    """
+    stack = [definition.root]
+    while stack:
+        node = stack.pop()
+        cfg = getattr(node, "config", None)
+        if isinstance(cfg, dict) and cfg.get("skills"):
+            return True
+        stack.extend(getattr(node, "children", None) or [])
+    return False
+
+
+def _merge_chat_attachments(
+    definition: Any,
+    enabled_skills: list[str] | None,
+    enabled_mcp_servers: list[str] | None,
+) -> None:
+    """Merge chat-selected skills + MCP servers into *definition* in place (E1).
+
+    Skills are appended to every agent config (top-level agent nodes plus
+    plan_and_execute planner/evaluator/body agent dicts) so the runtime skill
+    store + ``read_skill`` pick them up. MCP server names become Databricks
+    UC-connection ``MCPServerConfig`` entries on ``definition.mcp_servers``
+    (deduped). No-op when both lists are empty => byte-identical to today.
+    """
+    def _walk_agent_configs(value: Any) -> list[dict[str, Any]]:
+        """Return mutable agent config dicts from raw configs or node-shaped dicts."""
+        configs: list[dict[str, Any]] = []
+
+        if isinstance(value, WorkflowNode):
+            configs.extend(_walk_agent_configs(value.config))
+            for child in value.children:
+                configs.extend(_walk_agent_configs(child))
+            return configs
+
+        if not isinstance(value, dict):
+            return configs
+
+        # Raw AgentNodeConfig shape.
+        if "subtype" in value:
+            configs.append(value)
+
+        # WorkflowNode dict shape: {"type": "agent", "config": {"subtype": ...}}.
+        nested_config = value.get("config")
+        if isinstance(nested_config, dict):
+            configs.extend(_walk_agent_configs(nested_config))
+
+            # Plan-and-execute config nested inside a node-shaped dict.
+            for nested_key in ("planner", "evaluator", "body"):
+                configs.extend(_walk_agent_configs(nested_config.get(nested_key)))
+
+        # Plan-and-execute config raw shape.
+        for nested_key in ("planner", "evaluator", "body"):
+            configs.extend(_walk_agent_configs(value.get(nested_key)))
+
+        for child in value.get("children") or []:
+            configs.extend(_walk_agent_configs(child))
+
+        return configs
+
+    def _iter_definition_agent_configs() -> list[dict[str, Any]]:
+        return _walk_agent_configs(definition.root)
+
+    if enabled_skills:
+
+        def _add_skills(agent_cfg: dict[str, Any]) -> None:
+            merged = list(agent_cfg.get("skills") or [])
+            for skill in enabled_skills:
+                if skill and skill not in merged:
+                    merged.append(skill)
+            agent_cfg["skills"] = merged
+
+        for agent_cfg in _iter_definition_agent_configs():
+            _add_skills(agent_cfg)
+
+    if enabled_mcp_servers:
+        from databricks_deep_research import MCPServerConfig
+
+        servers = list(definition.mcp_servers or [])
+        seen = {getattr(s, "name", None) for s in servers}
+        for name in enabled_mcp_servers:
+            if name and name not in seen:
+                servers.append(
+                    MCPServerConfig(
+                        name=name, client_kind="databricks", connection_name=name
+                    )
+                )
+                seen.add(name)
+        definition.mcp_servers = servers
+
+        # Bind the chat-attached servers to the RESEARCHER agents so the runtime
+        # MCP auto-attach (executor.maybe_attach_mcp) makes their tools callable.
+        # Scope = researcher lanes only (the agents that gather evidence via
+        # tools); synthesizer / reflector / coordinator stay clean. Designer-bound
+        # agents already carry their own ``config.mcp_servers`` at author time.
+        _attach_names = [n for n in enabled_mcp_servers if n]
+
+        def _add_mcp(agent_cfg: dict[str, Any]) -> None:
+            if str(agent_cfg.get("subtype", "")) != "researcher":
+                return
+            merged = list(agent_cfg.get("mcp_servers") or [])
+            for mcp_name in _attach_names:
+                if mcp_name not in merged:
+                    merged.append(mcp_name)
+            agent_cfg["mcp_servers"] = merged
+
+        for agent_cfg in _iter_definition_agent_configs():
+            _add_mcp(agent_cfg)
+
+
+def _stash_mcp_tools_by_server(
+    runner: Any,
+    tool_resolver: Any,
+    tools_by_server: dict[str, list[Any]],
+) -> None:
+    """Stash discovered MCP tools in every factory context used at execution.
+
+    ``ToolResolver`` intentionally shallow-copies ``ToolFactoryContext.extras``
+    at construction time to isolate resolver caches. MCP discovery happens
+    after resolver construction, so writing only to ``runner.factory_context``
+    leaves the resolver's copied context without ``_mcp_tools_by_server`` and
+    makes researcher auto-attach see zero tools.
+    """
+    for owner in (runner, tool_resolver):
+        factory_context = getattr(owner, "factory_context", None)
+        extras = getattr(factory_context, "extras", None)
+        if isinstance(extras, dict):
+            extras["_mcp_tools_by_server"] = tools_by_server
+
+
+async def _load_skill_folder_roots(
+    db: AsyncSession | None, user_id: str | None
+) -> list[str]:
+    """Return the user's registered skill-folder roots (A3); fail-soft to []."""
+    if not user_id:
+        return []
+    try:
+        from deep_research.services.skill_folder_store import load_user_skill_roots
+
+        if db is not None:
+            return await load_user_skill_roots(db, user_id)
+        from deep_research.db.session import get_session_maker
+
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            return await load_user_skill_roots(session, user_id)
+    except Exception:  # noqa: BLE001 — fail-soft; skills still work without extras
+        logger.warning(
+            "SKILL_FOLDER_ROOTS_UNAVAILABLE user=%s — continuing with built-in roots",
+            user_id,
+            exc_info=True,
+        )
+        return []
+
+
+async def _maybe_prepend_cross_session_memory(
+    conversation_history: list[dict[str, str]] | None,
+    config: OrchestrationConfig,
+    db: AsyncSession | None,
+    user_id: str | None,
+    chat_id: str | None,
+) -> list[dict[str, str]] | None:
+    """Prepend a spotlighted role=user cross-session-memory message when enabled.
+
+    Flag-gated (``cross_session_memory_enabled``, default OFF) and fully
+    fail-soft: returns ``conversation_history`` unchanged when the flag is off,
+    no session is available, or anything goes wrong. The injected message rides
+    the existing role=user channel (DeerFlow role-split — remembered facts are
+    untrusted DATA). The read itself is bounded + guarded inside
+    ``inject_cross_session_memory``; this wrapper additionally guards store
+    construction so a config/import problem can never break the run.
+    """
+    try:
+        from deep_research.core.config import get_settings as _get_settings_csm
+
+        _settings = _get_settings_csm()
+        # Per-run override (P2): config value wins when set; else inherit global.
+        _csm_enabled = config.enable_cross_session_memory
+        if _csm_enabled is None:
+            _csm_enabled = _settings.cross_session_memory_enabled
+        if not _csm_enabled or not user_id:
+            return conversation_history
+        # Default store is the legacy SQLAlchemy findings reader; without a
+        # session we degrade to no-memory (cached-path cross-chat read is a
+        # follow-up). Byte-identical to flag-off in that case.
+        if db is None:
+            return conversation_history
+
+        from deep_research.agent.cross_session_memory import (
+            ChatMemoryFindingsStore,
+            inject_cross_session_memory,
+        )
+
+        exclude_chat_id = _to_uuid(chat_id) if chat_id is not None else None
+        message = await inject_cross_session_memory(
+            store=ChatMemoryFindingsStore(db),
+            user_id=user_id,
+            agent_id=config.agent_id,
+            exclude_chat_id=exclude_chat_id,
+            min_confidence=_settings.cross_session_memory_min_confidence,
+            max_facts=_settings.cross_session_memory_max_facts,
+            timeout_seconds=_settings.cross_session_memory_timeout_sec,
+        )
+    except Exception:
+        # Fail-soft invariant: memory NEVER breaks a research run.
+        logger.exception(
+            "CROSS_SESSION_MEMORY_INJECT_GUARD_FAILED user_id=%s — continuing without memory",
+            user_id,
+        )
+        return conversation_history
+
+    if message is None:
+        return conversation_history
+    return [message, *(conversation_history or [])]
 
 
 def _resolve_workflow(
@@ -427,8 +687,17 @@ def _apply_source_scope_to_workflow_declarations(
         return workflow_def
 
     web_kinds = {"web_search", "web_crawl", "brave_search"}
-    enterprise_kinds = {"vector_search", "genie", "knowledge_assistant", "sql_analytics", "qa_assistant"}
+    enterprise_kinds = {
+        "vector_search",
+        "genie",
+        "knowledge_assistant",
+        "sql_analytics",
+        "qa_assistant",
+        "mcp",
+        "mcp_server",
+    }
     blocked_tool_names: set[str] = set()
+    blocked_mcp_server_names: set[str] = set()
     kept_declarations = []
     for tool in workflow_def.tools:
         kind = getattr(tool.kind, "value", str(tool.kind))
@@ -439,7 +708,18 @@ def _apply_source_scope_to_workflow_declarations(
             blocked_tool_names.add(tool.name)
             continue
         kept_declarations.append(tool)
-    if not blocked_tool_names:
+
+    if config.source_scope == "web_only":
+        mcp_servers = list(getattr(workflow_def, "mcp_servers", []) or [])
+        blocked_mcp_server_names = {
+            name
+            for server in mcp_servers
+            if (name := getattr(server, "name", None))
+        }
+        if blocked_mcp_server_names:
+            workflow_def.mcp_servers = []
+
+    if not blocked_tool_names and not blocked_mcp_server_names:
         return workflow_def
 
     workflow_def.tools = kept_declarations
@@ -452,12 +732,25 @@ def _apply_source_scope_to_workflow_declarations(
                 for tool in tools
                 if not (isinstance(tool, str) and tool in blocked_tool_names)
             ]
+        if blocked_mcp_server_names:
+            mcp_servers = agent_config.get("mcp_servers")
+            if isinstance(mcp_servers, list):
+                agent_config["mcp_servers"] = [
+                    server
+                    for server in mcp_servers
+                    if not (
+                        isinstance(server, str)
+                        and server in blocked_mcp_server_names
+                    )
+                ]
 
     _visit_workflow_agent_configs(workflow_def, filter_agent_tools)
     logger.info(
-        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s",
+        "FWK_WORKFLOW_SOURCE_SCOPE_APPLIED source_scope=%s blocked_tools=%s "
+        "blocked_mcp_servers=%s",
         config.source_scope,
         sorted(blocked_tool_names),
+        sorted(blocked_mcp_server_names),
     )
     return workflow_def
 
@@ -565,8 +858,26 @@ async def stream_workflow_via_framework(
     from deep_research.agent.orchestration_config import (
         get_default_orchestration_config,
     )
+    from deep_research.agent.utils.conversation import normalize_history_roles
 
     config = config or get_default_orchestration_config()
+    # Translate the app's internal "agent" role to OpenAI's "assistant" at the
+    # app→framework boundary (source-side prevention; the framework also
+    # normalizes at message assembly). Covers main-chat and ChatAgent serving,
+    # since both funnel through this entry point. Idempotent.
+    conversation_history = normalize_history_roles(conversation_history)
+
+    # Cross-session memory READ path (spec §4.1, flag-gated, default OFF).
+    # Recall durable (user_id, agent_id)-keyed facts from prior sessions and
+    # prepend them as a spotlighted role=user message so the agent sees earlier
+    # corrections/preferences. Fail-soft + hard-timeout: the helper NEVER raises
+    # and NEVER blocks — any backend error / slow read degrades to no-memory, so
+    # flag-off (and any failure) is byte-identical to today. Runs before wf_state
+    # is built so the message rides the existing role=user conversation channel.
+    conversation_history = await _maybe_prepend_cross_session_memory(
+        conversation_history, config, db, user_id, chat_id,
+    )
+
     start_time = time.perf_counter()
     event_buffer: EventBuffer | None = None
     steps_executed = 0
@@ -758,6 +1069,198 @@ async def stream_workflow_via_framework(
                                     plugin_label,
                                 )
 
+                # -- Follow-up chat gate (custom-agent chats with prior research) --
+                # Route a new message in a custom-agent chat by intent: a
+                # conversational follow-up answerable from data already gathered
+                # is answered directly (no expensive re-run of the agent's
+                # workflow). Runs BEFORE workflow resolution + the OBO fail-closed
+                # check, so a chat turn needs neither the agent's Databricks tools
+                # nor an OBO token. Flag-off / no agent_id / no prior research all
+                # fall through unchanged to the workflow path below.
+                from deep_research.core.config import (
+                    get_settings as _get_settings_followup,
+                )
+
+                # Cheap guards first so non-agent / non-chat turns short-circuit
+                # BEFORE constructing Settings() (which can raise without env).
+                _followup_settings = (
+                    _get_settings_followup()
+                    if (config.agent_id and chat_id is not None)
+                    else None
+                )
+                if (
+                    _followup_settings is not None
+                    and _followup_settings.followup_chat_gate_enabled
+                ):
+                    # ``_followup_settings is not None`` already implies
+                    # ``chat_id is not None`` (see its guard above); bind a
+                    # narrowed local so the followup stream helpers type-check.
+                    assert chat_id is not None
+                    _followup_chat_id: str = chat_id
+                    _existing_for_gate = await _load_existing_sources(
+                        storage_stack, db, chat_id,
+                    )
+                    if _existing_for_gate:
+                        _followup_findings = ""
+                        if chat_memory is not None:
+                            _followup_findings = (
+                                chat_memory.render_appendix_block(
+                                    agent_type=APPENDIX_AGENT_TYPE,
+                                )
+                                or ""
+                            )
+                        _turn_decision = await decide_turn_intent(
+                            query=query,
+                            conversation_history=conversation_history,
+                            prior_findings_summary=_followup_findings,
+                            has_prior_research=True,
+                            requested=_resolve_turn_intent(config),
+                            llm=llm,
+                            allow_live_search=(
+                                config.allow_live_search
+                                if config.allow_live_search is not None
+                                else _followup_settings.followup_live_search_enabled
+                            ),
+                        )
+                        logger.info(
+                            "FWK_FOLLOWUP_GATE route=%s turn_intent=%s "
+                            "query_mode=%s agent_id=%s reason=%s",
+                            _turn_decision.route,
+                            config.turn_intent,
+                            config.query_mode,
+                            config.agent_id,
+                            _turn_decision.reasoning[:200],
+                        )
+                        if _turn_decision.route == "live_search":
+                            # Bounded live-web-search escape hatch (spec §4.7).
+                            # Build the provider-selected search client (reuses the
+                            # configured backend + per-agent domain filter), run a
+                            # small capped search, and answer from the fresh
+                            # sources. On graceful fallback (no usable result) the
+                            # code falls THROUGH to the normal research path below.
+                            from deep_research.agent.adapters.tool_adapter import (
+                                _build_web_search_client,
+                            )
+                            from deep_research.core.app_config import (
+                                get_app_config as _get_app_cfg_ls,
+                            )
+
+                            _ls_search_cfg = _get_app_cfg_ls().search
+                            _ls_client = _build_web_search_client(
+                                search_provider=_ls_search_cfg.provider,
+                                brave_client=brave_client,
+                                domain_filter_config=config.domain_filter,
+                                llm_client=framework_llm,
+                                databricks_search_cfg=_ls_search_cfg.databricks,
+                            )
+                            _ls_chunks: list[str] = []
+                            _ls_fell_back = False
+                            async for _ls_evt in stream_live_search_answer(
+                                query=query,
+                                conversation_history=conversation_history,
+                                chat_id=_followup_chat_id,
+                                llm=llm,
+                                web_search_client=_ls_client,
+                                max_results=(
+                                    _followup_settings.followup_live_search_max_results
+                                ),
+                                timeout_seconds=(
+                                    _followup_settings.followup_live_search_timeout_sec
+                                ),
+                                prior_findings_summary=_followup_findings,
+                            ):
+                                if isinstance(_ls_evt, LiveSearchUnavailable):
+                                    _ls_fell_back = True
+                                    logger.info(
+                                        "FWK_FOLLOWUP_LIVE_SEARCH_FALLBACK "
+                                        "chat_id=%s reason=%s",
+                                        chat_id,
+                                        _ls_evt.reason,
+                                    )
+                                    break
+                                if isinstance(_ls_evt, SynthesisProgressEvent):
+                                    _ls_chunks.append(_ls_evt.content_chunk)
+                                yield _ls_evt
+                            if not _ls_fell_back:
+                                _ls_answer = "".join(_ls_chunks)
+                                await _persist_simple_response(
+                                    config,
+                                    db,
+                                    chat_id,
+                                    user_id,
+                                    query,
+                                    _ls_answer,
+                                    event_buffer,
+                                    storage_stack=storage_stack,
+                                )
+                                if config.message_id is not None:
+                                    persistence_evt = PersistenceCompletedEvent(
+                                        chat_id=str(chat_id),
+                                        message_id=str(config.message_id),
+                                        research_session_id=None,
+                                        chat_title=derive_chat_title_from_query(
+                                            query
+                                        ),
+                                        was_draft=config.is_draft,
+                                        counts={"messages": 1},
+                                    )
+                                    yield persistence_evt
+                                    await _buffer_event(persistence_evt, event_buffer)
+                                    await _flush_event_buffer(event_buffer)
+                                logger.info(
+                                    "FWK_FOLLOWUP_LIVE_SEARCH_DONE chat_id=%s "
+                                    "answer_len=%d",
+                                    chat_id,
+                                    len(_ls_answer),
+                                )
+                                return
+                            # else: fall through to the normal research path.
+                        if _turn_decision.route == "chat":
+                            _followup_chunks: list[str] = []
+                            async for _followup_evt in stream_chat_about_results(
+                                query=query,
+                                conversation_history=conversation_history,
+                                chat_id=_followup_chat_id,
+                                db=db,
+                                llm=llm,
+                                prior_findings_summary=_followup_findings,
+                                storage_stack=storage_stack,
+                            ):
+                                if isinstance(_followup_evt, SynthesisProgressEvent):
+                                    _followup_chunks.append(
+                                        _followup_evt.content_chunk
+                                    )
+                                yield _followup_evt
+                            _followup_answer = "".join(_followup_chunks)
+                            await _persist_simple_response(
+                                config,
+                                db,
+                                chat_id,
+                                user_id,
+                                query,
+                                _followup_answer,
+                                event_buffer,
+                                storage_stack=storage_stack,
+                            )
+                            if config.message_id is not None:
+                                persistence_evt = PersistenceCompletedEvent(
+                                    chat_id=str(chat_id),
+                                    message_id=str(config.message_id),
+                                    research_session_id=None,
+                                    chat_title=derive_chat_title_from_query(query),
+                                    was_draft=config.is_draft,
+                                    counts={"messages": 1},
+                                )
+                                yield persistence_evt
+                                await _buffer_event(persistence_evt, event_buffer)
+                                await _flush_event_buffer(event_buffer)
+                            logger.info(
+                                "FWK_FOLLOWUP_CHAT_DONE chat_id=%s answer_len=%d",
+                                chat_id,
+                                len(_followup_answer),
+                            )
+                            return
+
                 logger.info(
                     "FWK_TOOL_CREATION domain_filter=%s domain_filter_type=%s",
                     config.domain_filter,
@@ -792,17 +1295,19 @@ async def stream_workflow_via_framework(
                 # Silent no-op when nothing is attached — preserves baseline
                 # tool list for workflows without files.
                 if chat_memory is not None and not chat_memory.snapshot().empty:
+                    from deep_research.core.config import get_settings as _gs2
+
                     _existing_tool_names = {t.definition.name for t in framework_tools}
-                    _chat_mem_tools: list[Any] = [
-                        ListAttachedFilesTool(chat_memory),
-                        GetFileEntitiesTool(chat_memory),
-                    ]
+                    _rfus = None
                     if db is not None or storage_stack is not None:
-                        from deep_research.core.config import get_settings as _gs2
                         _rfus = make_file_upload_service(_gs2(), storage_stack, session=db)
-                        _chat_mem_tools.append(
-                            ReadAttachedFileTool(chat_memory, _rfus)
-                        )
+                    # search_chat_memory exposed only under CHAT_MEMORY_UNIFIED
+                    # (Phase 2c) — flag-off keeps the baseline tool list.
+                    _chat_mem_tools: list[Any] = _build_chat_memory_tools(
+                        chat_memory,
+                        file_service=_rfus,
+                        include_search=_gs2().chat_memory_unified,
+                    )
                     for _cmt in _chat_mem_tools:
                         if _cmt.definition.name not in _existing_tool_names:
                             framework_tools.append(_cmt)
@@ -865,7 +1370,8 @@ async def stream_workflow_via_framework(
                 if config.source_scope == "enterprise_only":
                     web_names = {"web_search", "web_crawl"}
                     enterprise_names = [n for n in tool_names if n not in web_names]
-                    if not enterprise_names:
+                    has_mcp_attachments = bool(getattr(config, "enabled_mcp_servers", None))
+                    if not enterprise_names and not has_mcp_attachments:
                         logger.error(
                             "FWK_NO_ENTERPRISE_TOOLS source_scope=enterprise_only "
                             "tool_names=%s — research will proceed with no enterprise data",
@@ -889,6 +1395,15 @@ async def stream_workflow_via_framework(
                     "FWK_WORKFLOW_TRANSLATED workflow_id=%s tool_names=%s",
                     workflow_def.id,
                     tool_names,
+                )
+
+                # Merge chat-attached skills + MCP servers (E1) into the workflow
+                # BEFORE the OBO preflight, so a chat-attached Databricks MCP server
+                # also fails closed without a token.
+                _merge_chat_attachments(
+                    workflow_def,
+                    getattr(config, "enabled_skills", None),
+                    getattr(config, "enabled_mcp_servers", None),
                 )
 
                 # Build the shared WorkflowRunner (single execution code path
@@ -927,8 +1442,11 @@ async def stream_workflow_via_framework(
                         "API directly."
                     )
 
+                _has_skills = _definition_has_skills(workflow_def) or bool(
+                    getattr(config, "enabled_skills", None)
+                )
                 _ws_client = None
-                if workflow_def.tools:
+                if workflow_def.tools or workflow_def.mcp_servers or _has_skills:
                     try:
                         from deep_research.core.auth import get_workspace_client
 
@@ -944,10 +1462,41 @@ async def stream_workflow_via_framework(
                             str(exc)[:200],
                         )
 
+                # Runtime skill store (Feature 2.2) — built ONLY when an agent
+                # declares skills, so skill-less runs avoid the identity lookup and
+                # stay byte-identical. Spans workspace-FS (OBO) + bundled seeds;
+                # Lakebase-at-runtime + per-user folders are threaded later (A3/C1).
+                _skill_store = None
+                _skill_scripts_enabled = False
+                if _has_skills:
+                    from deep_research.core.app_config import get_app_config
+                    from deep_research.services.skill_runtime import (
+                        build_runtime_skill_store,
+                    )
+
+                    # User-registered skill-folder roots (A3) extend the built-in
+                    # workspace-FS roots. Fail-soft: a folder-store error must not
+                    # break a run that merely declared skills.
+                    _skill_roots = await _load_skill_folder_roots(db, user_id)
+
+                    _skill_store = build_runtime_skill_store(
+                        llm_client=framework_llm,
+                        workspace_client=_ws_client,
+                        user_token=config.user_token,
+                        extra_roots=_skill_roots or None,
+                    )
+                    # Global half of the skill-script gate (A2). ANDed per-agent
+                    # in the framework auto-attach with ``allow_skill_scripts``.
+                    _skill_scripts_enabled = bool(
+                        get_app_config().skills.allow_script_execution
+                    )
+
                 runner = build_app_workflow_runner(
                     llm_client=framework_llm,
                     workspace_client=_ws_client,
                     user_token=config.user_token,
+                    skill_store=_skill_store,
+                    skill_scripts_enabled=_skill_scripts_enabled,
                 )
 
                 # Build ToolResolver with YAML declarations + factories so
@@ -986,6 +1535,67 @@ async def stream_workflow_via_framework(
                         continue
                     tool_resolver.override(tool.definition.name, tool)
 
+                # MCP toolset injection (spec §4.3) — mirrors the per-agent
+                # domain_filter runtime-override route above. Build one toolset
+                # per configured server PER-REQUEST with OBO identity (never the
+                # SP), discover its tools, and override the resolver for each so
+                # they shadow any like-named declaration. Citeable MCP results
+                # flow through admission to the pool (the §4.3 #11 fix lives in
+                # the framework's _MCPTool source_kind). Absent mcp_servers =>
+                # no-op (byte-identical default).
+                _mcp_servers = list(getattr(workflow_def, "mcp_servers", []) or [])
+                if _mcp_servers:
+                    from deep_research.agent.adapters.mcp_adapter import (
+                        build_mcp_toolsets,
+                    )
+
+                    # Build off the request event loop: MCP discovery calls the
+                    # Databricks MCP client's synchronous ``list_tools()``, which
+                    # bridges to an async ``_get_tools_async`` via its OWN event
+                    # loop. Called inline here it collides with THIS running loop
+                    # (RuntimeError → every server skipped, tools=0, with a
+                    # "coroutine never awaited" warning). ``asyncio.to_thread``
+                    # runs the whole build on a worker thread with no live loop.
+                    _mcp_toolsets = await asyncio.to_thread(
+                        build_mcp_toolsets,
+                        _mcp_servers,
+                        sp_client=_ws_client,
+                        user_token=config.user_token,
+                    )
+                    # Map each built toolset back to its server name so the
+                    # executor can attach a server's tools to the agents that
+                    # bind it via ``config.mcp_servers`` (maybe_attach_mcp). The
+                    # resolver override keeps the tools resolvable by name; the
+                    # by-server map is what actually reaches the researcher agents.
+                    _mcp_tools_by_server: dict[str, list[Any]] = {}
+                    _mcp_injected = 0
+                    for _toolset in _mcp_toolsets:
+                        _server_tools = list(_toolset.tools)
+                        _mcp_tools_by_server.setdefault(
+                            _toolset.source_label, []
+                        ).extend(_server_tools)
+                        for _mcp_tool in _server_tools:
+                            tool_resolver.override(
+                                _mcp_tool.definition.name, _mcp_tool
+                            )
+                            _mcp_injected += 1
+                    # Stash on both the runner context and the resolver's copied
+                    # context. ToolResolver deliberately copies extras at
+                    # construction time for cache isolation, so late MCP discovery
+                    # must be written to the resolver context explicitly.
+                    _stash_mcp_tools_by_server(runner, tool_resolver, _mcp_tools_by_server)
+                    # skipped = servers that failed to build (SSRF / MCPConfigError
+                    # / missing mcp packages) — surfaced so an attached-but-unused
+                    # server is never silently dropped.
+                    _mcp_skipped = len(_mcp_servers) - len(_mcp_tools_by_server)
+                    logger.info(
+                        "FWK_MCP_INJECTED servers=%d tools=%d skipped=%d obo=%s",
+                        len(_mcp_servers),
+                        _mcp_injected,
+                        _mcp_skipped,
+                        bool(config.user_token),
+                    )
+
                 # Pre-execution guard — fail before LLM tokens are spent.
                 # Layer 3 of the layered tool-context validation: if a declared
                 # tool's factory cannot construct it (e.g. ``schema_cache`` is
@@ -996,6 +1606,13 @@ async def stream_workflow_via_framework(
                 await tool_resolver.validate_all()
 
                 tracker = DomainContextTracker()
+                from deep_research.agent.promotion_capture import (
+                    PromotionTraceCollector,
+                )
+
+                promotion_collector = PromotionTraceCollector(
+                    run_id=str(config.research_session_id or ""),
+                )
 
                 wf_state = WorkflowState(query=query)
                 if conversation_history:
@@ -1014,14 +1631,36 @@ async def stream_workflow_via_framework(
                     storage_stack, db, chat_id,
                 )
                 if existing_sources:
+                    # Durable history (feeds appendix/retrieval) — unchanged.
                     wf_state.append("init", "existing_sources", existing_sources)
+                    # Read-path (Phase 2b): stage a bounded, canonical, citable
+                    # seed under a DEDICATED key and flip the framework's
+                    # run-start seed flag. Gated by CHAT_MEMORY_UNIFIED so
+                    # flag-off behaviour is byte-identical.
+                    from deep_research.core.config import get_settings as _gs_seed
+
+                    if _gs_seed().chat_memory_unified:
+                        _seed = _build_prior_source_seed(existing_sources, query, top_k=20)
+                        if _seed:
+                            wf_state.append("init", "prior_sources_for_seed", _seed)
+                            wf_state.append("init", "seed_prior_sources", True)
+                            logger.info(
+                                "PRIOR_SOURCES_SEED_STAGED chat_id=%s seed=%d of %d",
+                                chat_id,
+                                len(_seed),
+                                len(existing_sources),
+                            )
 
                 # Seed chat-memory appendix for universal system-prompt
                 # injection (reserved key consumed by harness._build_input).
                 # Empty when memory is empty → no-op, backward-compat
                 # preserved (golden-file regression test covers this).
                 if chat_memory is not None:
-                    _appendix = chat_memory.render_appendix_block(agent_type="coordinator")
+                    # Render for the union agent type so the single shared
+                    # appendix key (injected into every node by the harness)
+                    # carries findings + coverage + entities, not just the
+                    # coordinator subset. See APPENDIX_AGENT_TYPE.
+                    _appendix = chat_memory.render_appendix_block(agent_type=APPENDIX_AGENT_TYPE)
                     if _appendix:
                         wf_state.append(
                             "init",
@@ -1045,8 +1684,26 @@ async def stream_workflow_via_framework(
                             context=context,
                             strict_tool_resolution=True,
                         ):
-                            # Detect simple query short-circuit (Step 2)
-                            if isinstance(fw_event, CoordinatorClassifiedEvent) and fw_event.is_simple and fw_event.direct_response:
+                            # Capture the run's observed behavior for promotion
+                            # (spec 6.1). Fail-soft; never affects the stream.
+                            promotion_collector.observe(fw_event)
+                            # Detect simple query short-circuit (Step 2).
+                            #
+                            # Honor the coordinator's direct-answer short-circuit
+                            # ONLY in Simple mode. Web Search / Deep Research run a
+                            # real researcher + synthesizer that produce the
+                            # authoritative report; a classifier ``direct_response``
+                            # in those modes is often a premature decline ("I can't
+                            # get real-time data, use <service>") and must NEVER
+                            # pre-empt and discard the report the pipeline goes on to
+                            # produce. (Diagnosed: backend produced a correct cited
+                            # answer but the user only ever saw the classifier decline.)
+                            if (
+                                config.query_mode == "simple"
+                                and isinstance(fw_event, CoordinatorClassifiedEvent)
+                                and fw_event.is_simple
+                                and fw_event.direct_response
+                            ):
                                 simple_response = fw_event.direct_response
                                 # Yield the direct response as synthesis chunks
                                 yield SynthesisStartedEvent(
@@ -1065,7 +1722,8 @@ async def stream_workflow_via_framework(
                                 # Skip remaining workflow events for simple mode
                                 continue
 
-                            # Skip remaining events after simple response detected
+                            # Skip remaining events after a simple response was
+                            # captured (only set above, i.e. only in Simple mode).
                             if simple_response is not None:
                                 continue
 
@@ -1200,6 +1858,88 @@ async def stream_workflow_via_framework(
 
             # -- 5. Session completion --
 
+            # Simple-mode auto-escalation to Web Search.
+            # The Simple workflow is coordinator-only and writes a report only
+            # when the coordinator returns a direct answer (is_simple=True). When
+            # it declines — e.g. a current-events query it judges needs research —
+            # ``simple_response`` is None and no node wrote a report, which used to
+            # trip ``FWK_PERSISTENCE_GUARD_FAILED`` and hard-fail the run ("nothing
+            # happens"). Instead, fall forward to a bounded live web-search answer
+            # (the same helper as the follow-up live-search hatch) so Simple never
+            # dead-ends. Truly-simple queries keep the fast direct path above.
+            if (
+                config.query_mode == "simple"
+                and simple_response is None
+                and not final_report
+            ):
+                logger.info(
+                    "FWK_SIMPLE_ESCALATE_WEB chat_id=%s — coordinator declined a "
+                    "direct answer; escalating to a bounded web search",
+                    chat_id,
+                )
+                from deep_research.agent.adapters.tool_adapter import (
+                    _build_web_search_client,
+                )
+                from deep_research.core.app_config import (
+                    get_app_config as _get_app_cfg_esc,
+                )
+
+                _esc_max_results = 5
+                _esc_timeout = 20
+                try:
+                    from deep_research.core.config import (
+                        get_settings as _get_settings_esc,
+                    )
+
+                    _esc_settings = _get_settings_esc()
+                    _esc_max_results = _esc_settings.followup_live_search_max_results
+                    _esc_timeout = _esc_settings.followup_live_search_timeout_sec
+                except Exception:
+                    pass  # bounded literals are a safe fallback
+
+                _esc_search_cfg = _get_app_cfg_esc().search
+                _esc_client = _build_web_search_client(
+                    search_provider=_esc_search_cfg.provider,
+                    brave_client=brave_client,
+                    domain_filter_config=config.domain_filter,
+                    llm_client=framework_llm,
+                    databricks_search_cfg=_esc_search_cfg.databricks,
+                )
+                _esc_chunks: list[str] = []
+                _esc_unavailable = False
+                async for _esc_evt in stream_live_search_answer(
+                    query=query,
+                    conversation_history=conversation_history,
+                    chat_id=str(chat_id) if chat_id is not None else "",
+                    llm=llm,
+                    web_search_client=_esc_client,
+                    max_results=_esc_max_results,
+                    timeout_seconds=_esc_timeout,
+                    prior_findings_summary="",
+                ):
+                    if isinstance(_esc_evt, LiveSearchUnavailable):
+                        _esc_unavailable = True
+                        logger.info(
+                            "FWK_SIMPLE_ESCALATE_UNAVAILABLE chat_id=%s reason=%s",
+                            chat_id,
+                            _esc_evt.reason,
+                        )
+                        break
+                    if isinstance(_esc_evt, SynthesisProgressEvent):
+                        _esc_chunks.append(_esc_evt.content_chunk)
+                    yield _esc_evt
+                _esc_answer = "".join(_esc_chunks).strip()
+                if not _esc_unavailable and _esc_answer:
+                    # Persist via the existing simple-response path below.
+                    simple_response = _esc_answer
+                else:
+                    # Never hard-fail: a short graceful note beats a dead run.
+                    simple_response = (
+                        "I couldn't pull live web results for this just now. "
+                        "Try **Web Search** or **Deep Research** for a fuller, "
+                        "sourced answer."
+                    )
+
             # Simple mode persistence (Step 2)
             if simple_response is not None:
                 final_report = simple_response
@@ -1214,7 +1954,7 @@ async def stream_workflow_via_framework(
                     and chat_id is not None
                 ):
                     chat_title = derive_chat_title_from_query(query)
-                    yield PersistenceCompletedEvent(
+                    persistence_evt = PersistenceCompletedEvent(
                         chat_id=str(chat_id),
                         message_id=str(config.message_id),
                         research_session_id=None,
@@ -1222,6 +1962,9 @@ async def stream_workflow_via_framework(
                         was_draft=config.is_draft,
                         counts={"messages": 1},
                     )
+                    yield persistence_evt
+                    await _buffer_event(persistence_evt, event_buffer)
+                    await _flush_event_buffer(event_buffer)
             else:
                 # Full research persistence
                 if event_buffer:
@@ -1283,10 +2026,11 @@ async def stream_workflow_via_framework(
                         claims=extracted_claims,
                         verification_summary=effective_summary,
                         storage_stack=storage_stack,
+                        promotion_trace=promotion_collector.build(query_shape=query),
                     )
                     if counts:
                         chat_title = derive_chat_title_from_query(query)
-                        yield PersistenceCompletedEvent(
+                        persistence_evt = PersistenceCompletedEvent(
                             chat_id=str(chat_id_uuid),
                             message_id=str(config.message_id),
                             research_session_id=str(config.research_session_id),
@@ -1294,6 +2038,9 @@ async def stream_workflow_via_framework(
                             was_draft=config.is_draft,
                             counts=counts,
                         )
+                        yield persistence_evt
+                        await _buffer_event(persistence_evt, event_buffer)
+                        await _flush_event_buffer(event_buffer)
                 else:
                     logger.warning(
                         "FWK_PERSISTENCE_GUARD_FAILED "
@@ -1356,7 +2103,7 @@ async def stream_workflow_via_framework(
     # 6. Final completion event (always emitted)
     # ------------------------------------------------------------------
     total_duration_ms = int((time.perf_counter() - start_time) * 1000)
-    yield ResearchCompletedEvent(
+    completed_evt = ResearchCompletedEvent(
         session_id=session_id or uuid4(),
         total_steps_executed=steps_executed,
         total_steps_skipped=steps_skipped,
@@ -1365,6 +2112,9 @@ async def stream_workflow_via_framework(
         final_report=final_report,
         structured_output=structured_output,
     )
+    yield completed_evt
+    await _buffer_event(completed_evt, event_buffer)
+    await _flush_event_buffer(event_buffer)
 
 
 async def stream_research_via_framework(
@@ -1600,6 +2350,16 @@ async def _buffer_event(
             await buffer.add_event(event)
 
 
+async def _flush_event_buffer(buffer: EventBuffer | None) -> None:
+    """Flush buffered terminal events without failing the research response."""
+    if not buffer:
+        return
+    try:
+        await buffer.flush()
+    except Exception as e:
+        logger.warning("FWK_EVENT_BUFFER_FLUSH_FAILED error=%s", str(e)[:200])
+
+
 async def _resolve_uploaded_file_ids(
     config: OrchestrationConfig,
     db: Any,
@@ -1704,6 +2464,80 @@ async def _load_file_search_tool(
             )
 
     return None
+
+
+def _build_chat_memory_tools(
+    chat_memory: Any,
+    *,
+    file_service: Any = None,
+    include_search: bool = False,
+) -> list[Any]:
+    """Build the chat-memory tool set exposed to agents.
+
+    Always includes the attached-file tools (list/entities). Adds
+    ``read_attached_file`` when a file service is available, and
+    ``search_chat_memory`` (Phase 2c) when ``include_search`` is set (the
+    orchestrator passes ``CHAT_MEMORY_UNIFIED``). Pure + side-effect-free so the
+    registration policy is unit-testable without the full orchestrator.
+    """
+    tools: list[Any] = [
+        ListAttachedFilesTool(chat_memory),
+        GetFileEntitiesTool(chat_memory),
+    ]
+    if file_service is not None:
+        tools.append(ReadAttachedFileTool(chat_memory, file_service))
+    if include_search:
+        tools.append(SearchChatMemoryTool(chat_memory))
+    return tools
+
+
+def _build_prior_source_seed(
+    sources: list[dict[str, Any]],
+    query: str,
+    *,
+    top_k: int = 20,
+) -> list[dict[str, Any]]:
+    """Bounded, canonical, citable, query-ranked seed for follow-up pool seeding.
+
+    Distinct from ``existing_sources`` (full durable history). Per Codex review:
+    - canonicalizes + dedups by canonical URL (Phase-1 ``canonicalize_url``) so
+      tracking-param variants don't crowd the pool (§7);
+    - requires an evidence body (``content``/``snippet``) — citable-snapshot
+      guard (§2);
+    - ADAPTIVE K: when any record overlaps the current query, keep only those
+      (a weakly-related follow-up seeds fewer); else fall back to all citable
+      records so the follow-up isn't starved; bounded by ``top_k``.
+
+    Stamps ``evidence_quality="cached"`` on every record (2b-0 gate result): a
+    bare record is normalized to ``evidence_quality=""`` and rejected by the
+    synthesizer's ``source_is_substantive`` despite carrying text; ``"cached"``
+    is in the substantive set and is semantically exact for a prior-turn source.
+    The pool's hybrid index re-ranks downstream; this is a coarse pre-filter.
+    """
+    from deep_research.agent.url_canonical import canonicalize_url
+
+    q_terms = {t for t in query.casefold().split() if len(t) > 2}
+
+    def _overlap(s: dict[str, Any]) -> int:
+        text = f"{s.get('title') or ''} {s.get('snippet') or ''}".casefold()
+        return sum(1 for t in q_terms if t in text) if q_terms else 0
+
+    seen: set[str] = set()
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for s in sources:
+        url = str(s.get("url") or "")
+        if not url or not (s.get("content") or s.get("snippet")):
+            continue
+        canon = canonicalize_url(url)
+        if canon in seen:
+            continue
+        seen.add(canon)
+        scored.append((_overlap(s), {**s, "url": canon, "evidence_quality": "cached"}))
+
+    positives = [item for score, item in scored if score > 0]
+    candidates = positives if positives else [item for _score, item in scored]
+    candidates.sort(key=_overlap, reverse=True)
+    return candidates[:top_k]
 
 
 async def _load_existing_sources(
@@ -1876,12 +2710,23 @@ async def _load_enterprise_tools(
         return tools
 
     disabled_source_ids = set(config.disabled_sources or [])
+    has_explicit_source_selection = config.enabled_sources is not None
     selected_source_ids = [
         source_id
         for source_id in (config.enabled_sources or [])
         if _is_enterprise_source_id(source_id) and source_id not in disabled_source_ids
     ]
     remaining_source_ids = list(selected_source_ids)
+
+    if has_explicit_source_selection and not selected_source_ids:
+        logger.info(
+            "FWK_ENTERPRISE_TOOLS_EMPTY_SELECTION source_scope=%s enabled_sources=%s "
+            "disabled_sources=%s",
+            config.source_scope,
+            config.enabled_sources,
+            config.disabled_sources,
+        )
+        return tools
 
     try:
         if (db is not None or storage_stack is not None) and user_id:
@@ -2001,7 +2846,11 @@ async def _load_enterprise_tools(
         [tool.definition.name for tool in tools if hasattr(tool, "definition")],
     )
 
-    if config.source_scope == "enterprise_only" and not tools:
+    if (
+        config.source_scope == "enterprise_only"
+        and not tools
+        and not getattr(config, "enabled_mcp_servers", None)
+    ):
         logger.error(
             "FWK_ENTERPRISE_TOOLS_REQUIRED_BUT_EMPTY source_scope=%s "
             "enabled_sources=%s — enterprise_only mode has no tools",
@@ -2039,13 +2888,14 @@ async def _persist_simple_response(
         return
 
     from deep_research.agent.persistence import (
+        persist_research_session_completed_independent,
         persist_simple_message_independent,
         persist_simple_message_update_independent,
     )
 
-    try:
-        chat_id_uuid = _to_uuid(chat_id)
+    chat_id_uuid = _to_uuid(chat_id)
 
+    try:
         if config.session_pre_created:
             await asyncio.shield(
                 persist_simple_message_update_independent(
@@ -2078,6 +2928,34 @@ async def _persist_simple_response(
             "FWK_SIMPLE_PERSISTENCE_FAILED error=%s",
             str(e)[:200],
         )
+
+    # Transition the pre-created research session to COMPLETED. JobManager
+    # creates the session at submit time (status=in_progress) for *every* job;
+    # without this, a simple-classified query persists its answer but leaves the
+    # session in_progress, so JobManager's end-of-stream check force-fails it
+    # ("persistence_transition_missing") and the UI shows "research failed".
+    # Kept in its own try so a status-transition failure never masks the
+    # already-persisted answer message above.
+    if config.research_session_id is not None:
+        try:
+            await asyncio.shield(
+                persist_research_session_completed_independent(
+                    research_session_id=config.research_session_id,
+                    storage_stack=storage_stack,
+                    chat_id=chat_id_uuid,
+                )
+            )
+            logger.info(
+                "FWK_SIMPLE_SESSION_COMPLETED research_session_id=%s",
+                str(config.research_session_id)[:8],
+            )
+        except asyncio.CancelledError:
+            logger.warning("FWK_SIMPLE_SESSION_COMPLETE_CANCELLED")
+        except Exception as e:
+            logger.warning(
+                "FWK_SIMPLE_SESSION_COMPLETE_FAILED error=%s",
+                str(e)[:200],
+            )
 
 
 async def _persist_delta(
@@ -2119,6 +2997,7 @@ async def _persist_completion(
     claims: list[Any] | None = None,
     verification_summary: Any | None = None,
     storage_stack: Any = None,
+    promotion_trace: dict[str, Any] | None = None,
 ) -> dict[str, int] | None:
     """Persist final research session completion.
 
@@ -2137,6 +3016,7 @@ async def _persist_completion(
             state_proxy = _build_state_proxy(
                 config, final_report, wf_state,
                 claims=claims, verification_summary=verification_summary,
+                promotion_trace=promotion_trace,
             )
 
             assert config.research_session_id is not None
@@ -2166,6 +3046,7 @@ async def _persist_completion(
             state_proxy = _build_state_proxy(
                 config, final_report, wf_state,
                 claims=claims, verification_summary=verification_summary,
+                promotion_trace=promotion_trace,
             )
 
             assert config.message_id is not None
@@ -2337,6 +3218,7 @@ def _build_state_proxy(
     *,
     claims: list[Any] | None = None,
     verification_summary: Any | None = None,
+    promotion_trace: dict[str, Any] | None = None,
 ) -> Any:
     """Build a minimal object that satisfies the persistence layer's state interface.
 
@@ -2421,6 +3303,7 @@ def _build_state_proxy(
         query_mode=config.query_mode,  # L427: string column (Path 2 only)
         claims=claims or [],         # L112, L120, L253: iteration + len
         verification_summary=verification_summary,   # L249, L266: .to_dict() if truthy
+        promotion_trace=promotion_trace,   # spec 6.1: value-free run trace
     )
 
 

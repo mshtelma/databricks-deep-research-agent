@@ -141,9 +141,9 @@ def _patch_agent(client: TestClient, agent_id: str, etag: str, name: str) -> str
 
 @pytest.fixture
 async def db_session() -> Any:
-    import deep_research.db.session as _db_mod
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+    import deep_research.db.session as _db_mod
     from deep_research.core.config import get_settings
     from deep_research.db.session import get_database_url
 

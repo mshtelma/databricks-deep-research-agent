@@ -21,6 +21,7 @@ from deep_research.api.v1 import (
     metrics,
     preferences,
     research,
+    skill_folders,
     templates,
     user,
 )
@@ -35,6 +36,7 @@ router.include_router(messages.router, tags=["Messages"])
 # Research routes are mounted under /chats to match frontend expectations
 router.include_router(research.router, prefix="/chats", tags=["Research"])
 router.include_router(preferences.router, prefix="/preferences", tags=["Preferences"])
+router.include_router(skill_folders.router, tags=["Skill Folders"])
 # Citation verification routes
 router.include_router(citations.router, tags=["Citations"])
 # Background job management routes

@@ -22,10 +22,9 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
-
-from deep_research.storage.backend import StorageBackend
 from tests.fakes.fake_backend import FakeBackend
 
+from deep_research.storage.backend import StorageBackend
 
 # --- Param generators -----------------------------------------------------
 
@@ -69,9 +68,8 @@ async def _lakebase_backend_cm() -> AsyncIterator[StorageBackend]:
     sm = get_session_maker(settings)
 
     async def _run(sql: str, **params) -> None:
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(sql), params)
+        async with sm() as session, session.begin():
+            await session.execute(text(sql), params)
 
     # Create temp schema and apply DDL into it by replacing plain identifiers.
     # The Lakebase DDL uses unqualified table names — we rewrite it for the
@@ -81,19 +79,17 @@ async def _lakebase_backend_cm() -> AsyncIterator[StorageBackend]:
     backend = LakebaseBackend(session_maker=sm)
 
     try:
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(f'SET search_path TO "{schema_name}"'))
-                # Re-run migrate under the new search_path.
-                ddl_text = backend._ddl_path.read_text()
-                from deep_research.storage.lakebase import _split_sql
+        async with sm() as session, session.begin():
+            await session.execute(text(f'SET search_path TO "{schema_name}"'))
+            # Re-run migrate under the new search_path.
+            ddl_text = backend._ddl_path.read_text()
+            from deep_research.storage.lakebase import _split_sql
 
-                for stmt in _split_sql(ddl_text):
-                    await session.execute(text(stmt))
+            for stmt in _split_sql(ddl_text):
+                await session.execute(text(stmt))
         # Subsequent operations need a session whose search_path is already
         # set. Monkey-patch the session maker:
         original = sm
-        from sqlalchemy.ext.asyncio import async_sessionmaker
 
         async def _set_search_path(session):  # type: ignore[no-untyped-def]
             await session.execute(text(f'SET search_path TO "{schema_name}"'))

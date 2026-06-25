@@ -1,11 +1,11 @@
 """Tests for auth middleware exception handling with Databricks SDK errors."""
 
-from unittest.mock import MagicMock, patch, AsyncMock
+from unittest.mock import MagicMock, patch
 
 import pytest
+from databricks.sdk.errors import DatabricksError, PermissionDenied, Unauthenticated
 from fastapi import HTTPException
 
-from databricks.sdk.errors import DatabricksError, Unauthenticated, PermissionDenied
 from deep_research.core.auth import UserIdentity
 from deep_research.middleware.auth import get_current_user_identity
 

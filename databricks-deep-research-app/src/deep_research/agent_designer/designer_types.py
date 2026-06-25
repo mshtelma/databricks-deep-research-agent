@@ -10,7 +10,7 @@ to import the types without pulling in the full YAML-backed architect module.
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -38,7 +38,38 @@ _MAX_LANE_USER_PROMPT_TEMPLATE_LENGTH = 4000
 #
 # ``single_agent`` — coordinator → one specialized agent → output. Right
 #   for short factual questions where the multi-lane scaffold is overkill.
-TopologyKind = Literal["parallel_lanes", "plan_and_execute", "single_agent"]
+#
+# ``best_of_n`` (Phase 2) — coordinator → parallel(K evidence lanes, default 1)
+#   → parallel(N candidate synthesizers, each a diverse synthesis of the shared
+#   evidence pools) → complex-model judge that selects + emits the best report.
+#   Use when the user asks to generate multiple candidate answers and pick the
+#   best ("best of N"). N = coordination_candidate_count on the TaskSignature;
+#   the evidence layer is built by the same path as ``parallel_lanes`` lanes.
+#
+# ``iterative_refinement`` (Phase 4) — coordinator → evidence lanes → loop(draft
+#   producer → coverage reflector) until decision=="complete" → finalizer. The
+#   draft producer is one synthesizer (participants=1, self-critique) or
+#   parallel(P proposers)→integrator (participants>=2, multi-model ensemble, with
+#   optional per-proposer model_family). Critique is folded back via the existing
+#   revision_block_md channel. Use for "draft, critique, improve until good enough".
+#
+# ``tree_search`` (Phase 6) — coordinator → parallel(level-1: B researchers) →
+#   [for each deeper level i: level-i gap-finding reflector → parallel(level-(i+1):
+#   narrowed-breadth researchers whose prompts target the prior level's gaps)] →
+#   synthesizer over the full accumulated pool. Built as a STATIC UNROLL over depth
+#   D (no runtime recursion): each between-level reflector is UPSTREAM of the next
+#   level so {level{i}_review} is a normal upstream output_key. Breadth narrows per
+#   level (next = max(2, breadth // 2)). Use for "survey N angles, then go deeper on
+#   the gaps" breadth x gap-driven-depth research.
+TopologyKind = Literal[
+    "parallel_lanes",
+    "plan_and_execute",
+    "single_agent",
+    "best_of_n",
+    "iterative_refinement",
+    "router",
+    "tree_search",
+]
 GroundingKind = Literal["reclaim", "none", "classical_lite"]
 EvidencePolicy = Literal[
     "corpus_only",
@@ -432,25 +463,30 @@ class WorkflowDesignBrief(BaseModel):
     @field_validator("topology", mode="before")
     @classmethod
     def _coerce_topology(cls, value: Any) -> TopologyKind:
-        """Default missing/null/unknown topology values to ``parallel_lanes``.
+        """Resolve the brief's topology, failing CLOSED on unknown values.
 
-        This preserves backwards-compat: legacy LLMs that emit briefs without
-        a ``topology`` field, and any LLM that emits a topology string we
-        don't recognize, both fall to a runnable shape. This is compatibility
-        behavior, not an instruction to prefer parallel lanes; the Designer
-        prompt requires the LLM to choose topology from the task structure.
-        Catching unknown values here (instead of failing Pydantic validation)
-        prevents a single bad token from breaking the entire chat turn.
+        * Missing / null / empty → ``parallel_lanes`` (the field was omitted;
+          a runnable default, not an error).
+        * A recognized topology string → returned as-is.
+        * Any other non-empty value (a hallucinated or typo'd topology) →
+          ``ValueError``.
+
+        Defaulting an explicitly-wrong topology to ``parallel_lanes`` would
+        silently build a workflow the user never asked for — exactly the
+        silent mis-build Phase 1 set out to eliminate. Failing closed surfaces
+        it: the designer orchestrator renders the raised error as a visible
+        message rather than silence. The valid set is derived from
+        ``TopologyKind`` (single source of truth); the enum-parity test keeps
+        it in lockstep with ``task_signature.TOPOLOGIES`` and the builder
+        dispatch.
         """
         if value is None or value == "":
             return "parallel_lanes"
-        if isinstance(value, str) and value in (
-            "parallel_lanes",
-            "plan_and_execute",
-            "single_agent",
-        ):
+        if isinstance(value, str) and value in get_args(TopologyKind):
             return value  # type: ignore[return-value]
-        return "parallel_lanes"
+        raise ValueError(
+            f"unknown topology {value!r}; expected one of {get_args(TopologyKind)}"
+        )
 
     @field_validator("grounding_mode", mode="before")
     @classmethod

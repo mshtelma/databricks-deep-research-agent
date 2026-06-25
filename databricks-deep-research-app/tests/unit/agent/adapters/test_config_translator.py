@@ -55,6 +55,8 @@ def _mock_config(**overrides: Any) -> MagicMock:
         "synthesis_mode": "simple",
         "verify_sources": True,
         "enable_post_verification": False,
+        "tone": None,
+        "output_language": None,
     }
     defaults.update(overrides)
 
@@ -411,6 +413,66 @@ class TestSystemInstructions:
 
 
 # ---------------------------------------------------------------------------
+# Tests — Per-run tone + output-language threading onto the synthesizer node
+# ---------------------------------------------------------------------------
+
+
+class TestToneAndLanguageThreading:
+    """tone/output_language reach the synthesizer node config (AgentNodeConfig)."""
+
+    def test_tone_resolved_to_enum_on_synth_config(self) -> None:
+        from databricks_deep_research.agents.config import Tone
+
+        config = _mock_config(tone="objective")
+        wf = translate(config)
+
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+        assert synth.config["tone"] is Tone.OBJECTIVE
+
+    def test_output_language_stamped_on_synth_config(self) -> None:
+        config = _mock_config(output_language="Spanish")
+        wf = translate(config)
+
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+        assert synth.config["output_language"] == "Spanish"
+
+    def test_unknown_tone_is_dropped_not_raised(self) -> None:
+        config = _mock_config(tone="not-a-real-tone")
+        wf = translate(config)
+
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+        # Unrecognized tone degrades to absent rather than raising.
+        assert "tone" not in synth.config
+
+    def test_absent_tone_language_keys_not_present(self) -> None:
+        """Default path parity: no tone/language => keys absent from config."""
+        config = _mock_config()  # tone=None, output_language=None
+        wf = translate(config)
+
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+        assert "tone" not in synth.config
+        assert "output_language" not in synth.config
+
+    def test_synth_config_parses_into_agent_node_config(self) -> None:
+        """The stamped dict must validate into a framework AgentNodeConfig with
+        the tone coerced to a Tone member and language preserved."""
+        from databricks_deep_research.agents.config import AgentNodeConfig, Tone
+
+        config = _mock_config(tone="formal", output_language="Japanese")
+        wf = translate(config)
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+
+        node_config = AgentNodeConfig(**synth.config)
+        assert node_config.tone is Tone.FORMAL
+        assert node_config.output_language == "Japanese"
+
+
+# ---------------------------------------------------------------------------
 # Tests — Output format JSON with schema
 # ---------------------------------------------------------------------------
 
@@ -626,114 +688,78 @@ class TestResearchCycleConfig:
 
 
 class TestSynthesisMode:
-    """Tests for synthesis_mode and citation verification config on synthesizer."""
+    """Grounding mode + citation config on the synthesizer.
+
+    Contract (cheap citations always; ``verify_sources`` = NLI overlay only):
+      * citations are ALWAYS generated (a grounded mode), never disabled;
+      * ``verify_sources`` OR ``synthesis_mode='reclaim'`` → ``grounding_mode=
+        'reclaim'`` (cite + NLI verify); otherwise → ``'classical_lite'``
+        (cite-only; NLI / correction / numeric skipped);
+      * ``output_schema['synthesis_mode']`` is a valid ``SynthesisMode``.
+    """
 
     def test_default_verify_sources_enables_reclaim(self) -> None:
-        """Default config has verify_sources=True, which enables reclaim mode."""
-        config = _mock_config()
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
+        """Default config has verify_sources=True → reclaim (full verify)."""
+        synth = _find_child(translate(_mock_config()).root, "synthesizer")
         assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "reclaim"
+        assert synth.config["grounding_mode"] == "reclaim"
+        assert synth.config["output_schema"]["enable_isolated_verification"] is True
         assert synth.config["output_schema"]["enable_citation_verification"] is True
 
     def test_explicit_reclaim_mode(self) -> None:
-        """Explicit synthesis_mode='reclaim' enables citation verification."""
+        """Explicit synthesis_mode='reclaim' → reclaim even when verify off."""
         config = _mock_config(synthesis_mode="reclaim", verify_sources=False)
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
+        synth = _find_child(translate(config).root, "synthesizer")
         assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "reclaim"
-        assert synth.config["output_schema"]["enable_citation_verification"] is True
+        assert synth.config["grounding_mode"] == "reclaim"
+        assert synth.config["output_schema"]["enable_isolated_verification"] is True
 
     def test_verify_sources_true_implies_reclaim(self) -> None:
-        """verify_sources=True implies reclaim even when synthesis_mode='simple'."""
+        """verify_sources=True → reclaim even when synthesis_mode='simple'."""
         config = _mock_config(synthesis_mode="simple", verify_sources=True)
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
+        synth = _find_child(translate(config).root, "synthesizer")
         assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "reclaim"
-        assert synth.config["output_schema"]["enable_citation_verification"] is True
+        assert synth.config["grounding_mode"] == "reclaim"
 
-    def test_simple_mode_with_no_verification(self) -> None:
-        """synthesis_mode='simple' + verify_sources=False -> simple mode."""
+    def test_simple_mode_with_no_verification_is_cheap_grounding(self) -> None:
+        """synthesis_mode='simple' + verify off → classical_lite, STILL cites."""
         config = _mock_config(synthesis_mode="simple", verify_sources=False)
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
+        synth = _find_child(translate(config).root, "synthesizer")
         assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "simple"
-        assert synth.config["output_schema"]["enable_citation_verification"] is False
-
-    def test_post_verification_enabled_in_reclaim(self) -> None:
-        """enable_post_verification=True is forwarded in reclaim mode."""
-        config = _mock_config(
-            synthesis_mode="reclaim",
-            verify_sources=True,
-            enable_post_verification=True,
-        )
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
-        assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "reclaim"
+        assert synth.config["grounding_mode"] == "classical_lite"
+        assert synth.config["output_schema"]["enable_isolated_verification"] is False
+        # Citation generation is never disabled — only the NLI overlay is.
         assert synth.config["output_schema"]["enable_citation_verification"] is True
-        assert synth.config["output_schema"]["enable_post_verification"] is True
 
-    def test_post_verification_not_set_when_disabled(self) -> None:
-        """enable_post_verification=False is not included in node config."""
-        config = _mock_config(
-            synthesis_mode="reclaim",
-            verify_sources=True,
-            enable_post_verification=False,
-        )
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
-        assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "reclaim"
-        assert "enable_post_verification" not in synth.config.get("output_schema", {})
-
-    def test_post_verification_ignored_in_simple_mode(self) -> None:
-        """enable_post_verification is ignored when in simple mode."""
-        config = _mock_config(
-            synthesis_mode="simple",
-            verify_sources=False,
-            enable_post_verification=True,
-        )
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
-        assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == "simple"
-        assert synth.config["output_schema"]["enable_citation_verification"] is False
-        assert "enable_post_verification" not in synth.config.get("output_schema", {})
+    def test_dead_post_verification_key_never_written(self) -> None:
+        """``enable_post_verification`` was unread by the framework and is no
+        longer written to the node config, in either grounding mode."""
+        for verify in (True, False):
+            config = _mock_config(verify_sources=verify, enable_post_verification=True)
+            synth = _find_child(translate(config).root, "synthesizer")
+            assert synth is not None
+            assert "enable_post_verification" not in synth.config["output_schema"]
 
     @pytest.mark.parametrize(
-        "synthesis_mode, verify_sources, expected_mode",
+        "synthesis_mode, verify_sources, expected_grounding",
         [
-            ("simple", False, "simple"),
+            ("simple", False, "classical_lite"),
             ("simple", True, "reclaim"),
             ("reclaim", False, "reclaim"),
             ("reclaim", True, "reclaim"),
         ],
         ids=["simple-noverify", "simple-verify", "reclaim-noverify", "reclaim-verify"],
     )
-    def test_mode_truth_table(
-        self, synthesis_mode: str, verify_sources: bool, expected_mode: str
+    def test_grounding_mode_truth_table(
+        self, synthesis_mode: str, verify_sources: bool, expected_grounding: str
     ) -> None:
-        """Parameterized truth table for synthesis mode resolution."""
+        """Parameterized truth table for grounding-mode resolution."""
         config = _mock_config(
             synthesis_mode=synthesis_mode, verify_sources=verify_sources
         )
-        wf = translate(config)
-
-        synth = _find_child(wf.root, "synthesizer")
+        synth = _find_child(translate(config).root, "synthesizer")
         assert synth is not None
-        assert synth.config["output_schema"]["synthesis_mode"] == expected_mode
+        assert synth.config["grounding_mode"] == expected_grounding
 
     def test_synth_config_valid_for_agent_node_config(self) -> None:
         """Regression: synthesizer config must pass AgentNodeConfig(extra='forbid')."""
@@ -884,3 +910,48 @@ class TestResolveSearchToolsEnterpriseEdgeCases:
             available_tools=["web_search", "web_crawl"],
         )
         assert tools == []
+
+
+# ---------------------------------------------------------------------------
+# Tests — grounding mode: cheap citations always, verify_sources = NLI only
+# ---------------------------------------------------------------------------
+
+
+class TestSynthesizerGroundingMode:
+    """verify_sources now selects the grounding mode (cite-vs-verify), not
+    whether citations exist. Off → classical_lite (cheap, cite-only); on →
+    reclaim (cite + NLI verify)."""
+
+    def _synth(self, **overrides: Any) -> WorkflowNode:
+        wf = translate(_mock_config(**overrides))
+        synth = _find_child(wf.root, "synthesizer")
+        assert synth is not None
+        return synth
+
+    def test_verify_off_uses_classical_lite_grounding_only(self) -> None:
+        synth = self._synth(verify_sources=False, synthesis_mode="simple")
+        assert synth.config["grounding_mode"] == "classical_lite"
+        schema = synth.config["output_schema"]
+        assert schema["enable_isolated_verification"] is False
+        assert schema["enable_citation_correction"] is False
+        assert schema["enable_numeric_qa_verification"] is False
+
+    def test_verify_on_uses_reclaim_full_verification(self) -> None:
+        synth = self._synth(verify_sources=True, synthesis_mode="simple")
+        assert synth.config["grounding_mode"] == "reclaim"
+        assert synth.config["output_schema"]["enable_isolated_verification"] is True
+
+    def test_explicit_reclaim_mode_forces_full_verify_even_when_verify_off(
+        self,
+    ) -> None:
+        synth = self._synth(verify_sources=False, synthesis_mode="reclaim")
+        assert synth.config["grounding_mode"] == "reclaim"
+        assert synth.config["output_schema"]["enable_isolated_verification"] is True
+
+    def test_both_modes_keep_citation_generation_on(self) -> None:
+        """Either way, citations are generated/linked (the floor) — only the
+        NLI overlay differs. ``synthesis_mode`` stays a valid SynthesisMode."""
+        for verify in (True, False):
+            schema = self._synth(verify_sources=verify).config["output_schema"]
+            assert schema["enable_citation_verification"] is True
+            assert schema["synthesis_mode"] == "interleaved"

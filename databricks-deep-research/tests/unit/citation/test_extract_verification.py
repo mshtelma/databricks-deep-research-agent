@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from databricks_deep_research.citation.extraction import (
     Claim,
-    Evidence,
     SummaryInfo,
     VerificationSummary,
     extract_verification,

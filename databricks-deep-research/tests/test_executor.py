@@ -30,6 +30,8 @@ from databricks_deep_research.events.types import (
     WorkflowStartedEvent,
 )
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
+from databricks_deep_research.tools.factory import ToolFactoryContext
+from databricks_deep_research.tools.protocol import ToolDefinition
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.workflow.conditions import ConditionBranch, StateCondition
 from databricks_deep_research.workflow.definition import (
@@ -1460,6 +1462,60 @@ async def test_available_source_catalog_uses_body_tools_and_excludes_helpers() -
     )
 
     assert [item.source_name for item in catalog] == ["web_search", "vector_search"]
+
+
+@pytest.mark.asyncio
+async def test_available_source_catalog_includes_attached_mcp_tools() -> None:
+    class _FakeMCPTool:
+        definition = ToolDefinition(
+            name="tavily_search",
+            description="Search the live web through Tavily MCP.",
+            parameters={"type": "object", "properties": {}},
+            source_type="mcp",
+            source_kind="qa_assistant",
+            metadata={
+                "source_name": "tavily_mcp",
+                "source_url": "mcp://tavily_mcp/tavily_search",
+            },
+        )
+
+    definition = WorkflowDefinition(
+        id="wf",
+        name="wf",
+        root=WorkflowNode(
+            id="root",
+            type=NodeType.plan_and_execute,
+            label="Plan",
+            config={
+                "planner": {"subtype": "planner"},
+                "body": {
+                    "id": "researcher",
+                    "type": "agent",
+                    "label": "Researcher",
+                    "config": {
+                        "subtype": "researcher",
+                        "tools": [],
+                        "mcp_servers": ["tavily_mcp"],
+                    },
+                },
+            },
+        ),
+    )
+    resolver = ToolResolver(
+        factory_context=ToolFactoryContext(
+            extras={"_mcp_tools_by_server": {"tavily_mcp": [_FakeMCPTool()]}}
+        )
+    )
+
+    catalog = await _build_available_source_catalog(
+        definition,
+        resolver,
+        definition.root.config["body"],
+    )
+
+    assert [(item.source_name, item.tool_kind, item.source_kind) for item in catalog] == [
+        ("tavily_search", "mcp", "qa_assistant")
+    ]
 
 
 @pytest.mark.asyncio

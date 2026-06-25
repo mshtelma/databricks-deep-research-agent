@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from databricks_deep_research.tools.protocol import (
     SourceInfo,

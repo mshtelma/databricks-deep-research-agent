@@ -475,6 +475,19 @@ function SourceTypeIcon({ type, className }: { type: DataSourceType; className?:
           />
         </svg>
       );
+    case 'mcp_server':
+      return (
+        <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+            d="M21 16V8a2 2 0 00-1-1.73l-7-4a2 2 0 00-2 0l-7 4A2 2 0 003 8v8a2 2 0 001 1.73l7 4a2 2 0 002 0l7-4A2 2 0 0021 16z"
+          />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3.3 7L12 12l8.7-5" />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 22V12" />
+        </svg>
+      );
     default:
       return (
         <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24">

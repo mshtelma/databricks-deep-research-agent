@@ -62,9 +62,9 @@ _DB_SKIP = pytest.mark.skipif(
 @pytest.fixture
 async def db_session() -> Any:
     """Async DB session scoped to the test, rolled back afterwards."""
-    import deep_research.db.session as _db_mod
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+    import deep_research.db.session as _db_mod
     from deep_research.core.config import get_settings
     from deep_research.db.session import get_database_url
 

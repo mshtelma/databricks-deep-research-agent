@@ -20,7 +20,12 @@ dependencies = [
     "psycopg[binary,pool]>=3.1.0",
     "asyncpg>=0.29.0",
     "alembic>=1.13.0",
-    "mlflow>=3.8.0",
+    # Floor is 3.11.0 (not 3.8.0): the Databricks PyPI proxy 403-quarantines the
+    # full-mlflow 3.8.0–3.10.1 band, and databricks-vectorsearch already requires
+    # mlflow-skinny>=3.10.1. >=3.11.0 keeps the resolver inside the proxy's
+    # available band (3.11.0–3.13.0; 3.14.0 is published but missing its
+    # mlflow-tracing companion, so it's unresolvable).
+    "mlflow>=3.11.0",
     "databricks-sdk>=0.89.0",
     "json-repair>=0.25.0",
     "pyyaml>=6.0.0",
@@ -34,6 +39,27 @@ dependencies = [
 [project.optional-dependencies]
 docling = [
     "docling>=2.0.0",
+]
+# Remote MCP (Model Context Protocol) servers as citeable research sources.
+# Opt-in: the default research path never imports ``mcp``. A workflow that
+# declares ``mcp_servers`` and runs without this extra installed surfaces a
+# clear "install the mcp extra" error from the framework's guarded import —
+# it never hard-crashes the default path. ``databricks-mcp`` adds the client for
+# Databricks managed / UC-connection MCP servers (client_kind='databricks');
+# absent, only client_kind='http' servers work and the databricks branch fails
+# closed with a clear error (see agent/adapters/mcp_adapter.py).
+mcp = [
+    "mcp>=1.0.0",
+    "databricks-mcp>=0.1.0",
+]
+# Binary report export (PDF/DOCX). Opt-in: the default markdown/JSON export
+# never imports these. A missing library degrades to a catchable
+# ExportDependencyError (mapped to 503), never a hard crash at import time.
+export = [
+    "markdown>=3.4",
+    "weasyprint>=60.0",
+    "htmldocx>=0.0.6",
+    "python-docx>=1.1.0",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -145,6 +171,16 @@ module = [
     "mlflow.*",
     "databricks.*",
     "bm25s.*",
+    # Optional binary-export backends (the 'export' extra). Deferred imports;
+    # absent in the base/dev env, so mypy cannot resolve their stubs.
+    "markdown",
+    "markdown.*",
+    "weasyprint",
+    "weasyprint.*",
+    "htmldocx",
+    "htmldocx.*",
+    "docx",
+    "docx.*",
 ]
 ignore_missing_imports = true
 

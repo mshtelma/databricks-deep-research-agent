@@ -272,6 +272,31 @@ Standalone multi-agent orchestration library (see `databricks-deep-research/docs
 - **Output Protocol**: Extensible output format registry in `output/`
 - **Deployment Helpers**: Lakebase provisioning, migration runner, permission grants in `deployment/`
 
+### Designer Topologies
+The Designer scaffolds workflows into one of these structural shapes (selected
+deterministically by `task_signature.select_topology`; an explicit
+`coordination_pattern` wins via rule-0). Each topology is one
+`topology_registry.TopologySpec` (name → builder + structural_family) plus a
+`workflow_builder._build_<name>_workflow`; the enum-parity test keeps
+`TopologyName` / `TopologyKind` / `TOPOLOGIES` / the registry in lockstep.
+
+| Topology | Shape | When | Coordination axes |
+|----------|-------|------|-------------------|
+| `single_agent` | coordinator → 1 agent | bounded single-pass lookup | — |
+| `parallel_lanes` (default) | coordinator → parallel(N lanes) → draft synth → coverage reflector → final synth | 2+ independent lanes | `independent_workstreams_count` |
+| `plan_and_execute` | coordinator → plan_and_execute(planner → body → reflector, looped) → synth | steps depend on earlier findings | `step_dependencies_present`/`iteration_required` |
+| `best_of_n` | coordinator → parallel(evidence) → parallel(N candidate synths) → judge | generate N candidates, pick best | `coordination_candidate_count`, `coordination_judge_tier` |
+| `iterative_refinement` | coordinator → parallel(evidence) → loop(draft → critic) → finalizer | draft, critique, improve until good | `refine_participants`, `refine_max_iterations`, `proposer_families` |
+| `router` | classifier → conditional(branch_1..M, default) | classify + branch to distinct sub-pipelines | `router_cases` |
+| `tree_search` | coordinator → parallel(level-1: B) → [gap reflector → parallel(narrowed level)]* → synth | survey breadth, then go deeper on gaps | `tree_breadth` (2-6), `tree_depth` (1-3) |
+
+`tree_search` is a **static unroll** over depth D (no runtime recursion): breadth
+narrows per level (`next = max(2, breadth // 2)`), and each between-level gap
+reflector is UPSTREAM of the next level so `{level{i}_review}` is a normal upstream
+output_key (passes the prompt-var whitelist). The probe (`ast_introspection`/`probe`)
+detects it at the root BEFORE the generic parallel-recursion via the builder's
+`l{N}_research-level` parallel-id convention.
+
 ## Code Patterns
 
 ### Python Backend

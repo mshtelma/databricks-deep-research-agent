@@ -7,7 +7,6 @@ Runs against the parametric ``stack`` fixture from conftest.py
 
 from __future__ import annotations
 
-import asyncio
 from uuid import uuid4
 
 import pytest

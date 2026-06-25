@@ -9,17 +9,12 @@ Covers:
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
-
-import pytest
 
 from deep_research.services.deployment.capability_probe import (
     CapabilityProbeCache,
-    ProbeResult,
     _classify_probe_error,
     get_default_cache,
 )
-
 
 # ---------------------------------------------------------------------------
 # CapabilityProbeCache

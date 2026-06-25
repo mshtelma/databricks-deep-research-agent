@@ -15,6 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from databricks_deep_research.tools.catalog_types import ProbeSample
+from databricks_deep_research.tools.mcp import MCPServerConfig
 
 # ---------------------------------------------------------------------------
 # Enums
@@ -204,6 +205,14 @@ class WorkflowDefinition(BaseModel):
     version: int = 1
     root: WorkflowNode
     tools: list[ToolDeclaration] = []
+    # Declarative remote MCP servers attached to this workflow. Optional-with-
+    # default: an empty list (the default) means no MCP tools are injected and
+    # behaviour is byte-identical to a workflow without this field. Each server
+    # is built into an MCPToolset PER-REQUEST (with OBO identity) and its
+    # discovered tools are injected via the ToolResolver override seam — they
+    # are NOT resolved through the static factory chain. See
+    # ``tools.mcp.MCPServerConfig`` and the host's runtime injection.
+    mcp_servers: list[MCPServerConfig] = []
     pools: list[dict[str, Any]] = []
     sources: list[SourceDefinition] = []
     models: dict[str, Any] = {}

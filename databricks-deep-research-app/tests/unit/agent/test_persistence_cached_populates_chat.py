@@ -37,6 +37,7 @@ from tests.fakes.fake_backend import FakeBackend  # noqa: E402
 
 from deep_research.agent.persistence import (  # noqa: E402
     persist_research_session_cancelled_independent,
+    persist_research_session_completed_independent,
     persist_research_session_start_independent,
 )
 from deep_research.core.config import get_settings  # noqa: E402
@@ -208,6 +209,89 @@ async def test_persist_cancelled_cached_transitions_document_status() -> None:
         await stack.stop(timeout=2.0)
 
 
+@pytest.mark.asyncio
+async def test_persist_completed_cached_transitions_document_status() -> None:
+    """``persist_research_session_completed_independent`` routes through the
+    cached path: an ``in_progress`` session flips to ``status="completed"``
+    with a ``completed_at``. Regression guard for the simple-mode
+    ``persistence_transition_missing`` force-fail."""
+    stack = await _build_stack()
+    try:
+        chat_id = uuid4()
+        session_id = uuid4()
+        await persist_research_session_start_independent(
+            chat_id=chat_id,
+            user_id="user-complete-abc",
+            user_query="who is the CEO of depop?",
+            user_message_id=uuid4(),
+            agent_message_id=uuid4(),
+            research_session_id=session_id,
+            research_depth="light",
+            query_mode="simple",
+            storage_stack=stack,
+        )
+
+        await persist_research_session_completed_independent(
+            research_session_id=session_id,
+            storage_stack=stack,
+            chat_id=chat_id,
+        )
+
+        doc = await stack.cache.get(chat_id)
+        rs = next(
+            (r for r in doc.state.research_sessions if r.id == session_id),
+            None,
+        )
+        assert rs is not None, "research session must survive the transition"
+        assert rs.status == "completed"
+        assert rs.completed_at is not None
+    finally:
+        await stack.stop(timeout=2.0)
+
+
+@pytest.mark.asyncio
+async def test_persist_completed_cached_does_not_clobber_terminal_status() -> None:
+    """Completing is guarded to ``in_progress`` only: a session already
+    ``cancelled`` (or failed) must NOT be flipped to ``completed``."""
+    stack = await _build_stack()
+    try:
+        chat_id = uuid4()
+        session_id = uuid4()
+        await persist_research_session_start_independent(
+            chat_id=chat_id,
+            user_id="user-noclobber-abc",
+            user_query="q",
+            user_message_id=uuid4(),
+            agent_message_id=uuid4(),
+            research_session_id=session_id,
+            research_depth="light",
+            query_mode="simple",
+            storage_stack=stack,
+        )
+        await persist_research_session_cancelled_independent(
+            research_session_id=session_id,
+            storage_stack=stack,
+            chat_id=chat_id,
+        )
+
+        # Late completion attempt must be a no-op on a terminal session.
+        await persist_research_session_completed_independent(
+            research_session_id=session_id,
+            storage_stack=stack,
+            chat_id=chat_id,
+        )
+
+        doc = await stack.cache.get(chat_id)
+        rs = next(
+            (r for r in doc.state.research_sessions if r.id == session_id),
+            None,
+        )
+        assert rs is not None
+        assert rs.status == "cancelled", "terminal status must not be clobbered"
+    finally:
+        await stack.stop(timeout=2.0)
+
+
 def test_submit_job_source_threads_storage_stack_into_persistence_call() -> None:
     """Guard against regressions where a future refactor drops the
     storage_stack kwarg. We assert on the source because the full
@@ -233,3 +317,22 @@ def test_submit_job_source_threads_storage_stack_into_persistence_call() -> None
     assert 'storage_service_impl == "cached"' in source
     assert "self._storage_stack is None" in source
     assert "StorageStack attached" in source
+
+
+def test_persist_simple_response_completes_session() -> None:
+    """Guard: simple-mode persistence must transition the pre-created research
+    session to COMPLETED. Without it the session stays ``in_progress`` and
+    JobManager force-fails the run (``persistence_transition_missing``) even
+    though the answer was generated and saved. Source-inspected per this
+    file's convention (the behavioural path needs a large collaborator
+    fan-out)."""
+    import inspect
+
+    from deep_research.agent.framework_orchestrator import _persist_simple_response
+
+    source = inspect.getsource(_persist_simple_response)
+    assert "persist_research_session_completed_independent" in source, (
+        "simple-mode persistence must complete the research session; otherwise "
+        "JobManager force-fails the successfully-answered run."
+    )
+    assert "config.research_session_id is not None" in source

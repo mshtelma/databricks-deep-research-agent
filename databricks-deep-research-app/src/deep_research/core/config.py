@@ -98,6 +98,55 @@ class Settings(BaseSettings):
     storage_backend: Literal["lakebase", "sql_warehouse", "fake"] = "lakebase"
     storage_service_impl: Literal["sqlalchemy_legacy", "cached"] = "cached"
 
+    # Unified chat memory (env CHAT_MEMORY_UNIFIED). When true, each completed
+    # research turn consolidates its VERIFIED claims into durable per-chat
+    # findings (ChatState.memory.findings) so later turns can read/cite them.
+    # Default off — flag-gated rollout of the cross-turn memory write path.
+    chat_memory_unified: bool = False
+
+    # Follow-up chat gate (env FOLLOWUP_CHAT_GATE_ENABLED). When true, a new
+    # message in a custom-agent chat that already has gathered research is
+    # routed by intent: a conversational follow-up answerable from the data
+    # already gathered is answered directly (no re-run of the agent workflow),
+    # while a genuinely new research request still runs the agent. Flag-off is
+    # byte-identical to the legacy "always re-run the workflow" behavior.
+    followup_chat_gate_enabled: bool = True
+
+    # Bounded chat-over-report live-search escape hatch (spec §4.7, Tier 3; env
+    # FOLLOWUP_LIVE_SEARCH_ENABLED). When ON, a follow-up that the prior research
+    # pool cannot answer but that is a focused web-searchable lookup triggers a
+    # SMALL, capped live web search (instead of a full research re-run), answers
+    # from those fresh sources, and surfaces their provenance. Default OFF →
+    # byte-identical to today's behavior (such a follow-up still runs the full
+    # agent). On timeout / empty / error the turn falls back to the normal
+    # research path, so this never silently drops a request.
+    followup_live_search_enabled: bool = False
+    # Hard cap on the number of live results admitted by the bounded search.
+    followup_live_search_max_results: int = 5
+    # Hard wall-clock cap (seconds) on the bounded live search; exceeding it
+    # degrades to the normal research path rather than blocking the turn.
+    followup_live_search_timeout_sec: float = 12.0
+
+    # Cross-session memory READ path (env CROSS_SESSION_MEMORY_ENABLED). When
+    # true, a run recalls durable facts keyed (user_id, agent_id) from prior
+    # sessions and injects them as a spotlighted role=user block so the agent
+    # sees earlier corrections/preferences (spec §4.1, DeerFlow-informed). The
+    # WRITE path (post-synthesis consolidation) is unchanged. Default OFF: the
+    # READ path is new, never ran before, and is rolled out behind a flag —
+    # flag-off is byte-identical to today's no-recall behavior. Fail-soft: a
+    # backend error or a read slower than ``cross_session_memory_timeout_sec``
+    # degrades to no-memory and NEVER blocks/fails the research request.
+    cross_session_memory_enabled: bool = False
+    # Skip facts below this confidence (high|medium|low). ``medium`` drops the
+    # WRITE path's quarantined ``low`` observations, surfacing only verified
+    # facts — matches DeerFlow's confidence threshold.
+    cross_session_memory_min_confidence: Literal["high", "medium", "low"] = "medium"
+    # Max-cap on injected facts (eviction-aware) so memory never dominates.
+    cross_session_memory_max_facts: int = 20
+    # Hard timeout (seconds) on the cross-session read; exceeding it degrades to
+    # no-memory rather than delaying the research request.
+    cross_session_memory_timeout_sec: float = 3.0
+
     # SQL Warehouse parameters (required when storage_backend=sql_warehouse).
     storage_warehouse_id: str | None = None
     storage_catalog: str = "main"

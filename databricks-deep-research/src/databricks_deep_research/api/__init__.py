@@ -65,7 +65,13 @@ from databricks_deep_research.tools.api import (
     RunContext,
     tool,
 )
-from databricks_deep_research.tools.mcp import MCPSchemaError, MCPToolset
+from databricks_deep_research.tools.mcp import (
+    MCPSchemaError,
+    MCPServerConfig,
+    MCPToolset,
+    SecretResolver,
+    build_mcp_toolset,
+)
 from databricks_deep_research.tools.mcp_auth import (
     ApiKey,
     BearerToken,
@@ -126,10 +132,13 @@ __all__ = [
     "TeamStrategy",
     # Phase 3: MCP
     "MCPToolset",
+    "MCPServerConfig",
     "MCPSchemaError",
     "MCPSecurityError",
     "MCPAuth",
     "BearerToken",
     "ApiKey",
     "CustomHeaders",
+    "SecretResolver",
+    "build_mcp_toolset",
 ]

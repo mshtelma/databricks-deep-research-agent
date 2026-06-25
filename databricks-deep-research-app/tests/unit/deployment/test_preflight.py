@@ -443,6 +443,117 @@ def test_assert_no_drift_passes_when_aligned(
     )
 
 
+def test_assert_no_drift_allows_additive_only(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The freshly deleted+recreated app: live has ZERO resources, DAB wants
+    # to bind several. This is purely additive (terraform only ADDS), so it
+    # must NOT block — binding resources to an empty app is the normal deploy
+    # action, not the destructive reconciliation this guard prevents.
+    path = tmp_path / "bundle.tf.json"
+    _write_bundle_tf_json(
+        path,
+        [
+            {"name": "brave-api-key", "secret": {"scope": "s", "key": "k"}},
+            {
+                "name": "lakebase-postgres",
+                "postgres": {
+                    "branch": "projects/p/branches/b",
+                    "database": "projects/p/branches/b/databases/db-1",
+                    "permission": "CAN_CONNECT_AND_CREATE",
+                },
+            },
+        ],
+    )
+
+    fake_app = SimpleNamespace(resources=[])
+
+    class _FakeClient:
+        def __init__(self, profile: str) -> None:
+            self.apps = SimpleNamespace(get=lambda _: fake_app)
+
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient", _FakeClient
+    )
+
+    # Must not raise.
+    assert_no_drift(
+        profile="ais",
+        app_name="deep-research-agent-ais",
+        bundle_tf_json=path,
+    )
+
+    # Additive drift is surfaced on STDERR (never stdout — the Makefile
+    # captures preflight stdout as the `--var ...` bundle-var string).
+    captured = capsys.readouterr()
+    assert "additive drift" in captured.err
+    assert "lakebase-postgres" in captured.err
+    assert captured.out == ""
+
+
+def test_assert_no_drift_still_blocks_rebind(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Postgres rebind (same resource name, different target) populates BOTH
+    # drift directions; the destructive `extra_in_live` side must still block
+    # so terraform never removes the actively-bound Postgres.
+    path = tmp_path / "bundle.tf.json"
+    _write_bundle_tf_json(
+        path,
+        [
+            {
+                "name": "lakebase-postgres",
+                "postgres": {
+                    "branch": "projects/p/branches/production",
+                    "database": (
+                        "projects/p/branches/production/databases/db-NEW"
+                    ),
+                    "permission": "CAN_CONNECT_AND_CREATE",
+                },
+            }
+        ],
+    )
+
+    fake_app = SimpleNamespace(
+        resources=[
+            SimpleNamespace(
+                name="lakebase-postgres",
+                secret=None,
+                serving_endpoint=None,
+                postgres=SimpleNamespace(
+                    branch="projects/p/branches/production",
+                    database="projects/p/branches/production/databases/db-OLD",
+                    permission="CAN_CONNECT_AND_CREATE",
+                ),
+                sql_warehouse=None,
+                uc_securable=None,
+                genie_space=None,
+                job=None,
+                experiment=None,
+                app=None,
+                database=None,
+            )
+        ]
+    )
+
+    class _FakeClient:
+        def __init__(self, profile: str) -> None:
+            self.apps = SimpleNamespace(get=lambda _: fake_app)
+
+    monkeypatch.setattr(
+        "deep_research.deployment.preflight.WorkspaceClient", _FakeClient
+    )
+
+    with pytest.raises(PreflightError, match="lakebase-postgres"):
+        assert_no_drift(
+            profile="ais",
+            app_name="deep-research-agent-ais",
+            bundle_tf_json=path,
+        )
+
+
 # ---- resolve_warehouse_id_or_fail (precedence) ------------------------------
 
 

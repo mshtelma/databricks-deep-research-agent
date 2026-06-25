@@ -14,11 +14,23 @@ import hashlib
 import json
 import logging
 import re
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+if TYPE_CHECKING:
+    from databricks_deep_research.agents.code_action import SubmitSink
+
+from databricks_deep_research.agents.config import ToolOutputBudgetConfig
+from databricks_deep_research.agents.history_compaction import (
+    compact_tool_message,
+    rank_tool_results,
+)
+from databricks_deep_research.agents.message_hygiene import fill_missing_tool_results
+from databricks_deep_research.agents.safety_termination_detectors import (
+    safety_termination_reason,
+)
 from databricks_deep_research.agents.source_aware import (
     PlannedToolArguments,
     admit_tool_result,
@@ -26,9 +38,17 @@ from databricks_deep_research.agents.source_aware import (
     select_step_tools,
     tool_source_kind,
 )
+from databricks_deep_research.agents.tool_offload import (
+    hard_clip,
+    line_preserving_truncate,
+    maybe_offload,
+)
 from databricks_deep_research.agents.vector_query_optimizer import VectorQueryOptimizer
+from databricks_deep_research.events.status_contract import make_status_kwargs
 from databricks_deep_research.events.types import (
     AgentStreamChunkEvent,
+    ConversationCompactedEvent,
+    NodeErrorEvent,
     StreamEvent,
     ToolCacheHitEvent,
     ToolCallEvent,
@@ -36,7 +56,20 @@ from databricks_deep_research.events.types import (
 )
 from databricks_deep_research.llm.budget import estimate_message_tokens
 from databricks_deep_research.llm.client import FrameworkLLMClient, LLMResponse, ToolCall
-from databricks_deep_research.tools.protocol import ResearchTool, ToolContext
+from databricks_deep_research.tools.builtins.compute import PythonComputeTool
+from databricks_deep_research.tools.builtins.tool_search import (
+    TOOL_SEARCH_NAME,
+    ToolSearchTool,
+)
+from databricks_deep_research.tools.deferred import (
+    DEFERRABLE_METADATA_KEY,
+    DeferredToolRegistry,
+)
+from databricks_deep_research.tools.protocol import (
+    ResearchTool,
+    ToolContext,
+    ToolDefinition,
+)
 from databricks_deep_research.tracing import trace_span
 
 logger = logging.getLogger(__name__)
@@ -245,71 +278,14 @@ class ReactResult:
 # ---------------------------------------------------------------------------
 
 
-def _is_structural_line(line: str) -> bool:
-    """Identify lines providing structural context for data interpretation.
-
-    These lines help the LLM understand *what* the numbers represent even
-    though they may not contain data values themselves (e.g., table titles,
-    document metadata, section headings).
-    """
-    lower = line.lower()
-    # Document/file metadata
-    if lower.startswith(("document:", "file:", "bulletin date:", "source:")):
-        return True
-    # Table/section titles
-    if lower.startswith(("table ", "section ", "part ", "exhibit ")):
-        return True
-    # Key-value metadata from tool formatting
-    if "chunk_type=" in lower or "page_info=" in lower or "file_name=" in lower:
-        return True
-    # Markdown table alignment row (keeps column structure interpretable)
-    return line.startswith("| ---") or line.startswith("|---")
-
-
-_UNIT_INDICATORS = ("million", "thousand", "billion", "in percent")
-
-
 def _summarize_tool_result(content: str, max_chars: int = 800) -> str:
-    """Preserve key data points when compacting a tool result.
+    """Line-preserving compaction of a tool result.
 
-    Keeps lines that contain pipe characters (markdown table rows),
-    numeric digits (data values), metadata markers (``[...]`` headers),
-    structural context (table titles, document metadata, section
-    headings), or unit indicators (e.g. "In millions of dollars").
-    Discards narrative text and whitespace to fit within *max_chars*.
+    Thin alias kept for the ``mask`` compaction path and existing tests; the
+    single source of truth is ``tool_offload.line_preserving_truncate``. Output
+    is byte-identical to the pre-1.2 in-module implementation.
     """
-    lines = content.split("\n")
-    kept: list[str] = []
-    char_count = 0
-
-    for line in lines:
-        stripped = line.strip()
-        if not stripped or len(stripped) < 3:
-            continue
-
-        has_pipe = "|" in stripped
-        has_number = any(c.isdigit() for c in stripped)
-        is_metadata = stripped.startswith("[") and "]" in stripped
-        is_structural = _is_structural_line(stripped)
-        is_unit_line = any(u in stripped.lower() for u in _UNIT_INDICATORS)
-
-        if has_pipe or has_number or is_metadata or is_structural or is_unit_line:
-            # Cap structural-only lines to avoid long footnotes bloating output
-            if is_structural and not has_pipe and not has_number and not is_unit_line:
-                stripped = stripped[:120]
-            kept.append(stripped)
-            char_count += len(stripped) + 1
-            if char_count >= max_chars:
-                kept.append("...[additional data truncated]")
-                break
-
-    if not kept:
-        return f"[Prior results — {len(content)} chars, no tabular data]"
-
-    return (
-        f"[Compacted from {len(content)} chars — key data preserved:]\n"
-        + "\n".join(kept)
-    )
+    return line_preserving_truncate(content, max_chars=max_chars)
 
 
 # ---------------------------------------------------------------------------
@@ -347,14 +323,41 @@ class ReactLoop:
         per_tool_limits: dict[str, int] | None = None,
         hint_queries: list[str] | None = None,
         suppress_planning_final_output: bool = False,
+        tool_output_offload: str = "off",
+        tool_output_budget: ToolOutputBudgetConfig | None = None,
+        evidence_rescue: bool = True,
+        compaction_budget_chars: int = 0,
+        action_mode: str = "tools",
+        code_action_tools: list[str] | None = None,
+        spawn_runner: Callable[..., Awaitable[Any]] | None = None,
+        spawnable_subagents: dict[str, dict[str, Any]] | None = None,
+        spawn_budget: int = 0,
+        max_concurrent_spawns: int = 4,
+        defer_tools: bool = False,
+        defer_threshold: int = 0,
     ) -> None:
         self._llm = llm_client
         self._ctx = tool_context or ToolContext()
+        # Assigned early: the deferral wiring below logs with it and builds the
+        # promotion recorder from it.
+        self._node_id = node_id
+        # RAG-over-tools / deferred tools (spec §5.5). The registry is built
+        # ONLY when deferral engages (explicit flag OR catalog size above the
+        # threshold). When inert (``None``) every tool is listed with its full
+        # schema and the catalog is byte-identical to today. ``tool_search`` is
+        # auto-appended to the exposed tool set so the model can fetch deferred
+        # schemas on demand.
+        tools = self._maybe_enable_deferral(
+            tools, defer_tools=defer_tools, defer_threshold=defer_threshold
+        )
         self._all_tools = {t.definition.name: t for t in tools}
         self._tools = dict(self._all_tools)
-        self._tool_defs = [self._to_openai_tool(t) for t in tools]
+        self._tool_defs = self._build_tool_defs(tools)
+        # Count of deferred tools already promoted-and-reflected in the catalog.
+        # Used to detect a new promotion after a tool_search round and trigger a
+        # single rebuild. ``0`` and stays ``0`` when deferral is inert.
+        self._promoted_reflected = 0
         self._cache = cache or ToolCallCache()
-        self._node_id = node_id
         self._max_tool_calls = max_tool_calls
         self._model_tier = model_tier
         self._temperature = temperature
@@ -387,12 +390,69 @@ class ReactLoop:
         self._per_tool_limits: dict[str, int] = dict(per_tool_limits) if per_tool_limits else {}
         self._per_tool_counts: dict[str, int] = {}
         self._suppress_planning_final_output = suppress_planning_final_output
+        # MemEx-first tool I/O (spec §1.1): when enabled, large non-builtin tool
+        # results are stored as compute-namespace objects and the model sees a
+        # preview + handle. Default "off"/None => byte-identical behavior.
+        self._tool_output_offload = tool_output_offload
+        self._tool_output_budget = tool_output_budget or ToolOutputBudgetConfig()
+        self._offload_counter = 0
+        # History compaction value-rank (spec §1.3). When ``_evidence_rescue`` is
+        # True AND the side table below holds value metadata for the messages,
+        # ``_compact_old_tool_results`` sheds lowest-value tool results first.
+        # Empty side table OR rescue off => byte-identical §1.2 mask/truncate.
+        self._evidence_rescue = evidence_rescue
+        self._compaction_budget_chars = compaction_budget_chars
+        # Side table: tool_call_id -> value metadata. NEVER stamped onto the
+        # message dicts sent to the LLM (the gateway may reject unknown keys);
+        # messages are matched back to their value via ``tool_call_id``.
+        self._tool_msg_value: dict[str, dict[str, Any]] = {}
         # Pre-compute set for O(1) lookup — budget-free tools don't count
         # against max_tool_calls budget.
         self._budget_free_tools: frozenset[str] = frozenset(
             t.definition.name for t in tools
             if t.definition.metadata.get("budget_free", False)
         )
+        # MemEx code-action bridge (spec §1.4). Default action_mode "tools" is
+        # byte-identical to today: no closures injected, no submit(). In
+        # "code"/"hybrid" the allowlisted tools are exposed as sandbox callables
+        # that route through ``_run_tool_gated`` (HITL/budget/admission/pool/
+        # events/tracing). State below is inert unless code-action is active.
+        self._action_mode = action_mode
+        self._code_action_allowlist: list[str] = list(code_action_tools or [])
+        # Resolved at execute() time: allowlist ∩ bound tools ∩ allowed kinds.
+        self._code_action_tool_names: tuple[str, ...] = ()
+        # The running event loop, captured in execute(); sandbox closures (which
+        # run on a worker thread) schedule the gated coroutine against it.
+        self._code_action_event_loop: asyncio.AbstractEventLoop | None = None
+        # Accepted sources produced by code-action calls, folded into
+        # ReactResult.sources so they reach the pool (parity with JSON path).
+        self._code_action_sources: list[Any] = []
+        # Tool events emitted by code-action calls (observability parity).
+        self._code_action_events: list[StreamEvent] = []
+        self._code_action_call_seq = 0
+        # Hard upper bound (seconds) a single in-sandbox tool call may block the
+        # compute worker thread. FINITE on purpose: the compute pool has only 2
+        # worker threads, and a no-timeout block would let a stuck gated call pin
+        # a slot forever (process-wide compute DoS). On expiry the orphaned task
+        # is cancelled and the call surfaces a normal tool error. Decoupled from
+        # the (short) per-program compute timeout so real tools (crawl/search)
+        # are not prematurely cut; tighten via config is a deferred minor.
+        self._code_action_call_timeout: float = 120.0
+        # GOVERNED spawn_agent bridge (spec §3.3). Default OFF: with no spawn
+        # runner / empty declared set / zero budget, ``spawn_agent`` is NOT
+        # injected and the path is byte-identical to a code-action Cell without
+        # spawn. ``_spawn_runner`` runs a DECLARED inline subworkflow in an
+        # ISOLATED scratchpad scope (bound by the executor); the sandbox closure
+        # captures ONLY a weakref to this loop and looks these up at call time.
+        self._spawn_runner = spawn_runner
+        self._spawnable_subagents: dict[str, dict[str, Any]] = dict(
+            spawnable_subagents or {}
+        )
+        self._spawn_budget = spawn_budget
+        self._max_concurrent_spawns = max_concurrent_spawns
+        # Total spawns used this Cell run; incremented ONCE per attempt (a failed
+        # spawn still counts — no retry-storm). Compared against ``_spawn_budget``.
+        self._spawn_count = 0
 
     # -- ReactLoopHook Protocol surface --------------------------------------
     # Read-only views of private attrs so external collaborators (the HITL
@@ -716,6 +776,7 @@ class ReactLoop:
         Returns the final ReactResult with accumulated content and events.
         """
         self._apply_step_tool_selection()
+        submit_sink = self._setup_code_action()
 
         logger.info(
             "REACT_START node=%s tools=%s max_calls=%d",
@@ -740,7 +801,7 @@ class ReactLoop:
             while True:
                 # Compact old tool results to limit prompt growth
                 if call_count > 0:
-                    self._compact_old_tool_results(messages)
+                    events.extend(self._compact_old_tool_results(messages))
 
                 # Budget-aware guidance + optional tool restriction
                 remaining = self._max_tool_calls - call_count
@@ -798,6 +859,55 @@ class ReactLoop:
                     response.usage.get("completion_tokens", 0),
                     response.usage.get("total_tokens", 0),
                 )
+
+                # ── Safety-termination guard (feature 2.3) ──────────────
+                # A provider may truncate generation for a safety / content-
+                # policy reason (OpenAI content_filter, Anthropic refusal,
+                # Gemini SAFETY/RECITATION/...). When it does so MID tool call,
+                # the partial tool calls are dangling — dispatching them and
+                # replaying the assistant turn 400s the next request. SUPPRESS
+                # the partial calls and surface a terminal safety_termination
+                # status instead of looping. Benign finish reasons (normal stop,
+                # length / MAX_TOKENS) return None here and fall through
+                # untouched, so budget cut-offs and normal completions are never
+                # suppressed.
+                safety_reason = safety_termination_reason(response)
+                if safety_reason is not None and response.tool_calls:
+                    suppressed = len(response.tool_calls)
+                    logger.warning(
+                        "REACT_SAFETY_TERMINATION node=%s call=%d "
+                        "finish_reason=%s suppressed_tool_calls=%d",
+                        self._node_id, call_count,
+                        response.finish_reason, suppressed,
+                    )
+                    events.append(NodeErrorEvent(
+                        node_id=self._node_id,
+                        timestamp=_now(),
+                        error_message=(
+                            "Generation halted by a provider safety/content "
+                            f"policy (finish_reason={response.finish_reason!r}); "
+                            f"{suppressed} partial tool call(s) suppressed."
+                        ),
+                        **make_status_kwargs("safety_termination"),
+                    ))
+                    if loop_span:
+                        loop_span.set_attributes({
+                            "react.exit_reason": "safety_termination",
+                            "react.safety_finish_reason": response.finish_reason,
+                            "react.suppressed_tool_calls": suppressed,
+                            "react.total_calls": call_count,
+                            "react.total_sources": len(sources),
+                        })
+                    # Return the safety-terminated content WITHOUT dispatching
+                    # the dangling tool calls (suppressed).
+                    return self._finalize_result(
+                        content=response.content,
+                        call_count=call_count,
+                        events=events,
+                        total_usage=total_usage,
+                        sources=sources,
+                        submit_sink=submit_sink,
+                    )
 
                 # First-turn retry for evidence-gathering subtypes
                 if (
@@ -1009,12 +1119,13 @@ class ReactLoop:
                         for k, v in total_usage.items():
                             span_attrs[f"react.{k}"] = v
                         loop_span.set_attributes(span_attrs)
-                    return ReactResult(
+                    return self._finalize_result(
                         content=response.content,
-                        tool_calls_made=call_count,
+                        call_count=call_count,
                         events=events,
-                        token_usage=total_usage,
+                        total_usage=total_usage,
                         sources=sources,
+                        submit_sink=submit_sink,
                     )
 
                 # Add assistant message with tool calls
@@ -1094,6 +1205,17 @@ class ReactLoop:
                         sources.extend(cached_srcs)
                         messages.append(self._tool_msg(tc.id, content))
                         responded_tc_ids.add(tc.id)
+                        # Record value metadata for cache-hit messages too (spec
+                        # §1.3) so value-rank compaction treats them like any
+                        # other tool result. Without this a large cached replay
+                        # would be skipped by _rescue_compact while the pre-1.3
+                        # mask/truncate loop would have compacted it — i.e. it
+                        # keeps mask byte-identical on the cache-hit path.
+                        self._tool_msg_value[tc.id] = {
+                            "accepted_source_count": len(cached_srcs),
+                            "evidence_quality": "cached",
+                            "offload_handle": None,
+                        }
                     elif tc.id in exec_results:
                         result_content, tool_srcs, tool_result_meta = exec_results[tc.id]
                         sources.extend(tool_srcs)
@@ -1119,6 +1241,27 @@ class ReactLoop:
                             )
                         messages.append(self._tool_msg(tc.id, result_content))
                         responded_tc_ids.add(tc.id)
+                        # Record value metadata in the side table (NOT on the
+                        # message dict) so §1.3 compaction can shed low-value
+                        # results first. Keyed by tool_call_id.
+                        try:
+                            accepted_count = int(
+                                tool_result_meta.get("accepted_source_count", 0)
+                            )
+                        except (TypeError, ValueError):
+                            accepted_count = 0
+                        offload_handle = tool_result_meta.get("offload_handle")
+                        self._tool_msg_value[tc.id] = {
+                            "accepted_source_count": accepted_count,
+                            "evidence_quality": str(
+                                tool_result_meta.get("evidence_quality", "")
+                            ),
+                            "offload_handle": (
+                                offload_handle
+                                if isinstance(offload_handle, str)
+                                else None
+                            ),
+                        }
                         events.append(ToolResultEvent(
                             node_id=self._node_id, timestamp=_now(),
                             tool_name=tc.function_name,
@@ -1132,10 +1275,21 @@ class ReactLoop:
                         ))
 
                 # Ensure ALL tool_calls have tool_result messages (prevents
-                # "tool_use without tool_result" errors from Anthropic API)
-                for tc in response.tool_calls:
-                    if tc.id not in responded_tc_ids:
-                        messages.append(self._tool_msg(tc.id, ""))
+                # "tool_use without tool_result" errors from Anthropic API).
+                # Extracted to message_hygiene.fill_missing_tool_results
+                # (behavior-preserving); _tool_msg keeps the message shape.
+                fill_missing_tool_results(
+                    messages,
+                    response.tool_calls,
+                    responded_tc_ids,
+                    self._tool_msg,
+                )
+
+                # RAG-over-tools (spec §5.5): if a tool_search call promoted any
+                # deferred tools this round, rebuild the catalog so the next LLM
+                # call exposes their now-fetched full schemas. No-op when
+                # deferral is inert or nothing was promoted this round.
+                self._refresh_promoted_tool_defs()
 
                 # Track novel sources for diminishing-returns detection.
                 # Restricted calls (gate-blocked) and builtin tool calls
@@ -1235,7 +1389,126 @@ class ReactLoop:
                 ):
                     self._enable_fallback_tools(messages, reason="zero_accepted_sources")
 
+    # -- Code-action bridge (spec §1.4) -------------------------------------
+
+    def _setup_code_action(self) -> SubmitSink | None:
+        """Install the code-action closures + ``submit`` (and ``spawn_agent``).
+
+        No-op (returns ``None``) unless ``action_mode`` is ``"code"`` /
+        ``"hybrid"`` AND a ``compute`` sandbox is bound AND at least one of:
+        (a) the tool allowlist resolves to ≥1 eligible data tool, or (b) the
+        GOVERNED ``spawn_agent`` is enabled (spec §3.3 — a spawn runner bound,
+        a non-empty declared subagent set, and a positive budget). This keeps the
+        default ``action_mode="tools"`` path byte-identical — no closures, no
+        ``submit``, no ``spawn_agent`` — and ALSO keeps a code Cell with an empty
+        tool allowlist AND no spawn byte-identical (the combined early-return
+        below still fires), preserving the §1.4 contract.
+
+        Returns the :class:`SubmitSink` (read in ``_finalize_result``) or
+        ``None`` when neither code-action tools nor spawn are active.
+        """
+        if self._action_mode not in ("code", "hybrid"):
+            return None
+        compute = self._resolve_compute_sink()
+        if compute is None:
+            logger.warning(
+                "CODE_ACTION_NO_COMPUTE node=%s action_mode=%s — code-action "
+                "requested but no compute tool bound; running tools-only",
+                self._node_id,
+                self._action_mode,
+            )
+            return None
+        from databricks_deep_research.agents.code_action import (
+            install_code_action_hook,
+            select_code_action_tool_names,
+        )
+        self._code_action_tool_names = tuple(select_code_action_tool_names(self))
+        # GOVERNED spawn_agent (spec §3.3): enabled ONLY when a spawn runner is
+        # bound AND at least one subagent is declared AND the budget is positive.
+        # Independent of the tool allowlist — a Cell may spawn without bridging
+        # any data tool. Any of these missing => no spawn_agent.
+        spawn_enabled = bool(
+            self._spawn_runner is not None
+            and self._spawnable_subagents
+            and self._spawn_budget > 0
+        )
+        # Combined gate: bail out (byte-identical) ONLY when there is nothing to
+        # install — neither bridged tools nor spawn.
+        if not self._code_action_tool_names and not spawn_enabled:
+            logger.warning(
+                "CODE_ACTION_EMPTY_ALLOWLIST node=%s action_mode=%s allowlist=%s "
+                "— no eligible data tools and spawn disabled; running tools-only",
+                self._node_id,
+                self._action_mode,
+                self._code_action_allowlist,
+            )
+            return None
+        self._code_action_event_loop = asyncio.get_running_loop()
+        if spawn_enabled:
+            logger.info(
+                "SPAWN_AGENT_ENABLED node=%s subagents=%s budget=%d max_concurrent=%d",
+                self._node_id,
+                sorted(self._spawnable_subagents),
+                self._spawn_budget,
+                self._max_concurrent_spawns,
+            )
+        return install_code_action_hook(self, compute, spawn_enabled=spawn_enabled)
+
+    def _finalize_result(
+        self,
+        *,
+        content: str,
+        call_count: int,
+        events: list[StreamEvent],
+        total_usage: dict[str, int],
+        sources: list[Any],
+        submit_sink: SubmitSink | None,
+    ) -> ReactResult:
+        """Assemble the final :class:`ReactResult`, folding code-action output.
+
+        For the default ``action_mode="tools"`` path this is a pass-through:
+        ``submit_sink`` is ``None`` and the code-action sinks are empty, so the
+        returned result is identical to constructing ``ReactResult`` inline.
+
+        When code-action is active: accepted sources from code-action calls are
+        appended (so they reach the pool — parity with the JSON path), the
+        code-action tool events are merged for observability, and a typed
+        ``submit(value)`` becomes the node content (JSON-encoded) — the
+        authoritative Cell output.
+        """
+        final_sources = sources
+        final_events = events
+        if self._code_action_sources:
+            final_sources = [*sources, *self._code_action_sources]
+        if self._code_action_events:
+            final_events = [*events, *self._code_action_events]
+        final_content = content
+        if submit_sink is not None and submit_sink.submitted:
+            final_content = json.dumps(submit_sink.value)
+            logger.info(
+                "CODE_ACTION_SUBMIT node=%s value_type=%s content_len=%d",
+                self._node_id,
+                type(submit_sink.value).__name__,
+                len(final_content),
+            )
+        return ReactResult(
+            content=final_content,
+            tool_calls_made=call_count,
+            events=final_events,
+            token_usage=total_usage,
+            sources=final_sources,
+        )
+
     # -- Parallel tool execution --------------------------------------------
+
+    def _resolve_compute_sink(self) -> PythonComputeTool | None:
+        """Return the compute tool if present, else None.
+
+        Used as the offload sink for MemEx-first tool I/O (spec §1.1). A single
+        ``isinstance`` narrow (Constitution carve-out) keeps the typed handle.
+        """
+        tool = self._all_tools.get("compute")
+        return tool if isinstance(tool, PythonComputeTool) else None
 
     async def _execute_single_tool(
         self, tc: ToolCall, args: dict[str, Any],
@@ -1274,6 +1547,31 @@ class ReactLoop:
                 "rejected_source_count": 0,
             }
 
+        # RAG-over-tools fail-closed (spec §5.5): a deferred tool exposes only a
+        # name + one-line stub until its schema is fetched. Refuse to EXECUTE it
+        # with model-guessed arguments before promotion — the model must call
+        # tool_search first. (Mirrors DeerFlow tool_search.py:184: never run a
+        # tool the model has not been given a real schema for.)
+        if (
+            self._deferred_registry is not None
+            and self._deferred_registry.is_deferred(tool_name)
+        ):
+            logger.info(
+                "REACT_TOOL_DEFERRED_NOT_PROMOTED node=%s tool=%s",
+                self._node_id, tool_name,
+            )
+            return tc.id, (
+                f"Tool '{tool_name}' is deferred — its full schema has not been "
+                f"loaded yet. Call '{TOOL_SEARCH_NAME}' with "
+                f"names=['{tool_name}'] first, then call it on the next turn."
+            ), [], {
+                "tool_success": False,
+                "tool_error": f"tool_deferred:{tool_name}",
+                "raw_source_count": 0,
+                "accepted_source_count": 0,
+                "rejected_source_count": 0,
+            }
+
         # Build rich log of tool arguments
         log_args = dict(args)
         if tool_name == "web_crawl" and "url_index" in args and self._ctx.url_registry:
@@ -1285,6 +1583,40 @@ class ReactLoop:
             self._node_id, tool_name,
             {k: str(v)[:200] for k, v in log_args.items()},
         )
+
+        return await self._run_tool_gated(tc, tool, args, origin="toolcall")
+
+    async def _run_tool_gated(
+        self,
+        tc: ToolCall,
+        tool: ResearchTool,
+        args: dict[str, Any],
+        *,
+        origin: str,
+    ) -> tuple[str, str, list[Any], dict[str, Any]]:
+        """Shared gating spine for one tool invocation (spec §1.4).
+
+        Runs the gates that live OUTSIDE the tool — HITL approval, per-tool
+        call budget, query planning/dedup/cache, trace spans, ``tool.execute``,
+        ``admit_tool_result`` (and its source/pool admission), result offload,
+        cache writes, and outcome recording. Returns the same
+        ``(tc_id, content, sources, meta)`` tuple as ``_execute_single_tool``.
+
+        BOTH the JSON tool-call path (``origin="toolcall"``) and the
+        code-action closures (``origin="code"``) route through this single
+        coroutine, so a code-action call is gated, admitted, traced, and writes
+        sources to the pool identically to a JSON call. A code closure that
+        called ``tool.execute`` directly would bypass all of these — the bug
+        this extraction prevents (Codex Top-Fix 2). ``origin`` is recorded for
+        observability only; it never relaxes a gate.
+
+        The pre-spine restriction / unknown-tool checks and argument logging
+        stay in ``_execute_single_tool`` (only the JSON path can be tool-
+        restricted by budget guidance); the body below is a behaviour-preserving
+        extraction so the JSON path stays byte-identical.
+        """
+        tool_name = tool.definition.name
+        del origin  # observability-only; reserved for future trace attribute
 
         # ── HITL approval gate (Phase 2; opt-in, dead code for default subtypes) ──
         if (
@@ -1565,9 +1897,30 @@ class ReactLoop:
                     ),
                     "suppression_scope": str(tool_result.data.get("suppression_scope", "")),
                 }
-                # Cache with rewritten args too (so post-rewrite lookup hits next time)
+                # MemEx-first tool I/O (spec §1.1): offload a large model-visible
+                # result to the compute scratchpad. Sources still flow to the
+                # pool unchanged — only the text the model sees is swapped for a
+                # preview + handle. Default mode "off" => no-op (offload_handle None).
+                offload_text, offload_handle = maybe_offload(
+                    admitted.content,
+                    tool=tool_name,
+                    idx=self._offload_counter,
+                    mode=self._tool_output_offload,
+                    compute=self._resolve_compute_sink(),
+                    cfg=self._tool_output_budget,
+                )
+                if offload_handle is not None:
+                    self._offload_counter += 1
+                # Thread the offload handle into meta (None when not offloaded) so
+                # the §1.3 compactor can shrink an offloaded result to a one-line
+                # handle pointer instead of re-truncating its preview text.
+                meta["offload_handle"] = offload_handle
+
+                # Cache with rewritten args too (so post-rewrite lookup hits next time).
+                # An offloaded result must NEVER be replayed from cache — the preview
+                # references a handle minted for this turn, so skip caching it.
                 rewritten_put_args = {k: v for k, v in planned.arguments.items() if k != "_alternate_queries"}
-                if _tool_result_cacheable(meta):
+                if offload_handle is None and _tool_result_cacheable(meta):
                     self._cache.put(
                         tc.function_name,
                         rewritten_put_args,
@@ -1577,7 +1930,7 @@ class ReactLoop:
                     )
 
                 self._record_tool_outcome(tool_name, meta, planned.rewritten_query)
-                return tc.id, admitted.content, admitted.accepted_sources, meta
+                return tc.id, offload_text, admitted.accepted_sources, meta
         except Exception as exc:
             logger.warning(
                 "REACT_TOOL_ERROR node=%s tool=%s error=%s",
@@ -1721,11 +2074,26 @@ class ReactLoop:
             list(self._all_tools.values()),
             self._ctx.current_step,
         )
-        self._tools = {tool.definition.name: tool for tool in selection.active_tools}
-        self._tool_defs = [self._to_openai_tool(tool) for tool in selection.active_tools]
+        active_tools = list(selection.active_tools)
+        fallback_tools = list(selection.fallback_tools)
+        # RAG-over-tools (spec §5.5): tool_search must stay ACTIVE whenever
+        # deferral is engaged, otherwise step-filtering could push it to the
+        # fallback set and the model would be unable to load any deferred schema.
+        if self._deferred_registry is not None:
+            search = self._all_tools.get(TOOL_SEARCH_NAME)
+            if search is not None and all(
+                t.definition.name != TOOL_SEARCH_NAME for t in active_tools
+            ):
+                active_tools.append(search)
+                fallback_tools = [
+                    t for t in fallback_tools
+                    if t.definition.name != TOOL_SEARCH_NAME
+                ]
+        self._tools = {tool.definition.name: tool for tool in active_tools}
+        self._tool_defs = self._build_tool_defs(active_tools)
         self._fallback_tools = {
             tool.definition.name: tool
-            for tool in selection.fallback_tools
+            for tool in fallback_tools
         }
         logger.info(
             "STEP_TOOL_FILTERED node=%s step_title=%r active=%s fallback=%s reasons=%s",
@@ -1745,7 +2113,7 @@ class ReactLoop:
         self._same_tool_consecutive_rounds = 0
         self._last_round_tool = ""
         self._tools.update(self._fallback_tools)
-        self._tool_defs = [self._to_openai_tool(tool) for tool in self._tools.values()]
+        self._tool_defs = self._build_tool_defs(list(self._tools.values()))
         logger.info(
             "FALLBACK_SOURCE_WIDENED node=%s reason=%s newly_enabled=%s",
             self._node_id,
@@ -1781,16 +2149,35 @@ class ReactLoop:
 
     # -- Message compaction -------------------------------------------------
 
-    def _compact_old_tool_results(self, messages: list[dict[str, Any]]) -> None:
+    def _compact_old_tool_results(
+        self, messages: list[dict[str, Any]]
+    ) -> list[StreamEvent]:
         """Compact tool results from prior iterations to limit prompt growth.
 
-        Supports two strategies:
-        - ``truncate`` (default): hard-truncate old tool results to ``max_result_chars``.
-        - ``mask``: replace old tool results with one-line placeholders, keeping
-          the last 2 tool-calling iterations fully intact.
+        A single budget ladder routed through ``tool_offload`` (spec §1.2):
+        - offload (spec §1.1) already happened upstream in ``_execute_single_tool``;
+        - ``mask`` rung => ``line_preserving_truncate`` (keeps structural/numeric/
+          unit lines), preserving the last N iterations intact;
+        - ``truncate`` rung (default) => ``hard_clip``.
+
+        Value-rank rescue (spec §1.3): when ``evidence_rescue`` is True AND the
+        side table holds value metadata for messages in the compaction window,
+        the lowest-value tool results (no accepted sources) are compacted before
+        higher-value ones (builtin, then accepted), and an *offloaded* result is
+        shrunk to a one-line handle pointer instead of a re-truncated preview.
+        With ``compaction_budget_chars > 0`` the rescue stops once old tool
+        results fit the budget, protecting accepted/builtin results longer.
+
+        Behavior is byte-identical to §1.2 by default: with ``evidence_rescue``
+        off OR no value metadata, ``mask`` keeps its line-preserving output and
+        ``truncate`` keeps its hard-clip output. (The line-preserving rung is
+        offered for ``truncate`` only when tool-output offload is opted in.)
+
+        Returns a (possibly empty) list of events: one
+        ``ConversationCompactedEvent`` when compaction actually changed messages.
         """
         if self._max_result_chars <= 0:
-            return
+            return []
 
         # Indices of assistant messages that triggered tool calls
         tc_indices = [
@@ -1799,36 +2186,132 @@ class ReactLoop:
         ]
 
         if not tc_indices:
-            return
+            return []
+
+        # Snapshot total tool-message content length so we can report savings
+        # and detect whether compaction actually changed anything.
+        before_total = self._total_tool_content_chars(messages)
 
         if self._compaction_strategy == "mask":
             # Delay compaction until ~40% of budget is used
             if len(tc_indices) < self._compact_after_rounds:
-                return
+                return []
             # Keep last N iterations intact for data retention (configurable)
             n = min(self._keep_intact, len(tc_indices))
             keep_from = tc_indices[-n] if n > 0 else 0
-            for i in range(keep_from):
-                msg = messages[i]
-                if msg.get("role") == "tool":
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and len(content) > self._max_result_chars:
-                        msg["content"] = _summarize_tool_result(
-                            content, max_chars=self._max_result_chars,
-                        )
+            if not self._rescue_compact(messages, upto=keep_from, line_preserving=True):
+                for i in range(keep_from):
+                    msg = messages[i]
+                    if msg.get("role") == "tool":
+                        content = msg.get("content", "")
+                        if isinstance(content, str) and len(content) > self._max_result_chars:
+                            msg["content"] = line_preserving_truncate(
+                                content, max_chars=self._max_result_chars,
+                            )
         else:
-            # Original truncation behavior (backward compat)
+            # ``truncate`` rung. Hard-clip by default (byte-identical to pre-1.2).
+            # The line-preserving rung is opt-in via tool-output offload.
+            line_preserving = self._tool_output_offload != "off"
             last_tc_idx = tc_indices[-1]
             if last_tc_idx <= 0:
-                return
-            for i in range(last_tc_idx):
-                msg = messages[i]
-                content = msg.get("content", "")
-                if (msg.get("role") == "tool" and isinstance(content, str)
-                        and len(content) > self._max_result_chars):
-                    msg["content"] = content[:self._max_result_chars] + (
-                        f"\n...[truncated from {len(content)} chars]"
-                    )
+                return []
+            if not self._rescue_compact(
+                messages, upto=last_tc_idx, line_preserving=line_preserving
+            ):
+                for i in range(last_tc_idx):
+                    msg = messages[i]
+                    content = msg.get("content", "")
+                    if (msg.get("role") == "tool" and isinstance(content, str)
+                            and len(content) > self._max_result_chars):
+                        if line_preserving:
+                            msg["content"] = line_preserving_truncate(
+                                content, max_chars=self._max_result_chars,
+                            )
+                        else:
+                            msg["content"] = hard_clip(content, self._max_result_chars)
+
+        after_total = self._total_tool_content_chars(messages)
+        if after_total < before_total:
+            return [ConversationCompactedEvent(
+                node_id=self._node_id,
+                timestamp=_now(),
+                tokens_saved=before_total - after_total,
+            )]
+        return []
+
+    @staticmethod
+    def _total_tool_content_chars(messages: list[dict[str, Any]]) -> int:
+        """Sum the character length of every tool message's string content."""
+        total = 0
+        for m in messages:
+            if m.get("role") == "tool":
+                content = m.get("content", "")
+                if isinstance(content, str):
+                    total += len(content)
+        return total
+
+    def _rescue_compact(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        upto: int,
+        line_preserving: bool,
+    ) -> bool:
+        """Value-ranked compaction of old tool messages (spec §1.3).
+
+        Compacts the tool messages at index ``< upto`` lowest-value-first, so
+        accepted/builtin results are protected longer than unaccepted ones. With
+        ``compaction_budget_chars > 0`` it stops once old tool-message content
+        fits the budget; with ``0`` it preserves the §1.2 per-message rule
+        (compact every result over ``max_result_chars``), only reordering by
+        value and shrinking offloaded results to handle pointers.
+
+        Returns False (a no-op) when rescue is disabled or no value metadata is
+        available for the window — the caller then runs the byte-identical §1.2
+        ladder. Returns True when it handled compaction for the window.
+        """
+        if not self._evidence_rescue or not self._tool_msg_value:
+            return False
+        ranked = rank_tool_results(messages, self._tool_msg_value, upto=upto)
+        if not ranked:
+            return False
+
+        budget = self._compaction_budget_chars
+        # Running total of old tool-message content within the window, used only
+        # when a budget is enforced.
+        if budget > 0:
+            current_total = sum(
+                len(c)
+                for i in range(upto)
+                if isinstance(c := messages[i].get("content", ""), str)
+                and messages[i].get("role") == "tool"
+            )
+
+        for r in ranked:
+            if budget > 0 and current_total <= budget:
+                break
+            msg = messages[r.index]
+            content = msg.get("content", "")
+            if not isinstance(content, str):
+                continue
+            handle = r.value.get("offload_handle")
+            has_handle = isinstance(handle, str) and bool(handle)
+            # With no budget, mirror §1.2: only compact results over the cap.
+            # Offloaded results always collapse to their handle pointer.
+            if budget <= 0 and not has_handle and len(content) <= self._max_result_chars:
+                continue
+            compacted = compact_tool_message(
+                content,
+                r.value,
+                max_chars=self._max_result_chars,
+                line_preserving=line_preserving,
+            )
+            if compacted == content:
+                continue
+            msg["content"] = compacted
+            if budget > 0:
+                current_total -= len(content) - len(compacted)
+        return True
 
     # -- Streaming -----------------------------------------------------------
 
@@ -1863,12 +2346,192 @@ class ReactLoop:
             model=self._model_tier,
         ), events
 
+    # -- Deferred tools (RAG-over-tools, spec §5.5) --------------------------
+
+    def _maybe_enable_deferral(
+        self,
+        tools: list[ResearchTool],
+        *,
+        defer_tools: bool,
+        defer_threshold: int,
+    ) -> list[ResearchTool]:
+        """Decide whether to defer tool schemas; wire the registry + tool_search.
+
+        Optional-with-default: deferral engages only when explicitly enabled
+        (``defer_tools``) OR the catalog size exceeds ``defer_threshold`` (a
+        positive threshold). When it does NOT engage, ``self._deferred_registry``
+        stays ``None`` and the returned tool list is the input unchanged — the
+        catalog is byte-identical to today (no ``tool_search``, no stubs).
+
+        When it engages, the deferred subset is every tool that EITHER stamps the
+        ``deferrable`` metadata flag OR — when no tool opts in explicitly — every
+        tool except always-eager builtins, so a large dynamic/MCP catalog is
+        listed by name only. ``tool_search`` is appended (always eager) so the
+        model can fetch deferred schemas on demand.
+        """
+        self._deferred_registry: DeferredToolRegistry | None = None
+        size_trips = defer_threshold > 0 and len(tools) > defer_threshold
+        if not (defer_tools or size_trips):
+            return tools
+
+        # Don't double-inject if a tool_search was already provided.
+        has_tool_search = any(
+            t.definition.name == TOOL_SEARCH_NAME for t in tools
+        )
+
+        deferred_names = self._compute_deferred_names(tools)
+        if not deferred_names:
+            # Nothing eligible to defer (e.g. all tools are eager builtins).
+            # Leave the catalog byte-identical rather than inject an unused
+            # tool_search.
+            return tools
+
+        exposed: list[ResearchTool] = list(tools)
+        # Build the registry from the original tools first; tool_search closes
+        # over it. tool_search's OWN definition is then registered as EAGER so it
+        # passes the fail-closed catalog builder (it is never deferred).
+        registry = DeferredToolRegistry(
+            [t.definition for t in tools], deferred_names=deferred_names
+        )
+        self._deferred_registry = registry
+        if not has_tool_search:
+            search_tool = ToolSearchTool(
+                registry, recorder=self._runtime_store_recorder()
+            )
+            registry.register_eager(search_tool.definition)
+            exposed.append(search_tool)
+
+        logger.info(
+            "REACT_DEFER_TOOLS node=%s catalog=%d deferred=%d threshold=%d "
+            "explicit=%s tool_search_injected=%s",
+            self._node_id,
+            len(tools),
+            len(deferred_names),
+            defer_threshold,
+            defer_tools,
+            not has_tool_search,
+        )
+        return exposed
+
+    @staticmethod
+    def _compute_deferred_names(tools: list[ResearchTool]) -> set[str]:
+        """Names to defer: explicit ``deferrable`` opt-ins, else all non-builtin.
+
+        ``tool_search`` itself is never deferred. A tool that stamps
+        ``metadata['deferrable']=True`` is always deferred; if NO tool opts in,
+        deferral falls back to every non-``builtin`` source tool (the data tools
+        a big MCP server adds), keeping framework builtins (compute, crawl,
+        tool_search) eagerly listed.
+        """
+        explicit = {
+            t.definition.name
+            for t in tools
+            if t.definition.metadata.get(DEFERRABLE_METADATA_KEY, False)
+            and t.definition.name != TOOL_SEARCH_NAME
+        }
+        if explicit:
+            return explicit
+        return {
+            t.definition.name
+            for t in tools
+            if t.definition.source_kind != "builtin"
+            and t.definition.name != TOOL_SEARCH_NAME
+        }
+
+    def _build_tool_defs(self, tools: list[ResearchTool]) -> list[dict[str, Any]]:
+        """Build the OpenAI tool catalog, honoring deferral + failing closed.
+
+        With no registry this is byte-identical to mapping ``_to_openai_tool``
+        over *tools*. With a registry: a deferred-and-unpromoted tool contributes
+        a NAME + one-line-description stub (full schema withheld); eager and
+        promoted tools contribute their full schema. FAIL-CLOSED: a tool whose
+        schema status cannot be determined (unknown to the registry) is REJECTED
+        — never listed with a silently-missing schema (mirrors DeerFlow
+        ``tool_search.py:184``).
+        """
+        registry = self._deferred_registry
+        if registry is None:
+            return [self._to_openai_tool(t) for t in tools]
+
+        defs: list[dict[str, Any]] = []
+        for tool in tools:
+            name = tool.definition.name
+            try:
+                status = registry.schema_status_for(name)
+            except KeyError:
+                # Fail closed: a tool that survived filtering but is not
+                # registered (eager or deferred) must not reach the LLM.
+                logger.error(
+                    "REACT_DEFER_FAILCLOSED node=%s tool=%s reason=unregistered",
+                    self._node_id,
+                    name,
+                )
+                raise ValueError(
+                    f"Tool {name!r} survived filtering but is not registered "
+                    "in the deferred-tool catalog; refusing to expose it "
+                    "without a schema (fail-closed)."
+                ) from None
+            if status == "deferred":
+                defs.append(self._to_openai_def(registry.stub_definition(name)))
+            else:
+                defs.append(self._to_openai_tool(tool))
+        return defs
+
+    def _refresh_promoted_tool_defs(self) -> None:
+        """Rebuild the catalog after a tool_search promotion (spec §5.5).
+
+        Detects whether the deferred registry promoted more tools than are
+        currently reflected in ``_tool_defs`` and, if so, rebuilds from the
+        currently-exposed tools so the newly-promoted full schemas reach the next
+        LLM call. No-op when deferral is inert or nothing new was promoted.
+        """
+        registry = self._deferred_registry
+        if registry is None:
+            return
+        promoted_now = registry.promoted_count()
+        if promoted_now <= self._promoted_reflected:
+            return
+        self._promoted_reflected = promoted_now
+        self._tool_defs = self._build_tool_defs(list(self._tools.values()))
+
+    def _runtime_store_recorder(self) -> Callable[[list[str]], None] | None:
+        """Return a callable that records a promotion in the append-only state.
+
+        Looks up the typed runtime store the harness threads through
+        ``ToolContext.extras``; returns ``None`` when no store is wired (the
+        promotion is then observable only via logs). Promotions are appended as
+        diagnostics — the RuntimeState ``diagnostics.records`` list is
+        append-only, satisfying the "never mutate" invariant.
+        """
+        store = self._ctx.extras.get("_framework_runtime_store")
+        if store is None:
+            return None
+        record = getattr(store, "record_diagnostic", None)
+        if record is None:
+            return None
+
+        node_id = self._node_id
+
+        def _record(promoted: list[str]) -> None:
+            record(
+                category="tool_promotion",
+                severity="info",
+                message="deferred tools promoted: " + ", ".join(promoted),
+                node_id=node_id or None,
+            )
+
+        return _record
+
     # -- Helpers -------------------------------------------------------------
 
     @staticmethod
     def _to_openai_tool(tool: ResearchTool) -> dict[str, Any]:
         """Convert a ResearchTool to OpenAI function-calling format."""
-        defn = tool.definition
+        return ReactLoop._to_openai_def(tool.definition)
+
+    @staticmethod
+    def _to_openai_def(defn: ToolDefinition) -> dict[str, Any]:
+        """Convert a ToolDefinition to OpenAI function-calling format."""
         return {
             "type": "function",
             "function": {

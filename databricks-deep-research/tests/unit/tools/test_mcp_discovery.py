@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from databricks_deep_research.tools.mcp import MCPSchemaError, MCPToolset
+from databricks_deep_research.tools.mcp import MCPToolset
 
 
 class _FakeMCPTool:

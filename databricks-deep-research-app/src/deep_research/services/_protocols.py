@@ -31,6 +31,7 @@ The pattern for extracting a new Protocol:
 
 from __future__ import annotations
 
+from builtins import list as builtin_list
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -113,6 +114,13 @@ class IResearchEventService(Protocol):
         *,
         limit: int | None = None,
     ) -> list[dict[str, Any]]: ...
+    async def get_events_since_sequence(
+        self,
+        research_session_id: UUID,
+        since_sequence: int,
+        limit: int = 100,
+    ) -> list[Any]: ...
+    def event_to_dict(self, event: Any) -> dict[str, Any]: ...
 
 
 # --- Cold-path list-table Protocols ----------------------------------------
@@ -477,7 +485,7 @@ class IChatService(Protocol):
         """Permanently remove chats soft-deleted more than ``days_old`` ago."""
         ...
 
-    async def list_incognito_for_session(self, session_id: UUID) -> list[Any]:
+    async def list_incognito_for_session(self, session_id: UUID) -> builtin_list[Any]:
         """Return incognito chats associated with the given session UUID."""
         ...
 
@@ -520,6 +528,21 @@ class IChatMemoryService(Protocol):
     `enrich_scope`, `render`, `render_appendix_block`, `account_candidates`,
     `search_findings`.
     """
+
+    async def consolidate_from_pool(
+        self,
+        chat_id: UUID,
+        *,
+        claims: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        research_session_id: UUID | None,
+        source_step: int,
+        origin: str = "web",
+        coverage_topics: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Persist a finished turn's verified knowledge as durable findings
+        (and per-topic coverage rows, on the cached path)."""
+        ...
 
 
 @runtime_checkable

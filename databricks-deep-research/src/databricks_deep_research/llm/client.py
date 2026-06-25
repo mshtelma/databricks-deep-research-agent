@@ -24,6 +24,7 @@ from openai import APIStatusError, APITimeoutError, AsyncOpenAI, RateLimitError
 from databricks_deep_research.errors import ContextWindowExceededError
 from databricks_deep_research.events.types import ModelCallEvent, StreamEvent
 from databricks_deep_research.llm.budget import estimate_message_tokens
+from databricks_deep_research.llm.roles import OPENAI_CHAT_ROLES
 from databricks_deep_research.tracing import get_current_span
 
 logger = logging.getLogger(__name__)
@@ -207,6 +208,12 @@ _DEFAULT_ESTIMATED_TOKENS = 4096
 _DEFAULT_OUTPUT_RESERVE = 4096
 # Headroom for tokenization variance + system framing on the fit check.
 _CONTEXT_SAFETY_MARGIN = 1024
+# Per-document character cap applied before sending texts to the embedding
+# endpoint. Over-long documents otherwise blow the embedding model's token
+# limit and fail the whole batch; truncating is strictly safer (a head-only
+# embedding still yields a usable vector). Matches gpt-researcher's content
+# cap (``_MAX_CONTENT_CHARS`` ~= 50k chars).
+MAX_EMBED_CHARS = 50_000
 
 
 def _truncate_messages_to_tokens(
@@ -279,12 +286,33 @@ def _truncate_messages_to_tokens(
     return result
 
 
+class UnknownModelFamilyError(ValueError):
+    """Raised when a node requests a model family absent from the configured
+    ``model_families`` catalog. Fail-closed: an unconfigured family must surface
+    rather than silently falling back to a tier (which would break the per-node
+    family contract)."""
+
+    def __init__(self, family: str, available: list[str]) -> None:
+        super().__init__(
+            f"Unknown model family {family!r}. Configured families: {available}."
+        )
+        self.family = family
+        self.available = available
+
+
 class FrameworkLLMClient:
     """Thin wrapper around AsyncOpenAI for framework use.
 
     Maps ModelTier to concrete model names and provides structured output
     support. This is NOT a Protocol -- the framework depends on openai
     directly.
+
+    ``model_families`` is an OPTIONAL orthogonal axis: a node may set
+    ``config.model_family`` (e.g. ``"claude"``) to pin its LLM family regardless
+    of ``model_tier``. Family configs are stored alongside tiers (so endpoint
+    selection / health / rotation / 429-fallback all work unchanged, keyed by the
+    family name), but the 3-tier validation elsewhere is untouched — family is a
+    separate, optional field. When unset, routing is tier-based exactly as before.
     """
 
     def __init__(
@@ -295,10 +323,19 @@ class FrameworkLLMClient:
         embedding_model: str | None = None,
         client_provider: Callable[[], AsyncOpenAI] | None = None,
         endpoint_registry: dict[str, int] | None = None,
+        model_families: dict[str, str | ModelTierConfig] | None = None,
     ) -> None:
         self._client = openai_client
         self._client_provider = client_provider
-        self._models = model_mapping
+        # Copy so we never mutate the caller's mapping when merging families.
+        self._models = dict(model_mapping)
+        # Family configs share the resolution table (keyed by family name) so
+        # _select_endpoint / _find_fallback / health / rotation work unchanged.
+        # _family_keys is the validation set distinguishing families from tiers.
+        self._family_keys: set[str] = set()
+        for _fam_name, _fam_cfg in (model_families or {}).items():
+            self._models[_fam_name] = _fam_cfg
+            self._family_keys.add(_fam_name)
         self._embedding_model = embedding_model
         self._endpoint_health: dict[str, EndpointHealth] = {}
         self._round_robin_index: dict[str, int] = {}
@@ -306,13 +343,18 @@ class FrameworkLLMClient:
         # endpoint identifier -> max_context_window (tokens). Used by
         # context-window-aware escalation to reach ANY known endpoint —
         # including ones referenced by no tier (e.g. a large-window model
-        # reserved for overflow). Backfilled from each tier's window map so a
+        # reserved for overflow). Backfilled from each tier/family window map so a
         # registry is never required for tier endpoints to be window-aware.
         self._endpoint_registry: dict[str, int] = dict(endpoint_registry or {})
-        for _cfg in model_mapping.values():
+        for _cfg in self._models.values():
             if isinstance(_cfg, ModelTierConfig):
                 for _ep, _win in _cfg.endpoint_context_windows.items():
                     self._endpoint_registry.setdefault(_ep, _win)
+
+    @property
+    def model_families(self) -> frozenset[str]:
+        """Configured model-family names (empty when none are configured)."""
+        return frozenset(self._family_keys)
 
     # -- Properties ---------------------------------------------------------
 
@@ -385,6 +427,7 @@ class FrameworkLLMClient:
         *,
         model: str = "databricks-claude-haiku-4-5",
         model_mapping: dict[str, str | ModelTierConfig] | None = None,
+        model_families: dict[str, str | ModelTierConfig] | None = None,
         profile: str | None = None,
     ) -> FrameworkLLMClient:
         """Create a client authenticated against Databricks serving endpoints.
@@ -430,6 +473,7 @@ class FrameworkLLMClient:
             return cls(
                 openai_client=client,
                 model_mapping=mapping,
+                model_families=model_families,
             )
 
         # Path 2: SDK auto-detect (covers profiles, MSI, etc.)
@@ -454,6 +498,7 @@ class FrameworkLLMClient:
                 openai_client=_fresh_client(),
                 model_mapping=mapping,
                 client_provider=_fresh_client,
+                model_families=model_families,
             )
         except Exception as exc:
             raise RuntimeError(
@@ -480,33 +525,53 @@ class FrameworkLLMClient:
         shared, so no new HTTP connections are created.
         """
         merged = {**self._models, **model_mapping}
+        # Preserve the family catalog across derive (per-run derived clients must
+        # still resolve model_family); the configs already ride in ``merged``.
+        family_cfgs = {k: self._models[k] for k in self._family_keys}
         return FrameworkLLMClient(
             openai_client=self._client,
             model_mapping=merged,
             embedding_model=self._embedding_model,
             client_provider=self._client_provider,
             endpoint_registry=self._endpoint_registry,
+            model_families=family_cfgs,
         )
 
     # -- Model resolution ---------------------------------------------------
 
-    def resolve_model(self, tier: str | ModelTier) -> str:
-        """Resolve a model tier to a concrete model name.
+    def _resolution_key(self, tier: str | ModelTier, family: str | None) -> str:
+        """Return the ``self._models`` key to resolve from.
+
+        A configured ``family`` overrides the tier (orthogonal axis). An
+        unconfigured family fails closed (``UnknownModelFamilyError``) rather than
+        silently degrading to the tier.
+        """
+        if family is not None:
+            if family not in self._family_keys:
+                raise UnknownModelFamilyError(family, sorted(self._family_keys))
+            return family
+        return tier.value if isinstance(tier, ModelTier) else tier
+
+    def resolve_model(
+        self, tier: str | ModelTier, family: str | None = None
+    ) -> str:
+        """Resolve a model tier (or family) to a concrete model name.
 
         For ``str`` values the string itself is the model name.
         For ``ModelTierConfig`` values the best healthy endpoint is selected.
+        When ``family`` is set it overrides the tier for endpoint selection.
         """
-        tier_str = tier.value if isinstance(tier, ModelTier) else tier
-        cfg = self._models.get(tier_str)
+        key = self._resolution_key(tier, family)
+        cfg = self._models.get(key)
         if cfg is None:
             raise ValueError(
-                f"Unknown model tier: {tier_str}. "
+                f"Unknown model {'family' if family else 'tier'}: {key}. "
                 f"Available: {list(self._models.keys())}"
             )
         if isinstance(cfg, str):
             return cfg
         # ModelTierConfig -- delegate to endpoint selection.
-        return self._select_endpoint(tier_str)
+        return self._select_endpoint(key)
 
     def _get_health(self, endpoint: str) -> EndpointHealth:
         """Get or create EndpointHealth for an endpoint."""
@@ -760,6 +825,11 @@ class FrameworkLLMClient:
                 "embedding_model at construction time."
             )
 
+        # Truncate each doc to dodge the embedding endpoint's token limit. An
+        # over-long document otherwise fails the entire batch; a head-only
+        # embedding is strictly safer (short docs are left untouched).
+        texts = [t[:MAX_EMBED_CHARS] for t in texts]
+
         response = await self._get_client().embeddings.create(
             input=texts,
             model=effective_model,
@@ -917,6 +987,19 @@ class FrameworkLLMClient:
             _msgs = kwargs.get("messages") or []
             _roles = [str(m.get("role", "?")) for m in _msgs if isinstance(m, dict)]
             _last = _roles[-1] if _roles else "<empty>"
+            # Observability backstop: a role outside the gateway's accepted set
+            # would yield an opaque 400 "Invalid role". Surface it loudly with
+            # context instead. We warn (not coerce) here so a real upstream bug
+            # in non-history messages is caught rather than silently masked;
+            # conversation history is already normalized at assembly time.
+            _bad_roles = sorted({r for r in _roles if r not in OPENAI_CHAT_ROLES})
+            if _bad_roles:
+                logger.warning(
+                    "LLM_API_CALL_INVALID_ROLE model=%s bad_roles=%s all_roles=%s",
+                    kwargs.get("model", "?"),
+                    _bad_roles,
+                    _roles,
+                )
             logger.info(
                 "LLM_API_CALL model=%s n_msgs=%d last_role=%s roles=%s has_tools=%s tool_choice=%s response_format=%s",
                 kwargs.get("model", "?"),
@@ -953,6 +1036,7 @@ class FrameworkLLMClient:
         structured_output: type | None = None,
         event_sink: Callable[[StreamEvent], None] | None = None,
         node_id: str = "",
+        family: str | None = None,
     ) -> LLMResponse:
         """Send messages to the LLM and return an LLMResponse.
 
@@ -967,12 +1051,17 @@ class FrameworkLLMClient:
         5. Mark endpoints healthy/unhealthy based on success/failure.
         """
         tier_str = tier.value if isinstance(tier, ModelTier) else tier
+        # A configured model family overrides the tier for endpoint resolution
+        # (orthogonal axis); tier_str stays the human-facing capability label for
+        # logs/spans. resolution_key drives _models lookup + 429-fallback so a
+        # family-pinned call falls back WITHIN its family, never to a tier.
+        resolution_key = self._resolution_key(tier, family)
         # Context-window-aware selection: escalate to a larger-window endpoint
         # (or truncate as a last resort) when the prompt would overflow the
         # normally-selected model. ``messages`` may be replaced with a
         # truncated copy.
         model_name, messages, required_total = self._resolve_for_context(
-            tier_str,
+            resolution_key,
             messages,
             tools,
             max_tokens,
@@ -980,8 +1069,8 @@ class FrameworkLLMClient:
         )
 
         logger.info(
-            "FWK_LLM_CALL tier=%s model=%s base_url=%s token_prefix=%s has_tools=%s structured=%s",
-            tier_str, model_name,
+            "FWK_LLM_CALL tier=%s family=%s model=%s base_url=%s token_prefix=%s has_tools=%s structured=%s",
+            tier_str, family or "-", model_name,
             str(self._get_client().base_url)[:60],
             (self._get_client().api_key or "")[:8] + "***",
             bool(tools),
@@ -1050,7 +1139,7 @@ class FrameworkLLMClient:
             return await self._standard_completion(kwargs)
 
         # Execute with retry + fallback ------------------------------------
-        cfg = self._models.get(tier_str)
+        cfg = self._models.get(resolution_key)
         is_tier_config = isinstance(cfg, ModelTierConfig)
 
         # Retry 429 only when no per-request fallback is configured
@@ -1082,7 +1171,7 @@ class FrameworkLLMClient:
                     tier_str,
                 )
                 fallback = self._find_fallback(
-                    tier_str, model_name, required_total
+                    resolution_key, model_name, required_total
                 )
                 if fallback is not None:
                     logger.info(

@@ -39,6 +39,78 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+_MCP_SOURCE_PREFIX = "mcp:"
+
+
+def _mcp_server_name_from_source_id(source_id: str) -> str | None:
+    """Return the MCP server name encoded in a discovery source ID."""
+    if not isinstance(source_id, str) or not source_id.startswith(_MCP_SOURCE_PREFIX):
+        return None
+    name = source_id[len(_MCP_SOURCE_PREFIX):].strip()
+    return name or None
+
+
+def _dedupe_preserving_order(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
+
+
+def normalize_mcp_source_selection(
+    *,
+    source_scope: str | None,
+    enabled_sources: list[str] | None,
+    disabled_sources: list[str] | None,
+    enabled_mcp_servers: list[str] | None,
+) -> tuple[list[str] | None, list[str] | None, list[str] | None]:
+    """Normalize MCP discovery source IDs into runtime MCP attachments.
+
+    The chat source browser now treats MCP servers as sources with IDs like
+    ``mcp:tavily_mcp``. The execution framework, however, attaches MCP via
+    ``enabled_mcp_servers`` and must never hand ``mcp:*`` IDs to the enterprise
+    tool factory. This helper keeps both client contracts compatible.
+    """
+    disabled_source_ids = list(disabled_sources or [])
+    disabled_mcp_names = {
+        name
+        for source_id in disabled_source_ids
+        if (name := _mcp_server_name_from_source_id(source_id)) is not None
+    }
+
+    normalized_enabled_sources: list[str] | None
+    mcp_names_from_sources: list[str] = []
+    if enabled_sources is None:
+        normalized_enabled_sources = None
+    else:
+        normalized_enabled_sources = []
+        for source_id in enabled_sources:
+            mcp_name = _mcp_server_name_from_source_id(source_id)
+            if mcp_name is None:
+                normalized_enabled_sources.append(source_id)
+            else:
+                mcp_names_from_sources.append(mcp_name)
+
+    requested_mcp_names = mcp_names_from_sources + list(enabled_mcp_servers or [])
+    normalized_mcp_servers = [
+        name
+        for name in _dedupe_preserving_order(requested_mcp_names)
+        if name not in disabled_mcp_names
+    ]
+
+    if source_scope == "web_only":
+        normalized_mcp_servers = []
+
+    return (
+        normalized_enabled_sources,
+        disabled_sources,
+        normalized_mcp_servers or None,
+    )
+
 
 def _get_max_concurrent_jobs() -> int:
     """Get max concurrent jobs per user from config."""
@@ -175,8 +247,15 @@ class JobManager:
         user_token: str | None = None,
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
+        turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
+        tone: str | None = None,
+        output_language: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+        enabled_skills: list[str] | None = None,
+        enable_cross_session_memory: bool | None = None,
+        allow_live_search: bool | None = None,
     ) -> ResearchSession:
         """Submit a new research job.
 
@@ -236,6 +315,13 @@ class JobManager:
                 "a StorageStack attached; wire set_storage_stack() in app "
                 "lifespan before accepting jobs."
             )
+
+        enabled_sources, disabled_sources, enabled_mcp_servers = normalize_mcp_source_selection(
+            source_scope=source_scope,
+            enabled_sources=enabled_sources,
+            disabled_sources=disabled_sources,
+            enabled_mcp_servers=enabled_mcp_servers,
+        )
 
         # Check concurrency limit
         max_jobs = _get_max_concurrent_jobs()
@@ -318,6 +404,16 @@ class JobManager:
             query_mode=query_mode,
             research_depth=research_depth,
             output_type=output_type,
+            source_scope=source_scope,
+            enabled_sources=enabled_sources,
+            enabled_sources_count=(
+                len(enabled_sources) if enabled_sources is not None else None
+            ),
+            disabled_sources_count=len(disabled_sources) if disabled_sources else 0,
+            enabled_mcp_servers=enabled_mcp_servers,
+            enabled_skills_count=(
+                len(enabled_skills) if enabled_skills is not None else None
+            ),
             file_count=len(file_ids) if file_ids else 0,
         )
 
@@ -368,8 +464,15 @@ class JobManager:
                 user_token=user_token,
                 file_ids=file_ids,
                 agent_id=agent_id,
+                turn_intent=turn_intent,
                 enable_plan_review=enable_plan_review,
                 approval_broker=approval_broker,
+                tone=tone,
+                output_language=output_language,
+                enabled_mcp_servers=enabled_mcp_servers,
+                enabled_skills=enabled_skills,
+                enable_cross_session_memory=enable_cross_session_memory,
+                allow_live_search=allow_live_search,
             )
         )
         self._active_tasks[session_id] = task
@@ -519,8 +622,15 @@ class JobManager:
         user_token: str | None = None,
         file_ids: list[str] | None = None,
         agent_id: str | None = None,
+        turn_intent: str = "auto",
         enable_plan_review: bool = False,
         approval_broker: Any | None = None,
+        tone: str | None = None,
+        output_language: str | None = None,
+        enabled_mcp_servers: list[str] | None = None,
+        enabled_skills: list[str] | None = None,
+        enable_cross_session_memory: bool | None = None,
+        allow_live_search: bool | None = None,
     ) -> None:
         """Execute research job in background.
 
@@ -565,6 +675,17 @@ class JobManager:
         )
 
         try:
+            (
+                enabled_sources,
+                disabled_sources,
+                enabled_mcp_servers,
+            ) = normalize_mcp_source_selection(
+                source_scope=source_scope,
+                enabled_sources=enabled_sources,
+                disabled_sources=disabled_sources,
+                enabled_mcp_servers=enabled_mcp_servers,
+            )
+
             # Get output configuration from registry if output_type is specified
             output_schema = None
             output_format = "markdown"
@@ -640,10 +761,33 @@ class JobManager:
                         output_type=output_type,
                     )
 
+            # Resolve per-run tone/output-language: an explicit per-request value
+            # wins; otherwise fall back to the research-depth config defaults
+            # (default_tone / default_output_language). Both absent => None =>
+            # unchanged synthesis (byte-identical default path).
+            effective_tone = tone
+            effective_output_language = output_language
+            if effective_tone is None or effective_output_language is None:
+                try:
+                    from deep_research.agent.config import get_research_type_config
+
+                    _valid_depths = {"light", "medium", "extended"}
+                    _depth = research_depth if research_depth in _valid_depths else "medium"
+                    _depth_config = get_research_type_config(_depth)
+                    if effective_tone is None:
+                        effective_tone = _depth_config.default_tone
+                    if effective_output_language is None:
+                        effective_output_language = _depth_config.default_output_language
+                except Exception:
+                    # Defaulting is best-effort; never block a job on config lookup.
+                    logger.debug("RESEARCH_TYPE_TONE_DEFAULT_LOOKUP_FAILED", exc_info=True)
+
             config = OrchestrationConfig(
                 query_mode=query_mode,
                 research_depth=research_depth,
                 system_instructions=system_instructions,
+                tone=effective_tone,
+                output_language=effective_output_language,
                 message_id=message_id,
                 research_session_id=session_id,
                 is_draft=False,  # Chat already created
@@ -656,9 +800,14 @@ class JobManager:
                 source_scope=source_scope,
                 enabled_sources=enabled_sources,
                 disabled_sources=disabled_sources,
+                enabled_mcp_servers=enabled_mcp_servers,
+                enabled_skills=enabled_skills,
+                enable_cross_session_memory=enable_cross_session_memory,
+                allow_live_search=allow_live_search,
                 user_token=user_token,  # OBO auth for enterprise tools
                 file_ids=file_ids,
                 agent_id=agent_id,
+                turn_intent=turn_intent,
                 enable_plan_review=enable_plan_review,
                 approval_broker=approval_broker,
             )

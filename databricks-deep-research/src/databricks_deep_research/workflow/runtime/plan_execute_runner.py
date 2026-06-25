@@ -46,7 +46,10 @@ from databricks_deep_research.workflow.runtime.plan_execute_recovery import (
     coerce_discovered_sources,
     hydrate_pools_from_discovered_sources,
 )
-from databricks_deep_research.workflow.runtime.plan_execute_types import PlanCycleContext
+from databricks_deep_research.workflow.runtime.plan_execute_types import (
+    PlanCycleContext,
+    ReplanFeedbackEntry,
+)
 
 
 def _extract_step_user_prompt_template(item: Any) -> str | None:
@@ -64,6 +67,44 @@ def _extract_step_user_prompt_template(item: Any) -> str | None:
         return None
     text = value.strip()
     return text or None
+
+
+def _extract_knowledge_gaps(eval_output: Any) -> list[str]:
+    """Pull reflector-emitted ``knowledge_gaps`` off an evaluator output.
+
+    Accepts either the dict form or a ReflectionOutput-like object and is
+    fully tolerant (mirrors the ``extract_*`` helpers in
+    ``plan_execute_execution``): missing key, wrong type, or junk elements
+    all collapse to ``[]`` so an absent gaps list preserves today's behavior.
+    """
+    if isinstance(eval_output, dict):
+        value = eval_output.get("knowledge_gaps")
+    else:
+        value = getattr(eval_output, "knowledge_gaps", None)
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if item is not None and str(item).strip()]
+
+
+def _extract_rubric(eval_output: Any) -> dict[str, Any] | None:
+    """Pull the reflector's multi-dim ``rubric`` off an evaluator output.
+
+    Returns a plain dict (for the event payload) or ``None`` when absent/junk
+    — fully tolerant of both the dict and ReflectionOutput-like shapes.
+    """
+    if isinstance(eval_output, dict):
+        value = eval_output.get("rubric")
+    else:
+        value = getattr(eval_output, "rubric", None)
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        return value
+    dump = getattr(value, "model_dump", None)
+    if callable(dump):
+        result = dump()
+        return result if isinstance(result, dict) else None
+    return None
 
 
 def _patch_researcher_user_prompt(node_dict: dict[str, Any], template: str) -> None:
@@ -218,6 +259,15 @@ async def run_plan_execute(
             "required_tool_kind_groups",
             [list(group) for group in required_tool_kind_groups],
         )
+
+    # Read-path: seed prior-turn sources into the working pool at run start
+    # (bounded top-K, gated by the app's ``seed_prior_sources`` state flag).
+    # No-op unless the app set the flag — behaviour is otherwise unchanged.
+    from databricks_deep_research.workflow.runtime.prior_source_seed import (
+        seed_prior_sources_at_run_start,
+    )
+
+    seed_prior_sources_at_run_start(state, pools, logger=deps.logger)
 
     items: list[Any] = []
     for cycle in range(config.max_replan_cycles + 1):
@@ -510,6 +560,8 @@ async def run_plan_execute(
                         items_processed=total_items_processed,
                         evidence_sufficiency=evidence_sufficiency,
                         failure_mode=failure_mode,
+                        knowledge_gaps=_extract_knowledge_gaps(evaluator_output.content),
+                        rubric=_extract_rubric(evaluator_output.content),
                     )
                 )
                 if decision == "complete":
@@ -542,14 +594,25 @@ async def run_plan_execute(
                 if decision == "replan":
                     if replan_cycles < config.max_replan_cycles:
                         replan_cycles += 1
-                        append_replan_feedback(
-                            cycle_ctx,
-                            reason="blocked_step"
+                        replan_reason = (
+                            "blocked_step"
                             if item_health["blocked"]
-                            else "evaluator_replan",
-                            cycle=cycle,
-                            message=reasoning,
-                            step_title=str(item),
+                            else "evaluator_replan"
+                        )
+                        # Carry reflector knowledge_gaps into the feedback entry
+                        # so the next planning step can target them. Empty gaps
+                        # (the default) make this identical to today's
+                        # append_replan_feedback behavior.
+                        cycle_ctx.feedback_history.append(
+                            ReplanFeedbackEntry(
+                                reason=replan_reason,
+                                cycle=cycle,
+                                message=reasoning.strip() or replan_reason,
+                                step_title=str(item).strip(),
+                                knowledge_gaps=_extract_knowledge_gaps(
+                                    evaluator_output.content
+                                ),
+                            )
                         )
                         yield deps.emit(
                             ReplanTriggeredEvent(

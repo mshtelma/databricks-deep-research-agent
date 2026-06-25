@@ -12,6 +12,7 @@ import databricks_deep_research.agents.builtins.custom  # noqa: F401
 import databricks_deep_research.agents.builtins.planner  # noqa: F401
 import databricks_deep_research.agents.builtins.reflector  # noqa: F401
 import databricks_deep_research.agents.builtins.researcher  # noqa: F401
+import databricks_deep_research.agents.builtins.router_classifier  # noqa: F401
 import databricks_deep_research.agents.builtins.synthesizer  # noqa: F401
 from databricks_deep_research.agents.builtins.registry import (  # noqa: F401
     get_builtin,

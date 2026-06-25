@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from databricks_deep_research.tools.factory import ToolFactoryContext
+from databricks_deep_research.tools.resolver import ToolResolver
 
 from deep_research.agent.framework_orchestrator import (
     _apply_runtime_overlays_to_workflow,
@@ -26,6 +27,7 @@ from deep_research.agent.framework_orchestrator import (
     _load_file_search_tool,
     _resolve_agent_v2_workflow,
     _safe_uuid,
+    _stash_mcp_tools_by_server,
     _to_sse_event,
     _to_uuid,
     _tool_names_with_explicit_provider,
@@ -34,6 +36,7 @@ from deep_research.agent.framework_orchestrator import (
 from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
+    PersistenceCompletedEvent,
     ResearchCompletedEvent,
     StreamErrorEvent,
     SynthesisProgressEvent,
@@ -207,6 +210,25 @@ def test_tool_names_with_explicit_provider_empty_when_none_declared() -> None:
     definition = load_workflow_from_dict(workflow)
 
     assert _tool_names_with_explicit_provider(definition) == set()
+
+
+def test_mcp_tools_stashed_in_resolver_copied_context() -> None:
+    """Regression: ToolResolver copies extras before app-level MCP discovery."""
+    from databricks_deep_research.agents.mcp_attach import maybe_attach_mcp
+
+    base_context = ToolFactoryContext(extras={})
+    resolver = ToolResolver(factory_context=base_context)
+    runner = SimpleNamespace(factory_context=base_context)
+    mcp_tool = SimpleNamespace(definition=SimpleNamespace(name="tavily_search"))
+    tools_by_server = {"tavily_mcp": [mcp_tool]}
+
+    _stash_mcp_tools_by_server(runner, resolver, tools_by_server)
+
+    assert runner.factory_context.extras["_mcp_tools_by_server"] is tools_by_server
+    assert resolver.factory_context.extras["_mcp_tools_by_server"] is tools_by_server
+    attached: list[Any] = []
+    assert maybe_attach_mcp(attached, ["tavily_mcp"], resolver.factory_context) == 1
+    assert attached == [mcp_tool]
 
 
 def test_fill_databricks_tool_defaults_fills_per_tool_databricks() -> None:
@@ -426,6 +448,124 @@ class TestSimpleModeShortCircuit:
             assert ResearchCompletedEvent in event_types
 
     @pytest.mark.asyncio
+    async def test_terminal_events_are_buffered_and_flushed(self) -> None:
+        """Simple-mode terminal events must be durable for job SSE replay."""
+        from databricks_deep_research.events.types import CoordinatorClassifiedEvent
+
+        classified_evt = CoordinatorClassifiedEvent(
+            node_id="coordinator",
+            timestamp="2025-01-01T00:00:00Z",
+            complexity="simple",
+            recommended_depth="none",
+            is_simple=True,
+            direct_response="Hello world",
+        )
+
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
+            yield classified_evt
+
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
+
+        fake_buffers: list[Any] = []
+
+        class FakeEventBuffer:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.events: list[Any] = []
+                self.flush_count = 0
+                fake_buffers.append(self)
+
+            async def add_event(self, event: Any) -> None:
+                self.events.append(event)
+
+            async def flush(self) -> None:
+                self.flush_count += 1
+
+        config = _mock_config(query_mode="simple", session_pre_created=True)
+
+        with (
+            patch(
+                "deep_research.agent.framework_orchestrator.EventBuffer",
+                FakeEventBuffer,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_llm_client",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_file_search_tool",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_enterprise_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_existing_sources",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.translate",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.ExecutionContext",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.DomainContextTracker",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_mlflow_run",
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_tool_span",
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_update_trace",
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._persist_simple_response",
+                new_callable=AsyncMock,
+            ),
+        ):
+            events: list[Any] = []
+            async for evt in stream_research_via_framework(
+                query="Hello",
+                llm=MagicMock(),
+                brave_client=MagicMock(),
+                crawler=MagicMock(),
+                config=config,
+                chat_id=str(uuid4()),
+                user_id="user-1",
+            ):
+                events.append(evt)
+
+        assert len(fake_buffers) == 1
+        buffered_types = [type(event) for event in fake_buffers[0].events]
+        assert PersistenceCompletedEvent in buffered_types
+        assert ResearchCompletedEvent in buffered_types
+        assert fake_buffers[0].flush_count >= 2
+
+        yielded_types = [type(event) for event in events]
+        assert PersistenceCompletedEvent in yielded_types
+        assert ResearchCompletedEvent in yielded_types
+
+    @pytest.mark.asyncio
     async def test_simple_response_sets_final_report(self) -> None:
         """Verify final_report in ResearchCompletedEvent matches the direct_response."""
         from databricks_deep_research.events.types import CoordinatorClassifiedEvent
@@ -518,6 +658,154 @@ class TestSimpleModeShortCircuit:
             completed = [e for e in events if isinstance(e, ResearchCompletedEvent)]
             assert len(completed) == 1
             assert completed[0].final_report == direct_text
+
+
+class TestResearchModeNoShortCircuit:
+    """Regression: in Web Search / Deep Research, a coordinator ``is_simple``
+    decline must NOT short-circuit and bury the synthesizer's report.
+
+    Diagnosed bug: the classifier emitted a premature decline (``direct_response``
+    like "I can't get real-time data, use <service>") for a researchable query;
+    the orchestrator streamed that decline as the answer and skipped every later
+    event — discarding the correct, cited report the pipeline went on to produce.
+    The fix restricts the short-circuit to ``query_mode == "simple"``.
+    """
+
+    @pytest.mark.asyncio
+    async def test_web_search_mode_ignores_coordinator_decline(self) -> None:
+        from databricks_deep_research.events.types import (
+            CoordinatorClassifiedEvent,
+        )
+        from databricks_deep_research.events.types import (
+            WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
+        )
+
+        decline = (
+            "I cannot provide real-time weather data directly. You would need "
+            "to use Tavily or another live weather service."
+        )
+        report = (
+            "# Weather in Frankfurt — June 24, 2026\n\n"
+            "- Conditions: Clear and sunny [1].\n- Temperature: ~36C [1]."
+        )
+
+        classified_evt = CoordinatorClassifiedEvent(
+            node_id="coordinator",
+            timestamp="2025-01-01T00:00:00Z",
+            complexity="simple",
+            recommended_depth="light",
+            is_simple=True,
+            direct_response=decline,
+        )
+        completed_evt = FwkWorkflowCompletedEvent(
+            node_id="main",
+            timestamp="2025-01-01T00:00:01Z",
+            workflow_id="web_search",
+            duration_ms=1000.0,
+            total_tokens=100,
+            final_report=report,
+            total_sources=4,
+        )
+
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
+            yield classified_evt
+            yield completed_evt
+
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
+
+        # Behave like the real tracker on the non-short-circuit path: emit no
+        # app events, never trigger periodic persist, and return a delta that
+        # does not override the WorkflowCompletedEvent's authoritative report.
+        mock_tracker = MagicMock()
+        mock_tracker.process_event.return_value = []
+        mock_tracker.should_persist.return_value = False
+        _delta = MagicMock()
+        _delta.final_report = ""
+        _delta.verification_summary = {}
+        mock_tracker.get_persistence_delta.return_value = _delta
+
+        # message_id / research_session_id None → skip the heavy completion
+        # persistence; the always-emitted ResearchCompletedEvent still fires.
+        config = _mock_config(
+            query_mode="web_search", message_id=None, research_session_id=None,
+        )
+
+        with (
+            patch(
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_llm_client",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_file_search_tool",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_enterprise_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_existing_sources",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.translate",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.ExecutionContext",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.DomainContextTracker",
+                return_value=mock_tracker,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_mlflow_run",
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_tool_span",
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.safe_update_trace",
+            ),
+        ):
+            events: list[Any] = []
+            async for evt in stream_research_via_framework(
+                query="search tavily to see what is the weather in frankfurt today",
+                llm=MagicMock(),
+                brave_client=MagicMock(),
+                crawler=MagicMock(),
+                config=config,
+            ):
+                events.append(evt)
+
+        # The coordinator's decline must NOT be streamed as the answer.
+        synthesis_chunks = [
+            e.content_chunk
+            for e in events
+            if isinstance(e, SynthesisProgressEvent)
+        ]
+        assert decline not in synthesis_chunks
+
+        # The synthesizer's report — not the decline — is the final answer.
+        completed = [e for e in events if isinstance(e, ResearchCompletedEvent)]
+        assert len(completed) == 1
+        assert completed[0].final_report != decline
+        assert completed[0].final_report == report
 
 
 # ---------------------------------------------------------------------------
@@ -731,6 +1019,30 @@ class TestEnterpriseToolLoading:
 
         assert result == [mock_tool]
         mock_get_tools.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_enabled_sources_do_not_expand_to_all_enterprise_tools(self) -> None:
+        """Explicit empty source selection means no enterprise tools are selected."""
+        config = _mock_config(
+            source_scope="enterprise_only",
+            enabled_sources=[],
+            disabled_sources=[],
+        )
+
+        with patch(
+            "deep_research.agent.tools.factory.get_enabled_tools_for_user",
+            new_callable=AsyncMock,
+            return_value=[MagicMock()],
+        ) as mock_get_tools:
+            result = await _load_enterprise_tools(
+                config,
+                db=MagicMock(),
+                user_id="user-123",
+                chat_id=None,
+            )
+
+        assert result == []
+        mock_get_tools.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_loads_selected_sources_from_discovery_cache(self) -> None:

@@ -36,8 +36,9 @@ from __future__ import annotations
 import ast as py_ast
 import json
 import re
-from collections.abc import Callable
-from contextlib import suppress
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, suppress
+from contextvars import ContextVar
 from typing import Any
 
 from databricks_deep_research.tools.protocol import (
@@ -53,6 +54,10 @@ from deep_research.agent_designer.assets import (
     inspect_assets,
     normalize_assets,
     recommend_tools_for_assets,
+)
+from deep_research.agent_designer.ast_introspection import (
+    config_of,
+    iter_all_nodes,
 )
 from deep_research.agent_designer.ast_normalizer import (
     _escape_literal_braces,
@@ -186,8 +191,83 @@ def _propose_initial_ast(
     return build_direct_workflow(intent, _workflow_name(intent))
 
 
+# Request-scoped switch: when set (the EDIT lane), mutation tool RESULTS carry a
+# bounded structural summary instead of the full AST. A single edit can touch
+# many nodes (e.g. "add a tool to all 8 candidates"); echoing the whole ~70KB
+# AST on EVERY mutation result otherwise compounds the ReAct transcript (observed
+# live: 8 binds -> ~140K prompt tokens on the follow-up call -> gateway fallback
+# 400 "missing thought_signature", edit silently aborted). A ContextVar (not a
+# per-tool flag) keeps the change to two call sites AND propagates correctly into
+# the ReAct loop's per-tool ``asyncio.create_task`` (the context is copied at task
+# creation) and stays isolated across concurrent designer turns (each runs in its
+# own task context). The build lane never sets it, so its behavior is unchanged.
+_COMPACT_TOOL_RESULTS: ContextVar[bool] = ContextVar(
+    "designer_compact_tool_results", default=False
+)
+
+
+@contextmanager
+def compact_tool_results(enabled: bool = True) -> Iterator[None]:
+    """Scope mutation tool results to a bounded summary (used by the edit lane
+    and the tests). Resets to the prior value on exit."""
+    token = _COMPACT_TOOL_RESULTS.set(enabled)
+    try:
+        yield
+    finally:
+        _COMPACT_TOOL_RESULTS.reset(token)
+
+
+def push_compact_tool_results(enabled: bool) -> Any:
+    """Imperative form of :func:`compact_tool_results` for call sites that
+    cannot wrap a ``with`` block (an async generator's stream loop). Pair with
+    :func:`pop_compact_tool_results`."""
+    return _COMPACT_TOOL_RESULTS.set(enabled)
+
+
+def pop_compact_tool_results(token: Any) -> None:
+    with suppress(Exception):  # pragma: no cover - defensive reset
+        _COMPACT_TOOL_RESULTS.reset(token)
+
+
+def _compact_result_summary(new_ast: dict[str, Any]) -> dict[str, Any]:
+    """A bounded confirmation of the post-mutation AST shape: each node's
+    id / type / subtype / bound-tool names + the workflow tool list. Sized by
+    NODE COUNT, not prompt length, so repeated edit-lane mutations keep the
+    transcript small. The full AST still rides in ``data``; the agent calls
+    ``inspect_ast_summary`` when it needs detail."""
+    nodes: list[dict[str, Any]] = []
+    root = new_ast.get("root") if isinstance(new_ast, dict) else None
+    for node in iter_all_nodes(root or {}):
+        cfg = config_of(node)
+        entry: dict[str, Any] = {"id": node.get("id"), "type": node.get("type")}
+        subtype = cfg.get("subtype")
+        if isinstance(subtype, str) and subtype:
+            entry["subtype"] = subtype
+        tools = cfg.get("tools")
+        if isinstance(tools, list) and tools:
+            entry["tools"] = list(tools)
+        nodes.append(entry)
+    tool_names = [
+        t.get("name")
+        for t in (new_ast.get("tools") or [])
+        if isinstance(t, dict) and t.get("name")
+    ]
+    return {"ok": True, "nodes": nodes, "tools": tool_names}
+
+
 def _ast_result(new_ast: dict[str, Any]) -> ToolResult:
-    """Return a ToolResult whose content + data both carry the new AST."""
+    """Return a ToolResult carrying the new AST.
+
+    EDIT lane (compact mode active): the LLM-visible ``content`` is a bounded
+    structural summary, NOT the full AST. Build lane (default): unchanged — full
+    AST in ``content`` (the architect relies on it). ``data`` ALWAYS carries the
+    full AST; the orchestrator reads the canonical AST from its own cache, never
+    from this content, so compacting is safe for the finalize/diff path."""
+    if _COMPACT_TOOL_RESULTS.get():
+        return ToolResult(
+            content=json.dumps(_compact_result_summary(new_ast)),
+            data={"current_ast": new_ast},
+        )
     return ToolResult(
         content=json.dumps(new_ast),
         data={"current_ast": new_ast},
@@ -271,6 +351,27 @@ def _error_result(message: str) -> ToolResult:
         data={"error": message},
         error=message,
     )
+
+
+def _coerce_expected_count(raw: Any) -> int | None:
+    """Coerce an LLM-supplied ``expected_count`` arg to ``int | None``.
+
+    Absent / null ⇒ ``None`` (patch-count assertion disabled, byte-identical to
+    the prior behavior). A numeric string ("1") or float (1.0) is coerced to an
+    int; anything non-coercible falls back to ``None`` so a malformed optional
+    arg never hard-fails the edit (the loud failure path is a real mismatch, not
+    a typo'd assertion).
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):  # bool is an int subclass — exclude explicitly
+        return None
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
 
 
 def _read_assets(asset_getter: AssetGetter | None) -> Any:
@@ -681,8 +782,10 @@ class BindToolToBlockTool:
         return ToolDefinition(
             name="bind_tool_to_block",
             description=(
-                "Bind a declared tool to an agent node's config.tools list. "
-                "The tool must already exist in ast['tools']. "
+                "Bind a declared tool to one or more agent nodes' config.tools "
+                "list. The tool must already exist in ast['tools']. To bind the "
+                "SAME tool to several nodes (e.g. every candidate), pass them all "
+                "in 'node_paths' in ONE call — do not call repeatedly per node. "
                 "DO NOT pass 'current_ast' — read from state automatically."
             ),
             parameters={
@@ -691,35 +794,69 @@ class BindToolToBlockTool:
                     "node_path": {
                         "type": "string",
                         "description": (
-                            "Node id (e.g. 'lane-fundamentals') OR dot-notation "
-                            "indexed path (e.g. 'root.children.1.children.0'). "
-                            "Prefer the id."
+                            "Single target node id (e.g. 'lane-fundamentals') OR "
+                            "dot-notation path. Prefer the id. Use 'node_paths' to "
+                            "bind several nodes at once."
+                        ),
+                    },
+                    "node_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": (
+                            "Multiple target node ids/paths to bind in a SINGLE "
+                            "call (e.g. all candidates). Strongly preferred over "
+                            "many separate bind calls — one call keeps the edit "
+                            "small and reliable."
                         ),
                     },
                     "tool_name": {"type": "string"},
                 },
-                "required": ["node_path", "tool_name"],
+                "required": ["tool_name"],
             },
             source_type="builtin",
             source_kind="builtin",
         )
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
-        for key in ("node_path", "tool_name"):
-            if key not in arguments:
-                raise ValueError(f"bind_tool_to_block requires '{key}'")
+        if "tool_name" not in arguments:
+            raise ValueError("bind_tool_to_block requires 'tool_name'")
+        if not arguments.get("node_path") and not arguments.get("node_paths"):
+            raise ValueError(
+                "bind_tool_to_block requires 'node_path' or non-empty 'node_paths'"
+            )
         return arguments
 
     async def execute(
         self, arguments: dict[str, Any], _context: ToolContext
     ) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
-        node_path = str(arguments.get("node_path") or "")
         tool_name = str(arguments.get("tool_name") or "")
-        try:
-            new_ast = mutations.bind_tool_to_block(ast, node_path, tool_name)
-        except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
-            return _error_result(f"bind_tool_to_block failed: {exc}")
+        raw_paths = arguments.get("node_paths")
+        if isinstance(raw_paths, list) and raw_paths:
+            targets = [str(p) for p in raw_paths if str(p).strip()]
+        else:
+            single = str(arguments.get("node_path") or "")
+            targets = [single] if single else []
+        if not targets:
+            return _error_result(
+                "bind_tool_to_block requires 'node_path' or non-empty 'node_paths'"
+            )
+        # Bind every target in this ONE call (vs. N fan-out tool calls). Each
+        # mutation extends the same working AST; a per-target failure commits the
+        # binds that DID succeed and surfaces a clear, actionable error.
+        bound: list[str] = []
+        new_ast = ast
+        for path in targets:
+            try:
+                new_ast = mutations.bind_tool_to_block(new_ast, path, tool_name)
+            except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
+                if bound:
+                    _commit_to_cache(new_ast, self._state_setter)
+                return _error_result(
+                    f"bind_tool_to_block failed for '{path}': {exc}. "
+                    f"Successfully bound: {bound or 'none'}."
+                )
+            bound.append(path)
         new_ast = _commit_to_cache(new_ast, self._state_setter)
         return _ast_result(new_ast)
 
@@ -1397,11 +1534,13 @@ class ParseArchitectAstTool:
         blueprint_getter: StateGetter | None = None,
         fingerprint_getter: StateGetter | None = None,
         current_ast_summary_setter: StateSetter | None = None,
+        normalization_fixes_setter: StateSetter | None = None,
     ) -> None:
         self._state_getter = state_getter
         self._blueprint_getter = blueprint_getter
         self._fingerprint_getter = fingerprint_getter
         self._current_ast_summary_setter = current_ast_summary_setter
+        self._normalization_fixes_setter = normalization_fixes_setter
 
     def _publish_summary(self, ast: Any, payload: dict[str, Any]) -> None:
         summary = _ast_summary_payload(ast)
@@ -1409,6 +1548,13 @@ class ParseArchitectAstTool:
         if self._current_ast_summary_setter is not None:
             with suppress(Exception):
                 self._current_ast_summary_setter(summary)
+        # Publish the REAL normalization fixes this parse produced so the
+        # orchestrator can surface them directly on the SSE mutation event
+        # instead of re-deriving them by re-parsing ``architect_message``
+        # (which is a ``node_patches`` doc, not a full AST, in patch mode).
+        if self._normalization_fixes_setter is not None:
+            with suppress(Exception):
+                self._normalization_fixes_setter(payload.get("normalization_fixes") or [])
 
     def _cached_ast_result(
         self,
@@ -3040,8 +3186,9 @@ class SelectTopologyTool:
             name="select_topology",
             description=(
                 "Return the topology (single_agent / parallel_lanes / "
-                "plan_and_execute) for the current TaskSignature. "
-                "Deterministic — call once per design pass."
+                "plan_and_execute / best_of_n / iterative_refinement / router / "
+                "tree_search) for the current TaskSignature. Deterministic — call "
+                "once per design pass."
             ),
             parameters={
                 "type": "object",
@@ -3102,6 +3249,254 @@ class SelectTopologyTool:
 # ---------------------------------------------------------------------------
 
 
+class EditUpdateBlockTool:
+    """EDIT-lane node patch with the broad edit config allow-list.
+
+    Unlike :class:`UpdateBlockTool` (which enforces the prompt-only build guard
+    when the deterministic blueprint is active), this permits any NON-structural
+    config field — the full editable surface for an explicit user edit — while
+    still rejecting structural keys. The conversation-local AST is read/committed
+    via ``state_getter``/``state_setter`` (no echoed current_ast).
+    """
+
+    def __init__(
+        self,
+        state_getter: StateGetter | None = None,
+        state_setter: StateSetter | None = None,
+    ) -> None:
+        self._state_getter = state_getter
+        self._state_setter = state_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="edit_update_block",
+            description=(
+                "Patch fields on an existing node during an EDIT. Allowed patch "
+                "keys: label, config, error_handling, budget_seconds. config may "
+                "set any non-structural field (system_prompt, user_prompt_template, "
+                "model_tier, max_tool_calls, output_format, provider, model, ...). "
+                "Structural keys (subtype/type/children/body) are rejected — use "
+                "clone_block / add_block / delete_block / move_block. Pass "
+                "'expected_count' (almost always 1) to assert how many nodes 'path' "
+                "should resolve to; the patch fails loudly if it would match a "
+                "different number, instead of silently mis-applying. DO NOT pass "
+                "'current_ast' — the framework reads it from state."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "Node id (preferred) OR dot-notation path.",
+                    },
+                    "patches": {
+                        "type": "object",
+                        "description": "Shallow-merged patches; config is deep-merged.",
+                    },
+                    "expected_count": {
+                        "type": "integer",
+                        "description": (
+                            "Optional. Assert the patch matches exactly this many "
+                            "nodes (use 1 for a single-node edit). Fails loudly on "
+                            "mismatch."
+                        ),
+                    },
+                },
+                "required": ["path", "patches"],
+            },
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        for key in ("path", "patches"):
+            if key not in arguments:
+                raise ValueError(f"edit_update_block requires '{key}'")
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        ast = _resolve_current_ast(arguments, self._state_getter)
+        path = str(arguments.get("path") or "")
+        patches = arguments.get("patches") or {}
+        if not isinstance(patches, dict):
+            return _error_result("edit_update_block 'patches' must be a dict")
+        expected_count = _coerce_expected_count(arguments.get("expected_count"))
+        patches = _brace_escape_patches(patches)
+        try:
+            new_ast = mutations.edit_update_block(
+                ast, path, patches, expected_count=expected_count
+            )
+        except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
+            return _error_result(f"edit_update_block failed: {exc}")
+        new_ast = _commit_to_cache(new_ast, self._state_setter)
+        return _ast_result(new_ast)
+
+
+class CloneBlockTool:
+    """Clone an existing node (e.g. a candidate/lane) as a new sibling with
+    fresh ids — the robust way to add a candidate without re-synthesizing a
+    full node config. ``current_ast`` read/committed via state."""
+
+    def __init__(
+        self,
+        state_getter: StateGetter | None = None,
+        state_setter: StateSetter | None = None,
+    ) -> None:
+        self._state_getter = state_getter
+        self._state_setter = state_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="clone_block",
+            description=(
+                "Deep-copy an existing node (and its subtree) as a new sibling "
+                "with fresh unique ids, then apply optional overrides (top-level "
+                "keys shallow, config deep-merged). Use this to ADD a candidate or "
+                "lane by copying an existing one. A top-level config.output_key is "
+                "auto-uniquified unless overridden. DO NOT pass 'current_ast'."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "source_ref": {
+                        "type": "string",
+                        "description": "Node id (or path) of the node to clone.",
+                    },
+                    "parent_ref": {
+                        "type": "string",
+                        "description": (
+                            "Optional parent node id/path to insert into; defaults "
+                            "to the source's parent (clone-as-sibling)."
+                        ),
+                    },
+                    "overrides": {
+                        "type": "object",
+                        "description": "Optional overrides (e.g. {'label':..., 'config':{...}}).",
+                    },
+                },
+                "required": ["source_ref"],
+            },
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if "source_ref" not in arguments:
+            raise ValueError("clone_block requires 'source_ref'")
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        ast = _resolve_current_ast(arguments, self._state_getter)
+        source_ref = str(arguments.get("source_ref") or "")
+        parent_ref_raw = arguments.get("parent_ref")
+        parent_ref = str(parent_ref_raw) if parent_ref_raw else None
+        overrides = arguments.get("overrides") or {}
+        if not isinstance(overrides, dict):
+            return _error_result("clone_block 'overrides' must be a dict")
+        overrides = _brace_escape_patches(overrides)
+        try:
+            new_ast, new_id = mutations.clone_block(
+                ast, source_ref, parent_ref, overrides
+            )
+        except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
+            return _error_result(f"clone_block failed: {exc}")
+        new_ast = _commit_to_cache(new_ast, self._state_setter)
+        result = _ast_result(new_ast)
+        result.data["new_node_id"] = new_id
+        return result
+
+
+class UpdateWorkflowMetaTool:
+    """Patch top-level workflow metadata (name/description/run_as/
+    required_inputs/output_keys) — fields ``update_block`` cannot reach.
+    ``current_ast`` read/committed via state."""
+
+    def __init__(
+        self,
+        state_getter: StateGetter | None = None,
+        state_setter: StateSetter | None = None,
+    ) -> None:
+        self._state_getter = state_getter
+        self._state_setter = state_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="update_workflow_meta",
+            description=(
+                "Patch top-level workflow metadata: name, description, run_as, "
+                "required_inputs, output_keys. Use for renaming the workflow or "
+                "changing its run-as identity. Rejects structural/identity keys "
+                "(id/version/root/tools/pools). DO NOT pass 'current_ast'."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "patches": {
+                        "type": "object",
+                        "description": "Shallow-merged top-level metadata patches.",
+                    },
+                },
+                "required": ["patches"],
+            },
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if "patches" not in arguments:
+            raise ValueError("update_workflow_meta requires 'patches'")
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        ast = _resolve_current_ast(arguments, self._state_getter)
+        patches = arguments.get("patches") or {}
+        if not isinstance(patches, dict):
+            return _error_result("update_workflow_meta 'patches' must be a dict")
+        try:
+            new_ast = mutations.update_workflow_meta(ast, patches)
+        except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
+            return _error_result(f"update_workflow_meta failed: {exc}")
+        new_ast = _commit_to_cache(new_ast, self._state_setter)
+        return _ast_result(new_ast)
+
+
+# Canonical toolset the EDIT-lane agent (``designer_edit_workflow.yaml``) may
+# call. Excludes ``propose_workflow``/``build_blueprint`` (build-lane only — the
+# edit agent must NOT rebuild). The YAML's ``edit_agent`` node lists exactly
+# these names; ``test_edit_workflow`` asserts the two stay in sync.
+_EDIT_AGENT_TOOL_NAMES: frozenset[str] = frozenset(
+    {
+        # surgical mutations
+        "edit_update_block",
+        "clone_block",
+        "update_workflow_meta",
+        "add_block",
+        "delete_block",
+        "move_block",
+        "declare_tool",
+        "remove_tool",
+        "bind_tool_to_block",
+        "set_model_tier",
+        "update_pool",
+        # read-only inspection
+        "inspect_ast_summary",
+        "inspect_assets",
+        "recommend_tools_for_assets",
+        "list_tool_kinds",
+        "validate",
+    }
+)
+
+
 def builtin_designer_tools(
     *,
     discovery: DesignerDiscoveryAdapter | None = None,
@@ -3113,6 +3508,7 @@ def builtin_designer_tools(
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
     current_ast_summary_setter: StateSetter | None = None,
+    normalization_fixes_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
     placeholder_pending_setter: StateSetter | None = None,
@@ -3175,6 +3571,7 @@ def builtin_designer_tools(
             blueprint_getter=blueprint_getter,
             fingerprint_getter=fingerprint_getter,
             current_ast_summary_setter=current_ast_summary_setter,
+            normalization_fixes_setter=normalization_fixes_setter,
         ),
         ExtractCriticApprovedTool(),
         EmitTaskSignatureTool(state_setter=signature_setter),  # PR3-B Layer 1
@@ -3231,6 +3628,19 @@ def builtin_designer_tools(
             state_getter=state_getter,
             state_setter=state_setter,
         ),
+        # Edit-lane primitives (full-surface, level-aware editing)
+        EditUpdateBlockTool(
+            state_getter=state_getter,
+            state_setter=state_setter,
+        ),
+        CloneBlockTool(
+            state_getter=state_getter,
+            state_setter=state_setter,
+        ),
+        UpdateWorkflowMetaTool(
+            state_getter=state_getter,
+            state_setter=state_setter,
+        ),
         InspectAstSummaryTool(state_getter=state_getter),
         # PR3-D Layer 3a synthetic probe
         BehavioralProbeTool(state_getter=state_getter),
@@ -3249,6 +3659,7 @@ def register_designer_tools(
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
     current_ast_summary_setter: StateSetter | None = None,
+    normalization_fixes_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
     placeholder_pending_setter: StateSetter | None = None,
@@ -3285,6 +3696,7 @@ def register_designer_tools(
         blueprint_getter=blueprint_getter,
         fingerprint_getter=fingerprint_getter,
         current_ast_summary_setter=current_ast_summary_setter,
+        normalization_fixes_setter=normalization_fixes_setter,
         signature_setter=signature_setter,
         lane_keys_setter=lane_keys_setter,
         placeholder_pending_setter=placeholder_pending_setter,

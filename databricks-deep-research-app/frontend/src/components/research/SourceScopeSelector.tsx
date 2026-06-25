@@ -225,6 +225,7 @@ function getSourceTypeLabel(type: DataSourceType): string {
     knowledge_assistant: 'Knowledge Assistant',
     web_search: 'Web Search',
     uploaded_file: 'Uploaded Files',
+    mcp_server: 'MCP Server',
     custom: 'Custom',
   };
   return labels[type] || type;
@@ -250,6 +251,8 @@ function SourceTypeIcon({
       return <GlobeIcon className={cn('text-orange-600', className)} />;
     case 'uploaded_file':
       return <FileIcon className={cn('text-gray-600', className)} />;
+    case 'mcp_server':
+      return <CubeIcon className={cn('text-indigo-600', className)} />;
     default:
       return <CubeIcon className={cn('text-slate-600', className)} />;
   }

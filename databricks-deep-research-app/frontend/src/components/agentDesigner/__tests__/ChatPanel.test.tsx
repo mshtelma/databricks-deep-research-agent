@@ -38,11 +38,13 @@ function fakeSession(overrides: Partial<ChatSession> = {}): ChatSession {
     messages: [],
     pendingMutations: [],
     isStreaming: false,
+    progress: null,
     error: null,
     sendMessage: vi.fn(),
     applyPendingMutation: vi.fn(),
     rejectPendingMutation: vi.fn(),
     cancel: vi.fn(),
+    clearChat: vi.fn(),
     ...overrides,
   };
 }
@@ -50,6 +52,7 @@ function fakeSession(overrides: Partial<ChatSession> = {}): ChatSession {
 function makeMutation(overrides: Partial<PendingMutation> = {}): PendingMutation {
   return {
     id: 'mut-1',
+    turnId: 'turn-1',
     toolCallId: 'tc-1',
     description: 'Add loop block',
     mutationKind: 'add_loop_block',
@@ -137,6 +140,26 @@ describe('ChatPanel', () => {
     expect(screen.queryByTestId('streaming-indicator')).not.toBeInTheDocument();
   });
 
+  it('renders the live progress indicator (label + iteration) while streaming', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({ isStreaming: true, progress: { label: 'Refining', iteration: 2, total: 4 } }),
+    );
+    render(<ChatPanel />);
+
+    const indicator = screen.getByTestId('progress-indicator');
+    expect(indicator).toBeInTheDocument();
+    expect(indicator).toHaveTextContent('Refining · 2/4');
+  });
+
+  it('does not render the progress indicator once streaming ends', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({ isStreaming: false, progress: { label: 'Refining', iteration: 2, total: 4 } }),
+    );
+    render(<ChatPanel />);
+
+    expect(screen.queryByTestId('progress-indicator')).not.toBeInTheDocument();
+  });
+
   it('renders PendingMutationCard for each entry in pendingMutations', () => {
     const mutations = [
       makeMutation({ id: 'mut-1', description: 'Add loop block' }),
@@ -189,6 +212,26 @@ describe('ChatPanel', () => {
     const banner = screen.getByRole('alert');
     expect(banner).toBeInTheDocument();
     expect(banner).toHaveTextContent('Something went wrong');
+  });
+
+  it('Clear chat button calls clearChat when there is something to clear', () => {
+    const clearChat = vi.fn();
+    mockUseChatSession.mockReturnValue(
+      fakeSession({ messages: [makeUserMessage('hi')], clearChat }),
+    );
+    render(<ChatPanel />);
+
+    const btn = screen.getByTestId('clear-chat-button');
+    expect(btn).not.toBeDisabled();
+    fireEvent.click(btn);
+    expect(clearChat).toHaveBeenCalledTimes(1);
+  });
+
+  it('Clear chat button is disabled when there is nothing to clear', () => {
+    mockUseChatSession.mockReturnValue(fakeSession());
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId('clear-chat-button')).toBeDisabled();
   });
 
   it('send on Enter calls sendMessage with the input text', () => {
@@ -315,5 +358,35 @@ describe('ChatPanel', () => {
     ).toBeInTheDocument();
     expect(screen.getByText('Source metadata')).toBeInTheDocument();
     expect(screen.queryByText(/resource_semantics\.v1/)).not.toBeInTheDocument();
+  });
+
+  it('opens the conflict modal when apply returns a conflict (Fix #3)', async () => {
+    const localAst = createDraftWorkflow();
+    const serverAst = createDraftWorkflow();
+    const session = fakeSession({
+      pendingMutations: [makeMutation({ id: 'mc1' })],
+      applyPendingMutation: vi.fn().mockResolvedValue({ kind: 'conflict', localAst, serverAst }),
+    });
+    mockUseChatSession.mockReturnValue(session);
+
+    render(<ChatPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply mutation' }));
+
+    expect(session.applyPendingMutation).toHaveBeenCalledWith('mc1');
+    expect(await screen.findByText('You edited the canvas during this change')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply the proposed change' })).toBeInTheDocument();
+  });
+
+  it('shows a no-op notice when apply returns no_op (Fix #3)', async () => {
+    const session = fakeSession({
+      pendingMutations: [makeMutation({ id: 'mc2' })],
+      applyPendingMutation: vi.fn().mockResolvedValue({ kind: 'no_op' }),
+    });
+    mockUseChatSession.mockReturnValue(session);
+
+    render(<ChatPanel />);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply mutation' }));
+
+    expect(await screen.findByTestId('apply-noop-notice')).toBeInTheDocument();
   });
 });

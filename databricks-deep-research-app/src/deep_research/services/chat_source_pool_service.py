@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 
     from deep_research.agent.tools.evidence_registry import HybridSearchIndex, HybridSearchResult
     from deep_research.services.llm.embedder import Embedder
+    from deep_research.storage.factory import StorageStack
 
 logger = get_logger(__name__)
 
@@ -64,16 +65,23 @@ class ChatSourcePoolService:
         self,
         session: AsyncSession,
         embedder: Embedder | None = None,
+        *,
+        storage_stack: StorageStack | None = None,
     ):
         """Initialize the chat source pool service.
 
         Args:
-            session: Async database session.
+            session: Async database session (used only on the legacy SQL path).
             embedder: Optional embedder for semantic search.
                      If None, only BM25 keyword search is used.
+            storage_stack: Event-sourced storage stack. When provided, sources
+                     are read from ``ChatState.sources[]`` (the store the
+                     synthesizer writes to) instead of the legacy ``sources``
+                     table, which is dropped on event-sourced deployments.
         """
         self._session = session
         self._embedder = embedder
+        self._storage_stack = storage_stack
         self._index: HybridSearchIndex | None = None
         self._sources: list[Source] = []
         self._source_embeddings: NDArray[np.float32] | None = None
@@ -94,6 +102,23 @@ class ChatSourcePoolService:
         Returns:
             List of Source objects for the chat.
         """
+        # Event-sourced path: read from ChatState.sources[] (the store the
+        # synthesizer writes to). The legacy `sources` table is dropped on
+        # event-sourced deployments, so the SQL path below would raise
+        # UndefinedTableError there. Mirrors the cached-first read in
+        # framework_orchestrator._load_existing_sources.
+        if self._storage_stack is not None:
+            cached = await self._load_sources_from_cache(chat_id, limit)
+            if cached is not None:
+                self._sources = cached
+                logger.debug(
+                    "CHAT_SOURCES_LOADED",
+                    chat_id=str(chat_id),
+                    count=len(self._sources),
+                    path="cached",
+                )
+                return self._sources
+
         query = (
             select(Source)
             .where(Source.chat_id == chat_id)
@@ -107,9 +132,70 @@ class ChatSourcePoolService:
             "CHAT_SOURCES_LOADED",
             chat_id=str(chat_id),
             count=len(self._sources),
+            path="sql",
         )
 
         return self._sources
+
+    async def _load_sources_from_cache(
+        self,
+        chat_id: UUID,
+        limit: int,
+    ) -> list[Source] | None:
+        """Load chat sources from the event-sourced ChatDocument.
+
+        Builds detached ``Source`` data-holders from ``ChatState.sources[]``
+        (never added to a DB session, so the in-memory BM25/embedding index and
+        ``search`` path are unchanged — they only read scalar attributes).
+
+        Returns ``None`` on a cache error so the caller can fall back to the SQL
+        path; returns ``[]`` when the chat document simply has no sources (so
+        the caller does NOT touch the dropped ``sources`` table).
+        """
+        from deep_research.storage.documents import Source as DocSource
+
+        stack = self._storage_stack
+        if stack is None:  # pragma: no cover — guarded by caller
+            return None
+        try:
+            doc = await stack.cache.get(chat_id)
+        except Exception as exc:  # noqa: BLE001 — degrade to SQL fallback
+            logger.warning(
+                "CHAT_SOURCES_CACHE_LOAD_FAILED",
+                chat_id=str(chat_id),
+                error=str(exc)[:200],
+            )
+            return None
+
+        doc_sources: list[DocSource] = list(doc.state.sources)
+
+        def _key(s: DocSource) -> tuple[int, float, int]:
+            meta = s.metadata or {}
+            raw = meta.get("relevance_score")
+            try:
+                score = float(raw) if raw is not None else None
+            except (TypeError, ValueError):
+                score = None
+            # relevance desc (nulls last), then most-recently-used desc.
+            return (0 if score is not None else 1, -(score or 0.0), -s.last_used_step)
+
+        doc_sources.sort(key=_key)
+
+        out: list[Source] = []
+        for ds in doc_sources[:limit]:
+            meta = ds.metadata or {}
+            out.append(
+                Source(
+                    chat_id=chat_id,
+                    url=ds.url,
+                    title=ds.title,
+                    snippet=meta.get("snippet"),
+                    content=meta.get("content"),
+                    relevance_score=meta.get("relevance_score"),
+                    source_type=ds.source_type,
+                )
+            )
+        return out
 
     async def add_or_update_source(
         self,

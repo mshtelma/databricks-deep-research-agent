@@ -28,11 +28,13 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+from deep_research.agent.url_canonical import content_sha256
 from deep_research.models.chat_memory_coverage import ChatMemoryCoverage
 from deep_research.models.chat_memory_entity import ChatMemoryEntity
 from deep_research.models.chat_memory_file import ChatMemoryFile
 from deep_research.models.chat_memory_finding import ChatMemoryFinding
 from deep_research.models.chat_memory_plugin_ext import ChatMemoryPluginExt
+from deep_research.models.enums import Confidence, FindingOrigin
 from deep_research.services.chat_memory_service import (
     ChatMemoryService,
     _EntityRegistry,
@@ -348,6 +350,120 @@ class CachedChatMemoryService(ChatMemoryService):
                 file_id,
                 str(exc)[:200],
             )
+
+    # -- Cross-turn research consolidation (the write half) -------------------
+
+    async def consolidate_from_pool(
+        self,
+        chat_id: UUID,
+        *,
+        claims: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        research_session_id: UUID | None,
+        source_step: int,
+        origin: str = FindingOrigin.WEB.value,
+        coverage_topics: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Persist a finished turn's knowledge into durable findings + coverage.
+
+        Two tiers: verified *claims* (surfaced, confidence from the claim) and
+        quarantined *observations* (``low`` confidence, surfaced only if a later
+        turn re-derives/verifies them). Idempotent — ``ChatState.upsert_finding``
+        dedups by ``content_hash``. Findings are written for the NEXT turn to
+        read, so the legacy in-memory mirror is intentionally not updated here.
+
+        ``coverage_topics`` (Phase 2e): per-topic ``{topic, status, depth?}``
+        rows, upserted by topic and stamped with ``as_of_turn`` (the turn
+        ordinal = number of research sessions) + ``updated_at`` so the Phase-3a
+        routing gate can judge freshness. Coverage is written even when there
+        are no findings (e.g. a covered-but-no-new-claims turn).
+
+        Returns the number of findings written this call.
+        """
+        if self._chat_id is None or self._chat_id != chat_id:
+            raise RuntimeError(
+                "hydrate() must be called for this chat before consolidate_from_pool()"
+            )
+
+        new_findings: list[DocFinding] = []
+        for claim in claims:
+            text = str(claim.get("claim_text") or claim.get("text") or "").strip()
+            digest = content_sha256(text) if text else None
+            if digest is None:
+                continue
+            new_findings.append(
+                DocFinding(
+                    content_hash=digest,
+                    content=text,
+                    step=source_step,
+                    origin=origin,
+                    confidence=str(claim.get("confidence") or Confidence.HIGH.value),
+                    research_session_id=research_session_id,
+                )
+            )
+        for obs in observations:
+            text = str(
+                obs.get("text") or obs.get("summary") or obs.get("snippet") or ""
+            ).strip()
+            digest = content_sha256(text) if text else None
+            if digest is None:
+                continue
+            new_findings.append(
+                DocFinding(
+                    content_hash=digest,
+                    content=text,
+                    step=source_step,
+                    origin=origin,
+                    confidence=Confidence.LOW.value,
+                    research_session_id=research_session_id,
+                )
+            )
+
+        coverage_rows: list[DocCoverage] = []
+        for topic in coverage_topics or []:
+            name = str(topic.get("topic") or "").strip()
+            if not name:
+                continue
+            coverage_rows.append(
+                DocCoverage(
+                    topic=name,
+                    status=str(topic.get("status") or "gap"),
+                    depth=topic.get("depth"),
+                )
+            )
+
+        if not new_findings and not coverage_rows:
+            return 0
+
+        def _apply(
+            doc: ChatDocument,
+            _findings: list[DocFinding] = new_findings,
+            _coverage: list[DocCoverage] = coverage_rows,
+        ) -> None:
+            for finding in _findings:
+                doc.state.upsert_finding(finding)
+            if _coverage:
+                # Turn ordinal + wall-clock stamp for the freshness gate. Computed
+                # against the doc inside the mutation so it reflects the count at
+                # write time (the research session for this turn is already upserted).
+                as_of = len(doc.state.research_sessions)
+                stamp = datetime.now(UTC)
+                for cov in _coverage:
+                    cov.as_of_turn = as_of
+                    cov.updated_at = stamp
+                    doc.state.upsert_coverage(cov)
+
+        await self._mutate_chat(chat_id, _apply)
+        logger.info(
+            "CHAT_MEMORY_CONSOLIDATED chat_id=%s rsid=%s claims=%d observations=%d findings=%d coverage=%d",
+            chat_id,
+            research_session_id,
+            len(claims),
+            len(observations),
+            len(new_findings),
+            len(coverage_rows),
+        )
+        return len(new_findings)
 
 
 # -- Adapter helpers -------------------------------------------------------

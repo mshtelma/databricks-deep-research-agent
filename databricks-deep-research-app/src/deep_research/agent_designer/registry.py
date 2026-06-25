@@ -22,6 +22,13 @@ from databricks_deep_research.workflow.definition import NodeType
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from deep_research.agent_designer.field_groups import (
+    ADVANCED_GROUPS,
+    FIELD_GROUPS,
+    HIDDEN_FIELDS,
+    group_sort_key,
+)
+from deep_research.agent_designer.schema_deref import deref_schema
 from deep_research.core.app_config import (
     DEFAULT_SEARCH_PROVIDER,
     SEARCH_PROVIDERS,
@@ -183,6 +190,18 @@ SOURCE_KINDS: list[dict[str, str]] = [
         "source_type": "sql_warehouse",
         "icon": "warehouse",
     },
+    {
+        "kind": "mcp_server",
+        "label": "MCP Server",
+        "source_type": "mcp_server",
+        "icon": "plug",
+    },
+    {
+        "kind": "skill",
+        "label": "Skill",
+        "source_type": "skill",
+        "icon": "book",
+    },
 ]
 
 
@@ -327,15 +346,34 @@ _TABLE_AGGREGATE_SCHEMA: dict[str, Any] = {
 _COMPUTE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "enable_dataframes": {
+            "type": "boolean",
+            "title": "Enable Dataframes",
+            "description": (
+                "Expose a SAFE pandas/numpy subset (curated facades; "
+                "file/network/pickle/eval reach blocked). Use this instead of "
+                "listing pandas/numpy in extra_modules."
+            ),
+            "default": False,
+        },
         "allowed_modules": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Allowed Modules",
-            "description": "Replace the default import allow-list with these module names.",
+            "description": (
+                "Replace the default import allow-list with these module names. "
+                "Only stdlib-vetted modules (math, statistics, decimal, datetime, "
+                "json, re, fractions, itertools, functools, collections, copy, "
+                "calendar, textwrap) plus pandas/numpy are accepted."
+            ),
         },
         "extra_modules": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Extra Modules",
-            "description": "Additional importable modules to expose in the sandbox.",
+            "description": (
+                "Additional importable modules to expose in the sandbox. Only "
+                "stdlib-vetted modules plus pandas/numpy are accepted; for "
+                "pandas/numpy prefer the Enable Dataframes switch."
+            ),
         },
         "max_execution_seconds": {
             "type": "number",
@@ -370,6 +408,123 @@ _COMPUTE_NAMESPACE_SCHEMA: dict[str, Any] = {
     },
 }
 
+# Designer inspector schema for a remote MCP server (spec §4.3). Authored into
+# the workflow's ``mcp_servers`` list (NOT the per-tool ``tools:`` section): each
+# server is built into an MCPToolset per-request and its discovered tools are
+# injected via the resolver-override route. ``SchemaField`` renders these (enum
+# -> dropdown, boolean -> checkbox) with NO React change. Secrets are supplied
+# ONLY via ``secret_ref`` (a Databricks secret-scope reference) — never inline.
+_MCP_SERVER_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "name": {
+            "type": "string",
+            "title": "Server Name",
+            "description": "Unique name for this MCP server; labels its citeable sources.",
+        },
+        "url": {
+            "type": "string",
+            "title": "Server URL",
+            "description": (
+                "Remote MCP endpoint (http/https), SSRF-validated at runtime. "
+                "Required for Client Kind 'http'; leave blank for 'databricks' "
+                "(the URL is derived from the workspace host)."
+            ),
+        },
+        "client_kind": {
+            "type": "string",
+            "enum": ["http", "databricks"],
+            "title": "Client Kind",
+            "description": (
+                "'http': a third-party MCP server at the URL above. 'databricks': a "
+                "managed / UC-connection MCP server reached under your identity."
+            ),
+            "default": "http",
+        },
+        "connection_name": {
+            "type": "string",
+            "title": "UC Connection Name",
+            "description": (
+                "For Client Kind 'databricks' EXTERNAL servers: the Unity Catalog "
+                "connection name backing the MCP proxy."
+            ),
+        },
+        "managed_target": {
+            "type": "string",
+            "title": "Managed Target",
+            "description": (
+                "For Client Kind 'databricks' MANAGED servers: a target like "
+                "'functions/<catalog>/<schema>', 'vector-search/<catalog>/<schema>', "
+                "or 'genie/<space_id>'."
+            ),
+        },
+        "transport": {
+            "type": "string",
+            "enum": ["http", "sse"],
+            "title": "Transport",
+            "description": "Stateless transport. 'http' (streamable) or 'sse'. stdio is unsupported.",
+            "default": "http",
+        },
+        "auth_type": {
+            "type": "string",
+            "enum": ["none", "bearer", "api_key"],
+            "title": "Auth Type",
+            "description": "Auth strategy. 'bearer'/'api_key' require a Secret Reference.",
+            "default": "none",
+        },
+        "secret_ref": {
+            "type": "string",
+            "title": "Secret Reference",
+            "description": (
+                "Databricks secret-scope reference ('scope/key') resolving to the "
+                "credential. NEVER paste an inline token here."
+            ),
+        },
+        "api_key_header": {
+            "type": "string",
+            "title": "API Key Header",
+            "description": "Header name used when Auth Type is 'api_key'.",
+            "default": "X-API-Key",
+        },
+        "allow": {
+            **_STRING_ARRAY_SCHEMA,
+            "title": "Allow Tools",
+            "description": "Optional allowlist of tool names to expose from this server.",
+        },
+        "deny": {
+            **_STRING_ARRAY_SCHEMA,
+            "title": "Deny Tools",
+            "description": "Optional denylist of tool names; applied after Allow.",
+        },
+        "name_prefix": {
+            "type": "string",
+            "title": "Name Prefix",
+            "description": "Optional prefix namespacing this server's tool names.",
+        },
+        "strategy": {
+            "type": "string",
+            "enum": ["fast", "deep"],
+            "title": "Discovery Strategy",
+            "description": "'fast' discovers once and caches; 'deep' re-discovers per step.",
+            "default": "fast",
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "description": (
+                "When on (default) this server's tool results are admitted as "
+                "citeable evidence. Off => results inform the model but are never cited."
+            ),
+            "default": True,
+        },
+    },
+    # Only ``name`` is structurally required; the url-vs-target rule depends on
+    # ``client_kind`` and is enforced by semantic validation + the framework
+    # ``MCPServerConfig`` validator (which the form can't express conditionally).
+    "required": ["name"],
+}
+
+
 _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     "web_search": {
         "layer": "A",
@@ -387,6 +542,47 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
         },
     },
     "web_crawl": {"layer": "A", "config_schema": _EMPTY_SCHEMA},
+    "academic_search": {
+        "layer": "A",
+        "config_schema": {
+            "type": "object",
+            "properties": {
+                "provider": {
+                    "type": "string",
+                    "title": "Provider",
+                    "description": "Scholarly corpus to query (key-less by default).",
+                    "enum": ["arxiv", "openalex", "pubmed_central", "semantic_scholar"],
+                    "default": "arxiv",
+                },
+                "max_results": {
+                    "type": "integer",
+                    "title": "Max Results",
+                    "description": "Number of papers to retrieve.",
+                    "minimum": 1,
+                    "default": 5,
+                },
+                "max_content_chars": {
+                    "type": "integer",
+                    "title": "Max Content Chars",
+                    "description": "Per-result content cap (chars).",
+                    "minimum": 200,
+                    "default": 8000,
+                },
+                "timeout_seconds": {
+                    "type": "number",
+                    "title": "Timeout (seconds)",
+                    "minimum": 1,
+                    "default": 30,
+                },
+                "api_key": {
+                    "type": "string",
+                    "title": "API Key (optional)",
+                    "description": "Optional key for providers that offer one (Semantic Scholar / NCBI).",
+                    "x-widget": "password",
+                },
+            },
+        },
+    },
     "web_research": {
         "layer": "A",
         "config_schema": {
@@ -489,6 +685,10 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     },
     "compute": {"layer": "C", "config_schema": _COMPUTE_SCHEMA},
     "compute_namespace": {"layer": "C", "config_schema": _COMPUTE_NAMESPACE_SCHEMA},
+    "mcp": {
+        "layer": "B",
+        "config_schema": _MCP_SERVER_SCHEMA,
+    },
     "table_discovery": {
         "layer": "B",
         "config_schema": _TABLE_DISCOVERY_SCHEMA,
@@ -528,27 +728,78 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
 
 
 def _agent_config_schema() -> dict[str, Any]:
-    """Return AgentNodeConfig JSON schema with Designer UI hints."""
-    schema = AgentNodeConfig.model_json_schema()
-    properties = schema.setdefault("properties", {})
-    if isinstance(properties, dict):
-        for key in ("system_prompt", "user_prompt_template"):
-            prop = properties.get(key)
-            if isinstance(prop, dict):
-                prop["x-widget"] = "prompt"
-                prop["format"] = "multiline"
-        subtype = properties.get("subtype")
-        if isinstance(subtype, dict):
-            subtype["enum"] = [item["id"] for item in AGENT_SUBTYPES]
-        model_tier = properties.get("model_tier")
-        if isinstance(model_tier, dict):
-            model_tier["enum"] = model_tiers_payload()
+    """Return AgentNodeConfig JSON schema with Designer UI hints.
+
+    The raw Pydantic schema is dereferenced (so nested models / ``Optional``
+    fields / enums-in-``$defs`` render instead of showing as broken text inputs)
+    and each property is decorated with grouping metadata
+    (``x-group``/``x-order``/``x-advanced``/``x-widget``/``description``) from the
+    single-source ``field_groups`` taxonomy so the inspector can present
+    collapsible, grouped sections. Internal / Tools-tab fields are dropped.
+    """
+    schema = deref_schema(AgentNodeConfig.model_json_schema())
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return schema
+
+    # Drop fields managed elsewhere (Tools tab) or internal (compiler-set).
+    for hidden in HIDDEN_FIELDS:
+        properties.pop(hidden, None)
+    required = schema.get("required")
+    if isinstance(required, list):
+        schema["required"] = [r for r in required if r not in HIDDEN_FIELDS]
+
+    # Existing widget hints (unchanged behavior).
+    for key in ("system_prompt", "user_prompt_template"):
+        prop = properties.get(key)
+        if isinstance(prop, dict):
+            prop["x-widget"] = "prompt"
+            prop["format"] = "multiline"
+    subtype = properties.get("subtype")
+    if isinstance(subtype, dict):
+        subtype["enum"] = [item["id"] for item in AGENT_SUBTYPES]
+    model_tier = properties.get("model_tier")
+    if isinstance(model_tier, dict):
+        model_tier["enum"] = model_tiers_payload()
+
+    # Grouping + help decoration from the single-source taxonomy.
+    for name, prop in properties.items():
+        if not isinstance(prop, dict):
+            continue
+        meta = FIELD_GROUPS.get(name)
+        if meta is None:
+            prop.setdefault("x-group", "Advanced")
+            prop.setdefault("x-order", 999)
+            prop.setdefault("x-advanced", True)
+            continue
+        prop["x-group"] = meta.group
+        prop["x-order"] = meta.order
+        prop["x-advanced"] = meta.group in ADVANCED_GROUPS
+        if meta.widget and "x-widget" not in prop:
+            prop["x-widget"] = meta.widget
+        if meta.help:
+            prop["description"] = meta.help
+
+    # Reorder properties by (group order, field order) so even non-grouping
+    # consumers (e.g. the chat list_node_types tool) see a sensible order.
+    schema["properties"] = dict(
+        sorted(
+            properties.items(),
+            key=lambda kv: (
+                group_sort_key(str(kv[1].get("x-group", "")))[0]
+                if isinstance(kv[1], dict)
+                else 999,
+                kv[1].get("x-order", 999) if isinstance(kv[1], dict) else 999,
+                kv[0],
+            ),
+        )
+    )
     return schema
 
 
 def _plan_and_execute_config_schema() -> dict[str, Any]:
     """Return PlanAndExecuteNodeConfig JSON schema with nested agent schemas."""
-    schema = PlanAndExecuteNodeConfig.model_json_schema()
+    schema = deref_schema(PlanAndExecuteNodeConfig.model_json_schema())
     properties = schema.setdefault("properties", {})
     agent_schema = _agent_config_schema()
     if isinstance(properties, dict):
@@ -574,7 +825,7 @@ def _subworkflow_config_schema() -> dict[str, Any]:
     field. ``inline`` holds a compiler-embedded sub-workflow dump (set by
     api/compile.py when a SubAgent compiles to a subworkflow node); it is not a
     user-editable inspector field, so it is omitted from the Designer UI schema."""
-    schema = SubworkflowNodeConfig.model_json_schema()
+    schema = deref_schema(SubworkflowNodeConfig.model_json_schema())
     properties = schema.get("properties")
     if isinstance(properties, dict):
         properties.pop("inline", None)
@@ -596,7 +847,7 @@ def node_types_payload() -> list[dict[str, Any]]:
         elif nt is NodeType.subworkflow:
             config_schema = _subworkflow_config_schema()
         elif config_model is not None:
-            config_schema = config_model.model_json_schema()
+            config_schema = deref_schema(config_model.model_json_schema())
         else:
             config_schema = _EMPTY_SCHEMA
         out.append({

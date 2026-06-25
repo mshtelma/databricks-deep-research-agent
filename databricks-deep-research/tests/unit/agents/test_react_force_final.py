@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -468,3 +469,135 @@ class TestDelayedCompaction:
     def test_compact_after_rounds_small_budget(self) -> None:
         loop = ReactLoop(MagicMock(), [_make_tool()], max_tool_calls=5)
         assert loop._compact_after_rounds == 2
+
+
+# ---------------------------------------------------------------------------
+# Budget-ladder routing (spec §1.2)
+#
+# These pin the end-to-end ``_compact_old_tool_results`` output. Goldens are
+# frozen literals so the regression net is independent of the helper internals.
+# Codex F7: ``mask`` + ``truncate``-default must remain byte-identical.
+# ---------------------------------------------------------------------------
+
+
+def _compaction_messages() -> list[dict[str, Any]]:
+    """Four tool-calling rounds with oversized tool results (>4000 chars)."""
+    return [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "1"}]},
+        {
+            "role": "tool",
+            "content": "| col_a | col_b |\n| 1 | 2 |\nNarrative line one.\n"
+            + ("x" * 6000),
+            "tool_call_id": "1",
+        },
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "2"}]},
+        {"role": "tool", "content": "second tool result " + ("y" * 6000), "tool_call_id": "2"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "3"}]},
+        {"role": "tool", "content": "third tool result " + ("z" * 6000), "tool_call_id": "3"},
+        {"role": "assistant", "content": "", "tool_calls": [{"id": "4"}]},
+        {"role": "tool", "content": "fourth tool result " + ("w" * 6000), "tool_call_id": "4"},
+        {"role": "assistant", "content": "final answer"},
+    ]
+
+
+class TestCompactLadder:
+    def test_truncate_default_is_hard_clip(self) -> None:
+        """Default ``truncate`` (offload off) hard-clips every old tool result."""
+        loop = ReactLoop(
+            MagicMock(),
+            [],
+            max_tool_calls=10,
+            max_result_chars=4000,
+            compaction_strategy="truncate",
+        )
+        msgs = _compaction_messages()
+        loop._compact_old_tool_results(msgs)
+        # All tool results before the last tool-call round are hard-clipped.
+        assert msgs[2]["content"] == (
+            "| col_a | col_b |\n| 1 | 2 |\nNarrative line one.\n"
+            + ("x" * (4000 - len("| col_a | col_b |\n| 1 | 2 |\nNarrative line one.\n")))
+            + "\n...[truncated from 6048 chars]"
+        )
+        assert msgs[2]["content"].endswith("\n...[truncated from 6048 chars]")
+        assert msgs[4]["content"].endswith("\n...[truncated from 6019 chars]")
+        assert msgs[6]["content"].endswith("\n...[truncated from 6018 chars]")
+        # The last round's tool result is left intact (loop range excludes it).
+        assert msgs[8]["content"] == "fourth tool result " + ("w" * 6000)
+
+    def test_truncate_default_byte_identical_to_manual_hard_clip(self) -> None:
+        loop = ReactLoop(
+            MagicMock(),
+            [],
+            max_tool_calls=10,
+            max_result_chars=4000,
+            compaction_strategy="truncate",
+        )
+        msgs = _compaction_messages()
+        originals = [m.get("content") for m in msgs]
+        loop._compact_old_tool_results(msgs)
+        for i in (2, 4, 6):
+            original = originals[i]
+            assert isinstance(original, str)
+            assert msgs[i]["content"] == (
+                original[:4000] + f"\n...[truncated from {len(original)} chars]"
+            )
+
+    def test_mask_is_line_preserving(self) -> None:
+        """``mask`` keeps last N rounds intact and line-preserves the rest."""
+        loop = ReactLoop(
+            MagicMock(),
+            [],
+            max_tool_calls=10,
+            max_result_chars=4000,
+            compaction_strategy="mask",
+            keep_intact_iterations=3,
+        )
+        msgs = _compaction_messages()
+        originals = [m.get("content") for m in msgs]
+        loop._compact_old_tool_results(msgs)
+        # keep_intact=3 over 4 rounds => only the first tool result is compacted.
+        first = originals[2]
+        assert isinstance(first, str)
+        assert msgs[2]["content"] == _summarize_tool_result(first, max_chars=4000)
+        assert msgs[2]["content"].startswith("[Compacted from 6048 chars")
+        # Table rows preserved, narrative dropped.
+        assert "| col_a | col_b |" in msgs[2]["content"]
+        assert "Narrative line one" not in msgs[2]["content"]
+        # The kept-intact rounds are untouched.
+        assert msgs[4]["content"] == originals[4]
+        assert msgs[6]["content"] == originals[6]
+        assert msgs[8]["content"] == originals[8]
+
+    def test_truncate_optin_engages_line_preserving_rung(self) -> None:
+        """With offload != 'off', ``truncate`` uses the line-preserving rung."""
+        loop = ReactLoop(
+            MagicMock(),
+            [],
+            max_tool_calls=10,
+            max_result_chars=4000,
+            compaction_strategy="truncate",
+            tool_output_offload="auto",
+        )
+        msgs = _compaction_messages()
+        originals = [m.get("content") for m in msgs]
+        loop._compact_old_tool_results(msgs)
+        first = originals[2]
+        assert isinstance(first, str)
+        # Opt-in rung => line-preserving output, NOT the hard-clip suffix.
+        assert msgs[2]["content"] == _summarize_tool_result(first, max_chars=4000)
+        assert msgs[2]["content"].startswith("[Compacted from")
+        assert "truncated from" not in msgs[2]["content"]
+
+    def test_max_result_chars_zero_is_noop(self) -> None:
+        loop = ReactLoop(
+            MagicMock(),
+            [],
+            max_tool_calls=10,
+            max_result_chars=0,
+            compaction_strategy="truncate",
+        )
+        msgs = _compaction_messages()
+        originals = [m.get("content") for m in msgs]
+        loop._compact_old_tool_results(msgs)
+        assert [m.get("content") for m in msgs] == originals

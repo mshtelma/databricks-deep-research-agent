@@ -9,7 +9,7 @@ returned AgentV2Summary instances under four scenarios:
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -34,8 +34,8 @@ def _make_agent(
         etag="abc123",
     )
     agent.id = uuid4()
-    agent.created_at = datetime.now(tz=timezone.utc)
-    agent.updated_at = datetime.now(tz=timezone.utc)
+    agent.created_at = datetime.now(tz=UTC)
+    agent.updated_at = datetime.now(tz=UTC)
     return agent
 
 

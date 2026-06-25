@@ -29,6 +29,16 @@ class _FakeOrchestrator:
         self.run_turn_calls: list[dict[str, Any]] = []
         self.instances.append(self)
 
+    def prepare_messages(
+        self,
+        messages: list[dict[str, Any]],
+        current_ast: dict[str, Any] | None = None,
+        assets: list[Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        # Passthrough — graceful trimming is unit-tested in test_orchestrator.py;
+        # here we only assert the handler threads assets through to run_turn.
+        return messages
+
     def check_limits(
         self,
         messages: list[dict[str, Any]],
@@ -47,6 +57,7 @@ class _FakeOrchestrator:
         user_token: str,
         current_user_id: str = "",
         assets: list[Any] | None = None,
+        skill_names: list[str] | None = None,
     ) -> AsyncIterator[DesignerSSEEvent]:
         self.run_turn_calls.append(
             {
@@ -56,6 +67,7 @@ class _FakeOrchestrator:
                 "user_token": user_token,
                 "current_user_id": current_user_id,
                 "assets": assets,
+                "skill_names": skill_names,
             }
         )
         yield DoneEvent()

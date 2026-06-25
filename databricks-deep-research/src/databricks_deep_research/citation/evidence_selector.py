@@ -44,7 +44,17 @@ logger = logging.getLogger(__name__)
 
 
 def _is_corpus_source(src: dict[str, Any]) -> bool:
-    """True when *src* is a pre-curated corpus chunk (skip LLM extraction)."""
+    """True when *src* should use the corpus passthrough (skip LLM extraction).
+
+    This holds for pre-curated corpus chunks (vector index, Genie/SQL, KA,
+    file) AND for any source the caller has flagged with ``_force_passthrough``
+    — the small-corpus fast-path (Wave 1.5) sets that flag so an already-small
+    web corpus reuses the same full-content passthrough instead of paying for
+    per-source LLM span extraction. The flag does NOT change reported
+    provenance: ``source_kind`` is still resolved from the real
+    ``source_kind``/``source_type`` (see ``_source_kind_of``)."""
+    if src.get("_force_passthrough") is True:
+        return True
     return is_corpus_source_value(src.get("source_kind")) or is_corpus_source_value(
         src.get("source_type")
     )
@@ -126,6 +136,15 @@ class EvidenceSelectionConfig:
     quality_min_score: float = 0.5
     model_tier: str | ModelTier = "bulk_analysis"
     max_sources: int = 60
+    small_corpus_skip_threshold: int = 0
+    """Small-corpus fast-path skip. If the number of high-quality sources is
+    ``<=`` this value (and ``> 0``), and the combined content is small, skip
+    per-source LLM span extraction and route all sources through the existing
+    corpus passthrough path (full content kept verbatim, so numeric facts are
+    retained). ``0`` (default) disables the fast-path — behavior is then
+    byte-identical to before this knob existed. The pipeline owns the trigger
+    decision (see ``citation/pipeline.preselect_evidence``); the selector only
+    honors the per-source ``_force_passthrough`` flag the pipeline sets."""
 
 @dataclass
 class EvidenceResult:
@@ -340,6 +359,13 @@ class EvidenceSelector:
                  config: EvidenceSelectionConfig | None = None) -> None:
         self._llm = llm_client
         self._cfg = config or EvidenceSelectionConfig()
+
+    @property
+    def small_corpus_skip_threshold(self) -> int:
+        """Public read of the small-corpus fast-path threshold so the citation
+        pipeline (which holds this selector behind an adapter) can decide
+        whether to flag sources for passthrough. ``0`` = fast-path off."""
+        return self._cfg.small_corpus_skip_threshold
 
     async def select_evidence(
         self, query: str, sources: list[dict[str, Any]], *,

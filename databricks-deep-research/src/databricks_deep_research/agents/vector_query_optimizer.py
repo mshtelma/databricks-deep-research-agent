@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import json
 import logging
-import re
 import time
 from dataclasses import dataclass
 from typing import Any
 
+from databricks_deep_research.agents.json_parsing import parse_llm_json
 from databricks_deep_research.tools.protocol import (
     SourceInfo,
     ToolContext,
@@ -403,23 +402,9 @@ Return ONLY valid JSON: {{"scores": [s0, s1, ...]}}"""
         else:
             text = str(response)
 
-        # Strip markdown code fences
-        text = re.sub(r"```(?:json)?\s*", "", text)
-        text = text.strip("`\n ")
-
-        try:
-            parsed: dict[str, Any] = json.loads(text)
-            return parsed
-        except json.JSONDecodeError:
-            pass
-
-        match = re.search(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL)
-        if match:
-            try:
-                parsed_match: dict[str, Any] = json.loads(match.group())
-                return parsed_match
-            except json.JSONDecodeError:
-                pass
-
-        logger.warning("VS_JSON_PARSE_FAILED text=%s", text[:300])
-        return {}
+        parsed, _ = parse_llm_json(text, default={}, site="vector_query_optimizer")
+        if not parsed:
+            logger.warning("VS_JSON_PARSE_FAILED text=%s", text[:300])
+            return {}
+        result: dict[str, Any] = parsed
+        return result

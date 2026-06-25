@@ -47,6 +47,10 @@ from deep_research.services.job_manager import get_job_manager
 router = APIRouter(prefix="/research/jobs", tags=["Jobs"])
 logger = get_logger(__name__)
 
+_TERMINAL_REPLAY_EVENT_TYPES = frozenset(
+    {"persistence_completed", "research_completed"}
+)
+
 
 # =============================================================================
 # Tolerant sub-read helpers
@@ -76,6 +80,54 @@ def _tolerant_tx_guard(
     if settings.storage_service_impl == "sqlalchemy_legacy":
         return db.begin_nested()
     return nullcontext()
+
+
+async def _drain_job_stream_events(
+    event_service: IResearchEventService,
+    research_session_id: UUID,
+    since_sequence: int,
+    *,
+    limit: int = 50,
+    max_batches: int = 10,
+) -> tuple[list[str], int, bool]:
+    """Return SSE lines for all currently visible events after `since_sequence`.
+
+    The job SSE endpoint emits a synthetic `job_completed` status event once the
+    session row becomes terminal. This helper gives the endpoint one bounded
+    chance to drain terminal replay events before closing, so clients see
+    `persistence_completed`/`research_completed` before `job_completed`.
+    """
+    lines: list[str] = []
+    last_seq = since_sequence
+    terminal_seen = False
+
+    for _ in range(max_batches):
+        events = await event_service.get_events_since_sequence(
+            research_session_id=research_session_id,
+            since_sequence=last_seq,
+            limit=limit,
+        )
+        if not events:
+            break
+
+        for event in events:
+            event_dict = event_service.event_to_dict(event)
+            event_type = event_dict.get("eventType") or event_dict.get("event_type")
+            terminal_seen = terminal_seen or event_type in _TERMINAL_REPLAY_EVENT_TYPES
+            lines.append(f"data: {json.dumps(event_dict)}\n\n")
+
+            sequence_number = (
+                getattr(event, "sequence_number", None)
+                or event_dict.get("sequenceNumber")
+                or event_dict.get("sequence_number")
+            )
+            if sequence_number:
+                last_seq = int(sequence_number)
+
+        if len(events) < limit:
+            break
+
+    return lines, last_seq, terminal_seen
 
 
 async def _load_conversation_history(
@@ -173,6 +225,22 @@ class SubmitJobRequest(BaseModel):
         default=None,
         description="Output type for structured output (e.g., 'meeting_prep'). If not specified, uses default synthesis_report.",
     )
+    tone: str | None = Field(
+        default=None,
+        description=(
+            "Optional writing tone for the synthesized report (e.g. 'objective', "
+            "'formal', 'analytical'). Lowercase framework Tone member name. "
+            "Unrecognized values are ignored; None => default synthesis tone."
+        ),
+    )
+    output_language: str | None = Field(
+        default=None,
+        max_length=100,
+        description=(
+            "Optional output language for the report (e.g. 'Spanish', "
+            "'Japanese'). Free-form language name. None => default (unchanged)."
+        ),
+    )
     # Source selection fields (Feature 008)
     source_scope: SourceScope | None = Field(
         default=None,
@@ -194,9 +262,36 @@ class SubmitJobRequest(BaseModel):
         default=None,
         description="Custom agent ID to use for this research job.",
     )
+    turn_intent: str = Field(
+        default="auto",
+        pattern="^(auto|chat|research)$",
+        description=(
+            "Per-turn routing for custom-agent chats: 'auto' (classify intent), "
+            "'chat' (answer from already-gathered data, no re-run), or 'research' "
+            "(force a fresh agent run). Ignored unless agent_id is set and the chat "
+            "has prior research."
+        ),
+    )
     enable_plan_review: bool = Field(
         default=False,
         description="If true, pause after plan creation for user review.",
+    )
+    # Chat-attached Skills + MCP servers (Feature 2.2 / 4.3 — E1)
+    enabled_mcp_servers: list[str] | None = Field(
+        default=None,
+        description="MCP server names attached to this query via the chat selector.",
+    )
+    enabled_skills: list[str] | None = Field(
+        default=None,
+        description="Skill names attached to this query via the chat selector.",
+    )
+    enable_cross_session_memory: bool | None = Field(
+        default=None,
+        description="Per-run override: recall facts from prior chats (None = inherit global).",
+    )
+    allow_live_search: bool | None = Field(
+        default=None,
+        description="Per-run override: allow the live-web-search follow-up escape hatch (None = inherit global).",
     )
 
 
@@ -318,6 +413,25 @@ async def submit_job(
     # agent_server CLI) where HITL gating is disabled by design.
     approval_broker = getattr(request.app.state, "approval_broker", None)
 
+    logger.info(
+        "JOB_SUBMIT_REQUEST_SHAPE",
+        chat_id=str(body.chat_id),
+        query_mode=body.query_mode,
+        research_depth=body.research_depth,
+        source_scope=body.source_scope.value if body.source_scope else None,
+        enabled_sources=body.enabled_sources,
+        enabled_sources_count=(
+            len(body.enabled_sources) if body.enabled_sources is not None else None
+        ),
+        disabled_sources_count=len(body.disabled_sources),
+        enabled_mcp_servers=body.enabled_mcp_servers,
+        enabled_skills_count=(
+            len(body.enabled_skills) if body.enabled_skills is not None else None
+        ),
+        file_count=len(body.file_ids) if body.file_ids else 0,
+        agent_id=body.agent_id,
+    )
+
     # Submit job
     session = await job_manager.submit_job(
         user_id=user.user_id,
@@ -332,6 +446,8 @@ async def submit_job(
         conversation_history=conversation_history,
         system_instructions=system_instructions,
         output_type=body.output_type,
+        tone=body.tone,
+        output_language=body.output_language,
         source_scope=body.source_scope.value if body.source_scope else None,
         enabled_sources=body.enabled_sources,
         disabled_sources=body.disabled_sources,
@@ -340,8 +456,13 @@ async def submit_job(
         user_token=user_token,
         file_ids=body.file_ids,
         agent_id=body.agent_id,
+        turn_intent=body.turn_intent,
         enable_plan_review=body.enable_plan_review,
         approval_broker=approval_broker,
+        enabled_mcp_servers=body.enabled_mcp_servers,
+        enabled_skills=body.enabled_skills,
+        enable_cross_session_memory=body.enable_cross_session_memory,
+        allow_live_search=body.allow_live_search,
     )
 
     logger.info(
@@ -568,18 +689,17 @@ async def stream_job_events(
                     event_service = make_research_event_service(
                         settings, stack, session=independent_db
                     )
-                    events = await event_service.get_events_since_sequence(
-                        research_session_id=validated_session_id,
-                        since_sequence=last_seq,
-                        limit=50,
+                    event_lines, last_seq, terminal_event_seen = (
+                        await _drain_job_stream_events(
+                            event_service,
+                            validated_session_id,
+                            last_seq,
+                        )
                     )
 
                     # Emit each event
-                    for event in events:
-                        event_dict = event_service.event_to_dict(event)
-                        yield f"data: {json.dumps(event_dict)}\n\n"
-                        if event.sequence_number:
-                            last_seq = event.sequence_number
+                    for event_line in event_lines:
+                        yield event_line
 
                     current_view = await load_session_control_view(
                         validated_chat_id,
@@ -596,6 +716,38 @@ async def stream_job_events(
                     status_val = current_view.status.value
 
                     if status_val != ResearchStatus.IN_PROGRESS.value:
+                        drained_count = 0
+                        final_lines, last_seq, final_terminal_seen = (
+                            await _drain_job_stream_events(
+                                event_service,
+                                validated_session_id,
+                                last_seq,
+                            )
+                        )
+                        terminal_event_seen = terminal_event_seen or final_terminal_seen
+                        drained_count += len(final_lines)
+                        for event_line in final_lines:
+                            yield event_line
+
+                        if (
+                            status_val == ResearchStatus.COMPLETED.value
+                            and not terminal_event_seen
+                        ):
+                            await asyncio.sleep(0.2)
+                            retry_lines, last_seq, retry_terminal_seen = (
+                                await _drain_job_stream_events(
+                                    event_service,
+                                    validated_session_id,
+                                    last_seq,
+                                )
+                            )
+                            terminal_event_seen = (
+                                terminal_event_seen or retry_terminal_seen
+                            )
+                            drained_count += len(retry_lines)
+                            for event_line in retry_lines:
+                                yield event_line
+
                         # Emit final status event and close
                         final_event = {
                             "eventType": "job_completed",
@@ -606,6 +758,8 @@ async def stream_job_events(
                             "JOB_STREAM_COMPLETED",
                             session_id=str(validated_session_id),
                             status=status_val,
+                            terminal_event_seen=terminal_event_seen,
+                            drained_count=drained_count,
                         )
                         break
 

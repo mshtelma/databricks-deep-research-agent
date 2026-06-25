@@ -17,6 +17,16 @@ Agents interact with memory through:
    orchestrator.
 """
 
+from databricks_deep_research.memory.cross_session import (
+    DEFAULT_MAX_CHARS,
+    DEFAULT_MAX_FACTS,
+    DEFAULT_MIN_CONFIDENCE,
+    ConfidenceLabel,
+    CrossSessionFact,
+    build_cross_session_memory_message,
+    render_cross_session_facts,
+    select_facts,
+)
 from databricks_deep_research.memory.extraction_schema import (
     ExtractedEntity,
     ExtractedFact,
@@ -49,8 +59,13 @@ from databricks_deep_research.memory.spotlighting import (
 __all__ = [
     "CHAT_MEMORY_APPENDIX_STATE_KEY",
     "ChatMemorySnapshot",
+    "ConfidenceLabel",
     "CoverageEntry",
+    "CrossSessionFact",
     "DEFAULT_HEAD_CHARS",
+    "DEFAULT_MAX_CHARS",
+    "DEFAULT_MAX_FACTS",
+    "DEFAULT_MIN_CONFIDENCE",
     "DEFAULT_SPOTLIGHTING_MODE",
     "EntityRecord",
     "ExtractedEntity",
@@ -61,8 +76,11 @@ __all__ = [
     "MemoryConfig",
     "RateLimitConfig",
     "SpotlightingMode",
+    "build_cross_session_memory_message",
     "extract_file_content",
     "inject_attached_context_block",
+    "render_cross_session_facts",
+    "select_facts",
     "strip_datamark",
     "wrap_attached_context",
 ]

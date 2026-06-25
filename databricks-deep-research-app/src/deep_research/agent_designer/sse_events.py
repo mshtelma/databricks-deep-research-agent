@@ -57,6 +57,23 @@ class ToolResultEvent(_SSEBase):
     result: dict[str, Any]
 
 
+class ProgressEvent(_SSEBase):
+    """Transient progress heartbeat for the UI during long designer turns.
+
+    Emitted on agent-node starts (the slow Opus/GPT-5 steps) and loop
+    iterations so the chat shows live activity instead of a frozen spinner
+    while a multi-minute turn streams. Purely a streaming status line — the
+    frontend renders it transiently and never persists it to the transcript
+    (so it can't bloat the resent payload). Distinct from the wire-level SSE
+    keepalive comment frame, which the route emits to defeat the gateway's
+    idle-connection timeout."""
+
+    type: Literal["progress"] = "progress"
+    label: str
+    iteration: int | None = None
+    total: int | None = None
+
+
 class ErrorEvent(_SSEBase):
     type: Literal["error"] = "error"
     message: str
@@ -68,5 +85,11 @@ class DoneEvent(_SSEBase):
 
 
 DesignerSSEEvent = (
-    MessageEvent | ToolCallEvent | MutationProposedEvent | ToolResultEvent | ErrorEvent | DoneEvent
+    MessageEvent
+    | ToolCallEvent
+    | MutationProposedEvent
+    | ToolResultEvent
+    | ProgressEvent
+    | ErrorEvent
+    | DoneEvent
 )

@@ -33,13 +33,13 @@ are emitted at the call-site, not inside the prompt builder.
 
 from __future__ import annotations
 
-import json
 import logging
 import re
 from typing import Any
 
 from pydantic import BaseModel, Field
 
+from databricks_deep_research.agents.json_parsing import parse_llm_json
 from databricks_deep_research.agents.output_models import (
     ReflectionDirective,
     ReflectionOutput,
@@ -159,9 +159,8 @@ def parse_reflection_output(raw: Any) -> ReflectionOutput | None:
             logger.debug("REFLECTOR_DIRECTIVES_DROPPED reason=%s", exc)
             return None
     if isinstance(raw, str):
-        try:
-            data = json.loads(raw)
-        except (ValueError, TypeError):
+        data, _ = parse_llm_json(raw, default=None, site="reflection_output")
+        if data is None:
             return None
         if isinstance(data, dict):
             return parse_reflection_output(data)

@@ -469,6 +469,13 @@ export const jobsApi = {
     fileIds?: string[]
     agentId?: string
     enablePlanReview?: boolean
+    turnIntent?: string
+    tone?: string
+    outputLanguage?: string
+    enabledMcpServers?: string[]
+    enabledSkills?: string[]
+    enableCrossSessionMemory?: boolean
+    allowLiveSearch?: boolean
   }) =>
     request<Job>('/research/jobs', {
       method: 'POST',
@@ -485,6 +492,13 @@ export const jobsApi = {
         file_ids: data.fileIds || null,
         agent_id: data.agentId || null,
         enable_plan_review: data.enablePlanReview ?? false,
+        turn_intent: data.turnIntent || 'auto',
+        tone: data.tone || null,
+        output_language: data.outputLanguage || null,
+        enabled_mcp_servers: data.enabledMcpServers || null,
+        enabled_skills: data.enabledSkills || null,
+        enable_cross_session_memory: data.enableCrossSessionMemory ?? null,
+        allow_live_search: data.allowLiveSearch ?? null,
       }),
     }),
 
@@ -517,6 +531,28 @@ export const jobsApi = {
   // Get SSE stream URL for a job.
   streamUrl: (chatId: string, sessionId: string, sinceSequence = 0) =>
     `${API_BASE_URL}/research/jobs/${chatId}/${sessionId}/stream?sinceSequence=${sinceSequence}`,
+}
+
+// Skill folders (Feature 2.2 / A3+E1): user-registered workspace-FS / Volume
+// skill roots scanned at runtime under the user's identity.
+export interface SkillFolder {
+  id: string
+  path: string
+  kind: 'workspace' | 'volume'
+  createdAt?: string
+}
+
+export const skillFoldersApi = {
+  list: () => request<{ folders: SkillFolder[] }>('/skill-folders'),
+
+  add: (path: string, kind: 'workspace' | 'volume' = 'workspace') =>
+    request<SkillFolder>('/skill-folders', {
+      method: 'POST',
+      body: JSON.stringify({ path, kind }),
+    }),
+
+  remove: (id: string) =>
+    request<void>(`/skill-folders/${id}`, { method: 'DELETE' }),
 }
 
 // Preferences API

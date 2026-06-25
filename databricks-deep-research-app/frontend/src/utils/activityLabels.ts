@@ -19,6 +19,31 @@ import type {
 } from '../types'
 import { inferSourceType } from './eventStats'
 import type { MergedResultData } from './eventFilters'
+import runStatusContract from '../../../contracts/run_status_contract.json'
+
+/**
+ * Typed terminal-status label map, sourced from the SINGLE shared contract
+ * fixture (`databricks-deep-research-app/contracts/run_status_contract.json`).
+ *
+ * This is the frontend half of the backend<->frontend status parity: the same
+ * JSON pins the backend `RunStatus` enum (via a framework pytest) and these TS
+ * label-map keys (via a vitest). Either side drifting fails CI — killing the
+ * recurring "frontend-gate-vs-backend-prose" status drift.
+ */
+export const RUN_STATUS_LABELS: Readonly<Record<string, string>> =
+  runStatusContract.labels
+
+/** The terminal-status enum values, from the shared contract. */
+export const RUN_STATUSES: readonly string[] = runStatusContract.statuses
+
+/**
+ * Pure status -> human label. Falls back to a safe label for an unknown status
+ * (never throws), so an unrecognized backend status degrades gracefully.
+ */
+export function formatStatusLabel(status: string | null | undefined): string {
+  if (!status) return 'Unknown'
+  return RUN_STATUS_LABELS[status] ?? status
+}
 
 /** Human-readable labels for each agent (no emojis - EnhancedEventLabel adds icons) */
 const AGENT_STARTED_LABELS: Record<string, string> = {
@@ -44,8 +69,16 @@ const ENTERPRISE_SOURCE_TYPES = new Set(['genie', 'vector_search', 'knowledge_as
 
 /**
  * Format a stream event into a human-readable activity label.
+ *
+ * If the event carries a recognized terminal `status` field (the typed
+ * status contract), render it from the shared status->label map. Events
+ * without a status keep their existing per-eventType formatting below.
  */
 export function formatActivityLabel(event: StreamEvent): string {
+  const status = (event as { status?: unknown }).status
+  if (typeof status === 'string' && status in RUN_STATUS_LABELS) {
+    return formatStatusLabel(status)
+  }
   switch (event.eventType) {
     case 'agent_started':
       return formatAgentStarted(event)

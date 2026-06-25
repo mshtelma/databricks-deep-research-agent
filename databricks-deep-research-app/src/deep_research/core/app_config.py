@@ -1335,6 +1335,22 @@ class ResearchTypeConfig(BaseModel):
         default=None,
         description="Optional per-type overrides for citation verification",
     )
+    default_tone: str | None = Field(
+        default=None,
+        description=(
+            "Optional default report tone for this research depth (lowercase "
+            "framework Tone member name, e.g. 'objective'). None => unchanged "
+            "synthesis tone. Overridden by a per-request tone."
+        ),
+    )
+    default_output_language: str | None = Field(
+        default=None,
+        description=(
+            "Optional default report output language for this research depth "
+            "(free-form language name, e.g. 'Spanish'). None => unchanged. "
+            "Overridden by a per-request output_language."
+        ),
+    )
 
     model_config = {"frozen": True}
 
@@ -1724,12 +1740,32 @@ class AgentDesignerConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class SkillsConfig(BaseModel):
+    """Skills subsystem configuration (Feature 2.2)."""
+
+    # GLOBAL kill-switch for executing skill SCRIPTS. Default OFF: even an agent
+    # with ``allow_skill_scripts=True`` cannot run skill scripts unless this is
+    # also True. Reading skill BODIES (``read_skill``) is unaffected. This is the
+    # environment-level half of the two-switch gate (the other is per-agent
+    # ``AgentNodeConfig.allow_skill_scripts``).
+    allow_script_execution: bool = False
+
+    model_config = {"frozen": True}
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
     default_role: str = "analytical"
     endpoints: dict[str, EndpointConfig] = Field(default_factory=dict)
     models: dict[str, ModelRoleConfig] = Field(default_factory=dict)
+    # OPTIONAL LLM model-family catalog: family label -> ordered list of endpoint
+    # ids (keys of ``endpoints``). Orthogonal to ``models`` (capability tiers): a
+    # node may pin ``config.model_family`` to route to a specific family
+    # regardless of tier (e.g. multi-model iterative_refinement ensembles). Empty
+    # by default — when absent, family selection is simply unavailable and the
+    # Designer falls back to tier+stance diversity.
+    model_families: dict[str, list[str]] = Field(default_factory=dict)
     agents: AgentsConfig = Field(default_factory=AgentsConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     truncation: TruncationConfig = Field(default_factory=TruncationConfig)
@@ -1778,6 +1814,11 @@ class AppConfig(BaseModel):
         default_factory=AgentDesignerConfig,
         description="Agent Designer tool catalog and SafeProbe settings.",
     )
+    # Skills subsystem (Feature 2.2) — global skill-script kill-switch lives here.
+    skills: SkillsConfig = Field(
+        default_factory=SkillsConfig,
+        description="Skills subsystem configuration (skill-script execution gate).",
+    )
 
     @model_validator(mode="after")
     def validate_endpoint_references(self) -> "AppConfig":
@@ -1789,6 +1830,16 @@ class AppConfig(BaseModel):
                 if endpoint_id not in self.endpoints:
                     errors.append(
                         f"Role '{role_name}' references undefined endpoint: '{endpoint_id}'"
+                    )
+
+        for family_name, family_endpoints in self.model_families.items():
+            if not family_endpoints:
+                errors.append(f"Model family '{family_name}' has no endpoints")
+            for endpoint_id in family_endpoints:
+                if endpoint_id not in self.endpoints:
+                    errors.append(
+                        f"Model family '{family_name}' references undefined "
+                        f"endpoint: '{endpoint_id}'"
                     )
 
         if self.default_role and self.models and self.default_role not in self.models:

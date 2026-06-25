@@ -13,6 +13,7 @@ from databricks_deep_research.agents.output_models import (
     CoordinatorOutput,
     ExtractedScope,
 )
+
 from deep_research.agent_designer.designer_architect import (
     LaneSpec,
     WorkflowDesignBrief,

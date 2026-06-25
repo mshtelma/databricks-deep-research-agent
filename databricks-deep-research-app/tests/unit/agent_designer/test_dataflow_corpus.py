@@ -11,7 +11,6 @@ matrix (and a hardcoded domain list would violate the no-hardcoded-domains rule)
 from __future__ import annotations
 
 import pytest
-
 from databricks_deep_research.workflow.dataflow_contracts import (
     validate_dataflow_contracts,
 )

@@ -174,6 +174,64 @@ def test_reflector_post_process_emits_reflection_event(
     assert event.decision in {"continue", "complete"}
 
 
+def test_reflector_post_process_coerces_nonstring_fields() -> None:
+    """Regression: an LLM dict under ``evidence_sufficiency`` must not crash.
+
+    Live AIS failure (designer-draft run): the reflector LLM returned
+    ``evidence_sufficiency={"completeness": 8, ...}`` (a dict). The raw value was
+    forwarded into ``ReflectionDecisionEvent`` (typed ``str | None``), raising a
+    ValidationError that failed the whole already-completed research run. The
+    builtin must coerce non-strings to a string instead of raising.
+    """
+    builtin = get_builtin("reflector")
+    assert builtin is not None and builtin.post_process is not None
+
+    events = builtin.post_process(
+        "reflector_1",
+        {
+            "decision": "complete",
+            "reasoning": "done",
+            "evidence_sufficiency": {"completeness": 8, "depth": "needs revision"},
+            "failure_mode": {"kind": "none"},
+        },
+        AgentNodeConfig(subtype="reflector"),
+        WorkflowState(query="test"),
+    )
+
+    assert len(events) == 1
+    event = events[0]
+    assert isinstance(event, ReflectionDecisionEvent)
+    # Coerced to a string (not raised); the malformed content is preserved.
+    assert isinstance(event.evidence_sufficiency, str)
+    assert "completeness" in event.evidence_sufficiency
+    assert isinstance(event.failure_mode, str)
+
+
+def test_reflector_output_normalizes_bad_evidence_sufficiency() -> None:
+    """The ReflectionOutput before-validator maps non-literal input to None."""
+    # Structured object (LLM mistake) -> None, no raise.
+    assert (
+        ReflectionOutput.model_validate(
+            {"decision": "continue", "reasoning": "x", "evidence_sufficiency": {"completeness": 8}}
+        ).evidence_sufficiency
+        is None
+    )
+    # Off-vocabulary string -> None.
+    assert (
+        ReflectionOutput.model_validate(
+            {"decision": "continue", "reasoning": "x", "evidence_sufficiency": "mostly good"}
+        ).evidence_sufficiency
+        is None
+    )
+    # Case-insensitive valid literal passes through normalized.
+    assert (
+        ReflectionOutput.model_validate(
+            {"decision": "continue", "reasoning": "x", "evidence_sufficiency": "Insufficient"}
+        ).evidence_sufficiency
+        == "insufficient"
+    )
+
+
 def test_unexpected_planner_and_reflector_output_returns_no_events() -> None:
     planner = get_builtin("planner")
     reflector = get_builtin("reflector")

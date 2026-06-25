@@ -2,21 +2,26 @@
  * PendingMutationCard — Databricks-styled card for a proposed AST mutation
  * awaiting user approval.
  *
- * Visual:
- *   - White card with status-coloured border (navy-300 pending / green-300
- *     applied — applied state is short-lived since the parent removes the
- *     mutation on approval, so we always render in pending mode here).
- *   - Header strip in oat-light with a mono uppercase status label and the
- *     mutation operation kind.
- *   - Body: title (description) + summary + collapsible AST delta + validation
- *     errors + Apply/Reject buttons.
+ * Change preview (Fix #1): an AST-AWARE semantic diff (`computeAstFieldDiff`)
+ * that surfaces config / prompt / model-tier / tool-binding changes — not just
+ * the node type:label tree. Prompt-only edits now read "1 edit", not "0 edits".
+ *
+ * Also renders:
+ *   - a stale badge + disabled Apply when a newer change was applied (Fix #2)
+ *   - a removed-nodes warning when the proposal drops nodes from the current
+ *     workflow (Fix #5, detection-only)
  */
 
 import * as React from 'react';
-import { GitBranch, Check, X, ChevronDown, ChevronUp } from 'lucide-react';
+import { GitBranch, Check, X, ChevronDown, ChevronUp, AlertTriangle, Clock } from 'lucide-react';
 import type { PendingMutation } from '@/hooks/useChatSession';
-import type { Block } from '@/types/ast';
 import { NormalizationFixPill } from './NormalizationFixPill';
+import {
+  computeAstFieldDiff,
+  formatDiffValue,
+  isNoiseField,
+  type AstFieldChange,
+} from '@/lib/astFieldDiff';
 
 // ---------------------------------------------------------------------------
 // Props
@@ -26,6 +31,8 @@ export interface PendingMutationCardProps {
   mutation: PendingMutation;
   onApply: (id: string) => void;
   onReject: (id: string) => void;
+  /** Disable Apply while a previous apply is resolving (async, Fix #3). */
+  applyInFlight?: boolean;
   /**
    * When false, the Designer auto-repair pill collapses to a single "!"
    * compact indicator. Controlled by the user-preference toggle.
@@ -35,50 +42,70 @@ export interface PendingMutationCardProps {
 }
 
 // ---------------------------------------------------------------------------
-// Diff lines (simple textual representation)
+// Field change row
 // ---------------------------------------------------------------------------
 
-interface DiffLine {
-  /** ' ', '+', '-' */
-  marker: ' ' | '+' | '-';
-  text: string;
-  depth: number;
-}
+const KIND_COLOR: Record<AstFieldChange['kind'], string> = {
+  added: 'var(--db-green-700)',
+  removed: 'var(--db-lava-700)',
+  modified: 'var(--db-navy-800)',
+};
 
-function flattenBlock(block: Block | undefined, depth = 0): Array<{ id: string; line: string; depth: number }> {
-  if (!block) return [];
-  const out: Array<{ id: string; line: string; depth: number }> = [];
-  const labelText = block.label ? ` ${block.label}` : '';
-  out.push({ id: block.id, line: `${block.type}:${labelText}`, depth });
-  for (const child of block.children ?? []) {
-    out.push(...flattenBlock(child, depth + 1));
-  }
-  // plan_and_execute body
-  const body = (block.config as Record<string, unknown>)['body'] as Block | undefined;
-  if (body) out.push(...flattenBlock(body, depth + 1));
-  return out;
-}
+const KIND_GLYPH: Record<AstFieldChange['kind'], string> = {
+  added: '+',
+  removed: '−',
+  modified: '~',
+};
 
-function buildDiff(oldRoot: Block | undefined, newRoot: Block | undefined): DiffLine[] {
-  const oldFlat = flattenBlock(oldRoot);
-  const newFlat = flattenBlock(newRoot);
-  const oldIds = new Set(oldFlat.map((b) => b.id));
-  const newIds = new Set(newFlat.map((b) => b.id));
+function FieldChangeRow({ change }: { change: AstFieldChange }): React.ReactElement {
+  const [expanded, setExpanded] = React.useState(false);
+  const oldStr = formatDiffValue(change.oldValue, expanded ? 4000 : 120);
+  const newStr = formatDiffValue(change.newValue, expanded ? 4000 : 120);
+  const long =
+    formatDiffValue(change.oldValue, 4000).length > 120 ||
+    formatDiffValue(change.newValue, 4000).length > 120;
 
-  // Walk the new tree; mark added rows; insert removed rows where their parent
-  // would have placed them. For our purposes — a simple linear merge based on
-  // position is good enough.
-  const result: DiffLine[] = [];
-  for (const row of newFlat) {
-    const marker: DiffLine['marker'] = oldIds.has(row.id) ? ' ' : '+';
-    result.push({ marker, text: row.line, depth: row.depth });
-  }
-  for (const row of oldFlat) {
-    if (!newIds.has(row.id)) {
-      result.push({ marker: '-', text: row.line, depth: row.depth });
-    }
-  }
-  return result;
+  return (
+    <li className="rounded-[5px] border border-db-gray-lines bg-white px-2 py-1.5">
+      <div className="flex items-center gap-1.5">
+        <span
+          className="font-db-mono text-[11px] font-bold"
+          style={{ color: KIND_COLOR[change.kind] }}
+          aria-hidden
+        >
+          {KIND_GLYPH[change.kind]}
+        </span>
+        <span className="text-[12px] font-medium text-db-navy-800">{change.field}</span>
+        {long && (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="ml-auto text-[10px] font-medium text-db-gray-text hover:text-db-navy-800"
+          >
+            {expanded ? 'Show less' : 'View full'}
+          </button>
+        )}
+      </div>
+      {change.kind === 'added' ? (
+        <div className="mt-1 break-words font-db-mono text-[11px] text-db-green-700">{newStr}</div>
+      ) : change.kind === 'removed' ? (
+        <div className="mt-1 break-words font-db-mono text-[11px] text-db-lava-700 line-through">
+          {oldStr}
+        </div>
+      ) : (
+        <div className="mt-1 space-y-0.5 font-db-mono text-[11px]">
+          <div className="break-words text-db-lava-700">
+            <span className="text-db-gray-text">− </span>
+            {oldStr}
+          </div>
+          <div className="break-words text-db-green-700">
+            <span className="text-db-gray-text">+ </span>
+            {newStr}
+          </div>
+        </div>
+      )}
+    </li>
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -89,26 +116,48 @@ export function PendingMutationCard({
   mutation,
   onApply,
   onReject,
+  applyInFlight = false,
   showAutoRepairDetails = true,
 }: PendingMutationCardProps): React.ReactElement {
   const hasErrors = mutation.validationErrors.length > 0;
+  const isStale = mutation.isStale === true;
   const [showDiff, setShowDiff] = React.useState(false);
 
   const diff = React.useMemo(
-    () => buildDiff(mutation.oldAst?.root, mutation.newAst?.root),
+    () => computeAstFieldDiff(mutation.oldAst, mutation.newAst),
     [mutation.oldAst, mutation.newAst],
   );
+
+  // Field changes auto-applied by the Layer-2 normalizer are shown via the
+  // NormalizationFixPill, not the user-meaningful list (Fix #1 segregation).
+  const autoRepairPaths = React.useMemo(
+    () => new Set(mutation.normalizationFixes.map((f) => f.path)),
+    [mutation.normalizationFixes],
+  );
+  const userChanges = React.useMemo(
+    () => diff.fieldChanges.filter((c) => !isNoiseField(c.rawPath) && !autoRepairPaths.has(c.rawPath)),
+    [diff.fieldChanges, autoRepairPaths],
+  );
+
+  const editCount = userChanges.length + diff.addedNodeCount + diff.removedNodeCount;
 
   const op = (mutation.mutationKind || 'PROPOSE')
     .toString()
     .toUpperCase()
     .replace(/[^A-Z_]/g, '_');
 
+  const applyDisabled = hasErrors || isStale || applyInFlight;
+
   return (
     <div
       className="overflow-hidden rounded-db-md border bg-white shadow-db-md"
       style={{
-        borderColor: hasErrors ? 'var(--db-lava-300)' : 'var(--db-navy-300)',
+        borderColor: hasErrors
+          ? 'var(--db-lava-300)'
+          : isStale
+          ? 'var(--db-gray-lines)'
+          : 'var(--db-navy-300)',
+        opacity: isStale ? 0.8 : 1,
       }}
     >
       {/* Status strip */}
@@ -119,14 +168,49 @@ export function PendingMutationCard({
           className={hasErrors ? 'text-db-lava-700' : 'text-db-navy-800'}
         />
         <span className="font-db-mono text-[11px] font-medium tracking-[0.02em] text-db-navy-800">
-          {hasErrors ? 'INVALID MUTATION' : 'PROPOSED MUTATION'}
+          {hasErrors ? 'INVALID MUTATION' : isStale ? 'OUT OF DATE' : 'PROPOSED MUTATION'}
         </span>
+        {isStale && (
+          <span
+            className="inline-flex items-center gap-1 rounded-sm bg-db-oat-medium px-1.5 py-0.5 font-db-mono text-[9px] font-semibold uppercase tracking-[0.04em] text-db-gray-text"
+            title="A newer change was applied; regenerate this one to apply it."
+          >
+            <Clock size={9} /> stale
+          </span>
+        )}
         <span className="ml-auto truncate font-db-mono text-[10px] text-db-gray-text">{op}</span>
       </div>
 
       {/* Body */}
       <div className="p-3">
         <div className="mb-1 text-[13px] font-medium text-db-navy-800">{mutation.description}</div>
+
+        {isStale && (
+          <p className="mt-1.5 rounded-db-md border border-db-gray-lines bg-db-oat-light px-2.5 py-1.5 text-[11px] text-db-gray-text">
+            A newer change was applied to the workflow, so this proposal is out of date. Reject it and
+            ask again to regenerate against the current workflow.
+          </p>
+        )}
+
+        {/* Removed-nodes warning (Fix #5 — detection only) */}
+        {diff.removedNodeCount > 0 && (
+          <div
+            role="alert"
+            className="mt-2 flex items-start gap-1.5 rounded-db-md border border-db-yellow-300 bg-db-yellow-300/30 px-2.5 py-1.5 text-[11px] text-db-yellow-800"
+          >
+            <AlertTriangle size={12} className="mt-0.5 shrink-0" />
+            <span>
+              Removes {diff.removedNodeCount} node{diff.removedNodeCount === 1 ? '' : 's'} from your
+              current workflow
+              {': '}
+              {diff.structural
+                .filter((s) => s.kind === 'node_removed')
+                .map((s) => s.label)
+                .join(', ')}
+              .
+            </span>
+          </div>
+        )}
 
         {mutation.normalizationFixes.length > 0 && (
           <div className="mt-2">
@@ -148,8 +232,19 @@ export function PendingMutationCard({
           </ul>
         )}
 
-        {/* Collapsible diff */}
-        {diff.length > 0 && (
+        {/* Added-nodes summary */}
+        {diff.addedNodeCount > 0 && (
+          <p className="mt-2 text-[11px] text-db-green-700">
+            Adds {diff.addedNodeCount} node{diff.addedNodeCount === 1 ? '' : 's'}:{' '}
+            {diff.structural
+              .filter((s) => s.kind === 'node_added')
+              .map((s) => `${s.label} (${s.nodeType})`)
+              .join(', ')}
+          </p>
+        )}
+
+        {/* Collapsible field-change diff */}
+        {(userChanges.length > 0 || editCount > 0) && (
           <div className="mt-3">
             <button
               type="button"
@@ -158,29 +253,19 @@ export function PendingMutationCard({
               className="inline-flex items-center gap-1 text-[11px] font-medium text-db-gray-text transition-colors hover:text-db-navy-800"
             >
               {showDiff ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
-              {showDiff ? 'Hide change' : `View change (${diff.filter((d) => d.marker !== ' ').length} edits)`}
+              {showDiff ? 'Hide changes' : `View changes (${editCount} edit${editCount === 1 ? '' : 's'})`}
             </button>
-            {showDiff && (
-              <pre
-                className="mt-2 max-h-48 overflow-auto rounded-[5px] px-2.5 py-2 font-db-mono text-[11px] leading-[1.55]"
-                style={{ background: 'var(--db-navy-900)' }}
-              >
-                {diff.map((d, idx) => {
-                  const color =
-                    d.marker === '+'
-                      ? 'var(--db-green-300)'
-                      : d.marker === '-'
-                      ? 'var(--db-lava-400)'
-                      : 'var(--db-navy-300)';
-                  const indent = '  '.repeat(d.depth);
-                  return (
-                    <div key={idx} style={{ color }}>
-                      {d.marker} {indent}
-                      {d.text}
-                    </div>
-                  );
-                })}
-              </pre>
+            {showDiff && userChanges.length > 0 && (
+              <ul className="mt-2 space-y-1.5" data-testid="field-change-list">
+                {userChanges.map((c) => (
+                  <FieldChangeRow key={`${c.rawPath}:${c.kind}`} change={c} />
+                ))}
+              </ul>
+            )}
+            {showDiff && userChanges.length === 0 && editCount > 0 && (
+              <p className="mt-2 text-[11px] text-db-gray-text">
+                Structural changes only — see the added/removed summary above.
+              </p>
             )}
           </div>
         )}
@@ -189,7 +274,7 @@ export function PendingMutationCard({
         <div className="mt-3 flex gap-1.5">
           <button
             type="button"
-            disabled={hasErrors}
+            disabled={applyDisabled}
             onClick={() => onApply(mutation.id)}
             aria-label="Apply mutation"
             className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-db-md bg-db-lava-600 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-db-lava-700 disabled:cursor-not-allowed disabled:opacity-55"

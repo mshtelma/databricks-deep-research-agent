@@ -112,6 +112,11 @@ class Coverage(BaseModel):
     topic: str
     status: str = CoverageStatus.GAP.value
     depth: str | None = None
+    # Freshness stamps (Phase 2e) — the memory-aware routing gate (Phase 3a)
+    # reads these to decide answer-from-memory vs re-research. Default-safe:
+    # old documents without these keys validate to (0, None) via extra="ignore".
+    as_of_turn: int = 0
+    updated_at: datetime | None = None
 
 
 class FileMemo(BaseModel):
@@ -168,6 +173,9 @@ class ResearchSessionState(BaseModel):
     query_classification: dict[str, Any] = Field(default_factory=dict)
     execution_state: dict[str, Any] = Field(default_factory=dict)
     verification_data: dict[str, Any] = Field(default_factory=dict)
+    # Value-free promotion trace (spec 6.1); None = not promotable (kept nullable,
+    # intentionally NOT in the _none_to_empty_dict coercion list).
+    promotion_trace: dict[str, Any] | None = None
     current_step: int = 0
     started_at: datetime = Field(default_factory=_utcnow)
     completed_at: datetime | None = None

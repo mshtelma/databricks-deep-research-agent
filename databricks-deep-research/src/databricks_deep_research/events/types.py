@@ -20,6 +20,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from databricks_deep_research.events.status_contract import RunStatus
+
 # --- Base event ---
 
 
@@ -51,6 +53,9 @@ class NodeCompletedEvent(StreamEvent):
 
     event_type: Literal["node_completed"] = "node_completed"
     duration_ms: float
+    # Typed terminal status (additive). Existing consumers ignoring this field
+    # are unbroken; new consumers read it instead of parsing prose.
+    status: RunStatus = "completed"
 
 
 class NodeErrorEvent(StreamEvent):
@@ -60,6 +65,9 @@ class NodeErrorEvent(StreamEvent):
     error_message: str
     will_retry: bool = False
     retry_attempt: int = 0
+    # Typed terminal status (additive). Defaults to "failed" so existing
+    # error-emit sites keep their semantics without code changes.
+    status: RunStatus = "failed"
 
 
 class NodeSkippedEvent(StreamEvent):
@@ -328,6 +336,10 @@ class EvaluationDecisionEvent(StreamEvent):
     items_processed: int
     evidence_sufficiency: str | None = None
     failure_mode: str | None = None
+    # Additive, optional. The reflector's explicit coverage gaps + multi-dim
+    # rubric. Empty list / None (the defaults) == today's event shape.
+    knowledge_gaps: list[str] = Field(default_factory=list)
+    rubric: dict[str, Any] | None = None
 
 
 class ReplanTriggeredEvent(StreamEvent):
@@ -546,7 +558,6 @@ from databricks_deep_research.events.hitl import (  # noqa: E402
     GateTimeoutEvent,
     GateWaitingEvent,
 )
-
 
 # --- Discriminated union type ---
 

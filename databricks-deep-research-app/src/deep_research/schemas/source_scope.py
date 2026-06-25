@@ -59,6 +59,9 @@ class SourceScopeConfig(BaseModel):
     enable_uploaded_files: bool = True
     """Enable uploaded file search."""
 
+    enable_mcp_server: bool = True
+    """Enable MCP server tools."""
+
     class Config:
         """Pydantic configuration."""
 
@@ -77,7 +80,11 @@ class SourceScopeConfig(BaseModel):
         if self.scope == SourceScope.ENTERPRISE_ONLY and source_type in ("web_search",):
             return False
         if self.scope == SourceScope.WEB_ONLY and source_type in (
-            "vector_search", "genie", "knowledge_assistant"
+            "vector_search",
+            "genie",
+            "knowledge_assistant",
+            "mcp",
+            "mcp_server",
         ):
             return False
 
@@ -88,6 +95,8 @@ class SourceScopeConfig(BaseModel):
             "knowledge_assistant": self.enable_knowledge_assistant,
             "web_search": self.enable_web_search,
             "uploaded_file": self.enable_uploaded_files,
+            "mcp": self.enable_mcp_server,
+            "mcp_server": self.enable_mcp_server,
         }
 
         return type_toggle_map.get(source_type, True)
@@ -148,6 +157,7 @@ class SourceScopeConfig(BaseModel):
             "enable_knowledge_assistant": self.enable_knowledge_assistant,
             "enable_web_search": self.enable_web_search,
             "enable_uploaded_files": self.enable_uploaded_files,
+            "enable_mcp_server": self.enable_mcp_server,
         }
 
 
@@ -162,6 +172,7 @@ DEFAULT_SCOPE_CONFIGS = {
         enable_vector_search=False,
         enable_genie=False,
         enable_knowledge_assistant=False,
+        enable_mcp_server=False,
     ),
     "all": SourceScopeConfig(
         scope=SourceScope.ALL,

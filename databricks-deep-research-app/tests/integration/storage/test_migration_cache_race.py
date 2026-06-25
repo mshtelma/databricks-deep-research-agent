@@ -13,12 +13,11 @@ from __future__ import annotations
 import asyncio
 from uuid import uuid4
 
-import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.documents import Message
 from deep_research.storage.queue import WriteQueue
-from tests.fakes.fake_backend import FakeBackend
 
 
 async def test_enqueue_during_migration_pause_accrues_without_flushing() -> None:

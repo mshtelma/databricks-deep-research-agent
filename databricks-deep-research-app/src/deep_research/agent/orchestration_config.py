@@ -54,6 +54,12 @@ class OrchestrationConfig:
     query_mode: str = "deep_research"  # simple, web_search, deep_research
     research_depth: str = "auto"  # auto, light, medium, extended (deep_research only)
     system_instructions: str | None = None  # User's custom system instructions
+    # Per-run report-style knobs (prompts-over-knobs). ``tone`` is a self-describing
+    # framework ``Tone`` value (e.g. "objective"); ``output_language`` is a free-form
+    # language name (e.g. "Spanish"). Both ``None`` => unchanged synthesis. Threaded
+    # into the synthesizer's generation instructions via config_translator.
+    tone: str | None = None
+    output_language: str | None = None
     # Persistence context (for claim/citation storage)
     message_id: UUID | None = None  # Agent message ID for claims
     research_session_id: UUID | None = None  # Research session ID for sources
@@ -124,6 +130,12 @@ class OrchestrationConfig:
     agent_id: str | None = None
     """Custom agent ID to use for this research job."""
 
+    turn_intent: str = "auto"
+    """Per-turn routing for custom-agent chats: 'auto' (classify intent),
+    'chat' (answer from already-gathered data, no workflow re-run), or
+    'research' (force a fresh agent run). Only consulted when ``agent_id`` is
+    set and the chat already has prior research; otherwise ignored."""
+
     # =========================================================================
     # Per-Agent Overrides (009-custom-agent-config)
     # =========================================================================
@@ -145,6 +157,32 @@ class OrchestrationConfig:
     workflow_ref: str | None = None
     """When set, resolves a named workflow from plugins instead of
     building one via config_translator. None = existing flow unchanged."""
+
+    # =========================================================================
+    # Chat-attached Skills + MCP servers (Feature 2.2 / 4.3 — E1)
+    # =========================================================================
+    enabled_mcp_servers: list[str] | None = None
+    """MCP server names the user attached to THIS query in the chat selector.
+    Merged into the run's ``mcp_servers`` (as Databricks UC-connection servers)
+    and exposed to the workflow's agents. None/empty = no chat MCP attachment."""
+
+    enabled_skills: list[str] | None = None
+    """Skill names the user attached to THIS query in the chat selector. Merged
+    into the workflow's agent ``skills`` so the runtime skill store + read_skill
+    pick them up. None/empty = no chat skill attachment."""
+
+    # =========================================================================
+    # Per-run overrides for global feature flags (P2 — chat Options pane)
+    # =========================================================================
+    enable_cross_session_memory: bool | None = None
+    """Recall facts from the user's prior chats for THIS run. ``None`` => inherit
+    the global ``cross_session_memory_enabled`` setting; ``True``/``False`` =>
+    override for this run only."""
+
+    allow_live_search: bool | None = None
+    """Allow the follow-up live-web-search escape hatch for THIS run. ``None`` =>
+    inherit the global ``followup_live_search_enabled`` setting; ``True``/``False``
+    => override for this run only."""
 
 
 @dataclass

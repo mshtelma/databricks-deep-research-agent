@@ -117,6 +117,47 @@ class ReflectionDirective(BaseModel):
     fix: str = Field(min_length=1, max_length=600)
 
 
+class ReflectionRubric(BaseModel):
+    """Multi-dimensional coverage rubric emitted by a reflector.
+
+    Each dimension is scored 1-10; ``overall`` is an advisory aggregate.
+    Entirely optional on :class:`ReflectionOutput` (defaults to ``None``),
+    so reflectors that have not been re-prompted keep validating unchanged.
+    All fields are clamped/coerced by validators rather than raising on bad
+    LLM output (mirrors the ``_normalize_*`` pattern used elsewhere here).
+    """
+
+    completeness: int = Field(default=5, ge=1, le=10)
+    depth: int = Field(default=5, ge=1, le=10)
+    reliability: int = Field(default=5, ge=1, le=10)
+    recency: int = Field(default=5, ge=1, le=10)
+    overall: float = Field(default=5.0)
+
+    @field_validator("completeness", "depth", "reliability", "recency", mode="before")
+    @classmethod
+    def _normalize_dimension(cls, v: Any) -> int:
+        """Coerce a rubric dimension to an int clamped to [1, 10].
+
+        Junk (None, non-numeric strings) falls back to a neutral 5 rather
+        than raising, so a malformed rubric never fails the whole reflection.
+        """
+        try:
+            value = int(round(float(v)))
+        except (TypeError, ValueError):
+            return 5
+        return max(1, min(10, value))
+
+    @field_validator("overall", mode="before")
+    @classmethod
+    def _normalize_overall(cls, v: Any) -> float:
+        """Coerce ``overall`` to a float clamped to [1.0, 10.0]; junk -> 5.0."""
+        try:
+            value = float(v)
+        except (TypeError, ValueError):
+            return 5.0
+        return max(1.0, min(10.0, value))
+
+
 class ReflectionOutput(BaseModel):
     """Output of a reflector agent: continue / adjust / complete decision.
 
@@ -126,6 +167,11 @@ class ReflectionOutput(BaseModel):
     without modification — but a ``model_validator`` warns when a reflector
     emits ``decision="adjust"`` with no directives (a strong signal the
     reflector's schema-compliance has regressed).
+
+    ``knowledge_gaps`` and ``rubric`` are additive, optional-with-default
+    fields (empty list / ``None``): when present they drive the next planning
+    step (gaps are surfaced to the planner) and an adaptive diminishing-returns
+    stop signal. Empty/absent == today's behavior.
     """
 
     decision: Literal["continue", "adjust", "complete"]
@@ -141,6 +187,21 @@ class ReflectionOutput(BaseModel):
             "optional otherwise."
         ),
     )
+    knowledge_gaps: list[str] = Field(
+        default_factory=list,
+        max_length=10,
+        description=(
+            "Explicit, unaddressed coverage gaps the next planning step should "
+            "target. Empty (the default) preserves today's behavior."
+        ),
+    )
+    rubric: ReflectionRubric | None = Field(
+        default=None,
+        description=(
+            "Optional multi-dimensional coverage rubric. Advisory only in v1; "
+            "None (the default) preserves today's behavior."
+        ),
+    )
 
     @field_validator("suggested_changes", mode="before")
     @classmethod
@@ -150,6 +211,24 @@ class ReflectionOutput(BaseModel):
         if isinstance(v, list):
             return v
         return []
+
+    @field_validator("evidence_sufficiency", mode="before")
+    @classmethod
+    def _normalize_evidence_sufficiency(cls, v: Any) -> str | None:
+        """Coerce malformed reflector output to a valid literal or ``None``.
+
+        A stochastic LLM occasionally returns a structured object (e.g.
+        ``{"completeness": 8, ...}``) or an off-vocabulary string under
+        ``evidence_sufficiency``. Map a clean literal through (case-insensitively);
+        map anything else to ``None`` so structured-output parsing degrades
+        gracefully instead of raising — which would crash an otherwise-complete
+        research run.
+        """
+        if isinstance(v, str):
+            normalized = v.strip().lower()
+            if normalized in {"sufficient", "partial", "insufficient"}:
+                return normalized
+        return None
 
     @field_validator("directives", mode="before")
     @classmethod
@@ -165,6 +244,37 @@ class ReflectionOutput(BaseModel):
         if isinstance(v, list):
             return v
         return []
+
+    @field_validator("knowledge_gaps", mode="before")
+    @classmethod
+    def _normalize_knowledge_gaps(cls, v: Any) -> list[str]:
+        """Coerce ``None``/bad shapes to an empty list; stringify list items.
+
+        Never raises on bad LLM output (missing key, wrong type, or non-str
+        elements) — defaults to empty so an absent/garbled gaps list reduces
+        to today's behavior. The ``max_length=10`` cap is enforced afterward
+        by Pydantic.
+        """
+        if v is None:
+            return []
+        if isinstance(v, list):
+            return [str(item) for item in v if item is not None and str(item).strip()]
+        return []
+
+    @field_validator("rubric", mode="before")
+    @classmethod
+    def _normalize_rubric(cls, v: Any) -> Any:
+        """Coerce junk rubric input to ``None`` rather than raising.
+
+        Accepts a dict (validated into :class:`ReflectionRubric`) or an
+        existing model; anything else (string, list, scalar) becomes ``None``
+        so a malformed rubric never fails the whole reflection.
+        """
+        if v is None:
+            return None
+        if isinstance(v, (ReflectionRubric, dict)):
+            return v
+        return None
 
 
 class EvaluationOutput(BaseModel):

@@ -17,6 +17,11 @@ import asyncio
 from typing import Any, cast
 
 import pytest
+from databricks_deep_research.events.types import (
+    LoopIterationEvent,
+    NodeCompletedEvent,
+    NodeStartedEvent,
+)
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 
 from deep_research.agent_designer.discovery import DesignerDiscoveryAdapter
@@ -27,8 +32,10 @@ from deep_research.agent_designer.orchestrator import (
     LLMClientProto,
     MessageEvent,
     MutationProposedEvent,
+    ProgressEvent,
     _derive_workflow_llm_client,
     _mutation_event_for_ast_change,
+    _progress_event_for,
 )
 
 
@@ -212,6 +219,56 @@ def test_mutating_tool_result_can_surface_late_ast_cache_updates() -> None:
     assert event.tool_name == "update_block"
     assert event.old_ast == stale_ast
     assert event.new_ast == latest_ast
+
+
+def test_progress_event_for_agent_node_started() -> None:
+    """An AGENT node start maps to a ProgressEvent carrying the framework label."""
+    event = NodeStartedEvent(
+        node_id="architect",
+        node_type="agent",
+        label="Workflow Architect (Opus)",
+        timestamp="2026-06-22T00:00:00Z",
+    )
+    progress = _progress_event_for(event)
+    assert isinstance(progress, ProgressEvent)
+    assert progress.label == "Workflow Architect (Opus)"
+    assert progress.iteration is None
+    assert progress.total is None
+
+
+def test_progress_event_for_tool_node_started_is_none() -> None:
+    """Fast tool/gate nodes are not surfaced — only the slow agent steps."""
+    event = NodeStartedEvent(
+        node_id="structural_gate",
+        node_type="tool",
+        label="Structural Gate",
+        timestamp="2026-06-22T00:00:00Z",
+    )
+    assert _progress_event_for(event) is None
+
+
+def test_progress_event_for_loop_iteration() -> None:
+    """A loop iteration maps to a ProgressEvent with iteration/total (n/m)."""
+    event = LoopIterationEvent(
+        node_id="designer_loop",
+        iteration=3,
+        max_iterations=4,
+        timestamp="2026-06-22T00:00:00Z",
+    )
+    progress = _progress_event_for(event)
+    assert isinstance(progress, ProgressEvent)
+    assert progress.iteration == 3
+    assert progress.total == 4
+
+
+def test_progress_event_for_unrelated_event_is_none() -> None:
+    """node_completed (and other lifecycle events) are not progress signals."""
+    event = NodeCompletedEvent(
+        node_id="architect",
+        duration_ms=1.0,
+        timestamp="2026-06-22T00:00:00Z",
+    )
+    assert _progress_event_for(event) is None
 
 
 def test_workflow_local_model_tiers_are_applied_to_designer_client() -> None:

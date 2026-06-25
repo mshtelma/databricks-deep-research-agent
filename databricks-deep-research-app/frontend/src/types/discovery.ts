@@ -19,6 +19,7 @@ export type DataSourceType =
   | 'knowledge_assistant'
   | 'web_search'
   | 'uploaded_file'
+  | 'mcp_server'
   | 'custom';
 
 export type DiscoveryStatus = 'ready' | 'syncing' | 'unavailable' | 'error';
@@ -192,6 +193,7 @@ export function getSourceTypeLabel(type: DataSourceType): string {
     knowledge_assistant: 'Knowledge Assistant',
     web_search: 'Web Search',
     uploaded_file: 'Uploaded File',
+    mcp_server: 'MCP Server',
     custom: 'Custom',
   };
   return labels[type] || type;
@@ -208,6 +210,7 @@ export function getSourceTypeIcon(type: DataSourceType): string {
     knowledge_assistant: 'user-circle',
     web_search: 'globe',
     uploaded_file: 'document',
+    mcp_server: 'boxes',
     custom: 'puzzle',
   };
   return icons[type] || 'question-mark-circle';

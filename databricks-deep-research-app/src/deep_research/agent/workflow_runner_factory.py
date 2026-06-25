@@ -56,6 +56,7 @@ from databricks_deep_research import (
     required_ctx_fields_for_kind,
     resolve_workspace_client,
 )
+from databricks_deep_research.skills import SkillStore
 from databricks_deep_research.tools.builtins.text_table import (
     BindingInfo,
     wire_statement_execution_text_table_context,
@@ -244,6 +245,9 @@ def build_app_workflow_runner(
     user_token: str | None,
     table_static_bindings: Iterable[BindingInfo] | None = None,
     table_uc_scopes: Sequence[tuple[str, str]] | None = None,
+    skill_store: SkillStore | None = None,
+    skill_scripts_enabled: bool = False,
+    skill_scanner: object | None = None,
 ) -> WorkflowRunner:
     """Build a :class:`WorkflowRunner` with the app's standard tool context.
 
@@ -299,6 +303,19 @@ def build_app_workflow_runner(
     # the context-built log below so it reflects the final ``search_client``.
     _apply_default_search_client(ctx, llm_client)
     _apply_serving_client_provider(ctx, llm_client)
+
+    # Wire the runtime skill store (Feature 2.2): the read_skill / run_skill_script
+    # builtins resolve their store from ``ctx.extras["_skill_store"]``. The caller
+    # composes it from request context (workspace-FS + Lakebase + bundled seeds).
+    # Absent => no skills at runtime (read_skill simply isn't built) — graceful.
+    if skill_store is not None:
+        ctx.extras["_skill_store"] = skill_store
+    # Global half of the skill-script gate (A2). The framework auto-attaches
+    # ``run_skill_script`` only when this is True AND the per-agent
+    # ``allow_skill_scripts`` is set; default False keeps scripts off everywhere.
+    ctx.extras["_skill_scripts_enabled"] = bool(skill_scripts_enabled)
+    if skill_scanner is not None:
+        ctx.extras["_skill_scanner"] = skill_scanner
 
     # The discovery adapter pairs static designer bindings with optional
     # UC catalog scopes. ``ctx.workspace_client`` now carries the resolved

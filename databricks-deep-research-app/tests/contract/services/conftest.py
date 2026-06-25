@@ -17,13 +17,13 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import pytest
+from tests.fakes.fake_backend import FakeBackend
 
 from deep_research.storage.backend import StorageBackend
 from deep_research.storage.cache import ChatStateCache, Hydrator
 from deep_research.storage.cold_cache import ColdReadCache
 from deep_research.storage.factory import StorageStack
 from deep_research.storage.queue import WriteQueue
-from tests.fakes.fake_backend import FakeBackend
 
 
 def _backend_params() -> list[pytest.param]:
@@ -58,19 +58,17 @@ async def _lakebase_backend_cm() -> AsyncIterator[StorageBackend]:
     sm = get_session_maker(settings)
 
     async def _run(sql: str) -> None:
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(sql))
+        async with sm() as session, session.begin():
+            await session.execute(text(sql))
 
     await _run(f'CREATE SCHEMA IF NOT EXISTS "{schema_name}"')
     backend = LakebaseBackend(session_maker=sm)
     try:
-        async with sm() as session:
-            async with session.begin():
-                await session.execute(text(f'SET search_path TO "{schema_name}"'))
-                ddl_text = backend._ddl_path.read_text()
-                for stmt in _split_sql(ddl_text):
-                    await session.execute(text(stmt))
+        async with sm() as session, session.begin():
+            await session.execute(text(f'SET search_path TO "{schema_name}"'))
+            ddl_text = backend._ddl_path.read_text()
+            for stmt in _split_sql(ddl_text):
+                await session.execute(text(stmt))
 
         original = sm
 

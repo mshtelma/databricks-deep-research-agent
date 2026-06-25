@@ -58,7 +58,12 @@ vi.mock('../AstDiffView', () => ({
 function makeAst(label: string, version = '1.0.0'): AST {
   return {
     ...createDraftWorkflow(label),
-    version: version === '2.0.0' ? 2 : 1,
+    // The `version` arg selects the SCHEMA-version variant: useAstMerge diffs by
+    // raw AST field key, and these tests (and their assertions/comments) drive a
+    // `schema_version` conflict — the convention used across the codebase
+    // (see useAstMerge.test.tsx). Earlier this set `version`, producing a
+    // `version` path that never matched `pick-local-schema_version`.
+    schema_version: version === '2.0.0' ? 2 : 1,
     root: {
       id: 'root-id',
       type: 'sequence',

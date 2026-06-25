@@ -11,13 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 from pydantic import BaseModel
-
 from tests.complex._scaffold_run_capture import (
     _format_source_entry,
     _format_state_value,
     emit_console_report,
 )
-
 
 # ---------------------------------------------------------------------------
 # emit_console_report — happy path + edge cases

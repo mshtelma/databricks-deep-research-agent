@@ -1,13 +1,12 @@
 """Unit tests for _merge_config() reasoning behavior.
 
 Tests the provider-aware reasoning translation:
-- Claude endpoints → thinking + budget_tokens via extra_body
+- Claude endpoints → adaptive thinking + output_config.effort via extra_body
 - GPT/Gemini endpoints → reasoning_effort direct param
 - supports_reasoning=False → no reasoning params
 """
 
 from deep_research.services.llm.types import (
-    CLAUDE_THINKING_BUDGETS,
     ModelEndpoint,
     ModelRole,
     ReasoningEffort,
@@ -67,7 +66,12 @@ def _call_merge_config(
 
 
 class TestClaudeThinking:
-    """Claude endpoints: emulate reasoning effort via thinking + budget_tokens."""
+    """Claude 4.x endpoints: adaptive thinking + output_config.effort.
+
+    The gateway rejects the legacy ``{"type": "enabled", "budget_tokens": N}``
+    shape ("thinking.type.enabled is not supported for this model"); the request
+    must use ``{"type": "adaptive"}`` + ``output_config.effort`` (low | high | max).
+    """
 
     def test_claude_thinking_high(self) -> None:
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
@@ -76,38 +80,49 @@ class TestClaudeThinking:
 
         assert "extra_body" in config
         thinking = config["extra_body"]["thinking"]
-        assert thinking["type"] == "enabled"
-        assert thinking["budget_tokens"] == CLAUDE_THINKING_BUDGETS["high"]
+        assert thinking["type"] == "adaptive"
+        assert "budget_tokens" not in thinking
+        assert config["extra_body"]["output_config"]["effort"] == "high"
 
     def test_claude_thinking_low(self) -> None:
         endpoint = _make_endpoint(endpoint_id="databricks-claude-sonnet-4-6")
         role = _make_role(reasoning_effort=ReasoningEffort.LOW)
         config = _call_merge_config(role, endpoint)
 
-        assert config["extra_body"]["thinking"]["budget_tokens"] == CLAUDE_THINKING_BUDGETS["low"]
+        assert config["extra_body"]["thinking"]["type"] == "adaptive"
+        assert config["extra_body"]["output_config"]["effort"] == "low"
 
-    def test_claude_thinking_medium(self) -> None:
+    def test_claude_thinking_medium_rounds_up_to_high(self) -> None:
+        """The adaptive API has no 'medium' effort; MEDIUM maps to the 'high' default."""
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
         role = _make_role(reasoning_effort=ReasoningEffort.MEDIUM)
         config = _call_merge_config(role, endpoint)
 
-        assert config["extra_body"]["thinking"]["budget_tokens"] == CLAUDE_THINKING_BUDGETS["medium"]
+        assert config["extra_body"]["output_config"]["effort"] == "high"
 
-    def test_claude_thinking_max_capped_to_max_tokens(self) -> None:
-        """MAX budget (32000) capped to max_tokens - 1024."""
+    def test_claude_thinking_max(self) -> None:
+        endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
+        role = _make_role(reasoning_effort=ReasoningEffort.MAX)
+        config = _call_merge_config(role, endpoint)
+
+        assert config["extra_body"]["output_config"]["effort"] == "max"
+
+    def test_claude_thinking_max_independent_of_max_tokens(self) -> None:
+        """Adaptive effort is a ceiling, not a token budget — max_tokens no longer caps it."""
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
         role = _make_role(reasoning_effort=ReasoningEffort.MAX, max_tokens=8000)
         config = _call_merge_config(role, endpoint)
 
-        assert config["extra_body"]["thinking"]["budget_tokens"] == 8000 - 1024
+        assert config["extra_body"]["output_config"]["effort"] == "max"
+        assert "budget_tokens" not in config["extra_body"]["thinking"]
 
-    def test_claude_thinking_max_large_max_tokens(self) -> None:
-        """MAX with large max_tokens uses full budget."""
+    def test_claude_thinking_sets_temperature_one(self) -> None:
+        """Claude thinking still requires temperature=1."""
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
-        role = _make_role(reasoning_effort=ReasoningEffort.MAX, max_tokens=32000)
+        role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
         config = _call_merge_config(role, endpoint)
 
-        assert config["extra_body"]["thinking"]["budget_tokens"] == 32000 - 1024
+        assert config["temperature"] == 1
 
     def test_claude_none_no_thinking(self) -> None:
         """NONE effort → no thinking dict."""
@@ -126,7 +141,7 @@ class TestClaudeThinking:
         assert "extra_body" not in config
 
     def test_claude_no_reasoning_effort_in_config(self) -> None:
-        """Claude endpoints should NOT have reasoning_effort key."""
+        """Claude endpoints should NOT have a top-level reasoning_effort key."""
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
         role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
         config = _call_merge_config(role, endpoint)
@@ -222,12 +237,12 @@ class TestForceToolUseSuppressesThinking:
         assert "extra_body" not in config
 
     def test_claude_no_force_keeps_thinking(self) -> None:
-        """Default (force_tool_use=False) preserves existing thinking behavior."""
+        """Default (force_tool_use=False) preserves adaptive thinking behavior."""
         endpoint = _make_endpoint(endpoint_id="databricks-claude-opus-4-6")
         role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
         config = _call_merge_config(role, endpoint, force_tool_use=False)
 
-        assert config["extra_body"]["thinking"]["type"] == "enabled"
+        assert config["extra_body"]["thinking"]["type"] == "adaptive"
 
     def test_gpt_force_tool_use_keeps_reasoning_effort(self) -> None:
         """Forced tool use is a Claude-only constraint; GPT is unaffected."""
@@ -244,13 +259,13 @@ class TestEndpointOverridesRole:
     def test_endpoint_effort_overrides_role(self) -> None:
         endpoint = _make_endpoint(
             endpoint_id="databricks-claude-opus-4-6",
-            reasoning_effort=ReasoningEffort.MEDIUM,
+            reasoning_effort=ReasoningEffort.LOW,
         )
         role = _make_role(reasoning_effort=ReasoningEffort.HIGH)
         config = _call_merge_config(role, endpoint)
 
-        # MEDIUM budget (4096) not HIGH (10240)
-        assert config["extra_body"]["thinking"]["budget_tokens"] == CLAUDE_THINKING_BUDGETS["medium"]
+        # Endpoint LOW wins over role HIGH → adaptive effort "low" (not "high").
+        assert config["extra_body"]["output_config"]["effort"] == "low"
 
     def test_gpt_endpoint_effort_overrides_role(self) -> None:
         endpoint = _make_endpoint(

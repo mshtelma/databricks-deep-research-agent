@@ -1,9 +1,20 @@
 import * as React from 'react';
+import * as Popover from '@radix-ui/react-popover';
+import {
+  Zap,
+  Microscope,
+  Globe,
+  Database,
+  Boxes,
+  ChevronDown,
+  Check,
+  Bot,
+} from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
-import { ResearchDepthSelector, type ResearchDepth } from './ResearchDepthSelector';
-import { QueryModeSelector } from './QueryModeSelector';
-import { SourceScopeSelector } from '@/components/research/SourceScopeSelector';
+import { type ResearchDepth } from './ResearchDepthSelector';
+import { ChatAttachmentsSelector } from './ChatAttachmentsSelector';
+import { ChatOptionsPanel } from './ChatOptionsPanel';
 import { SourceBrowserModal } from './SourceBrowserModal';
 import { FileUploadZone } from '@/components/files/FileUploadZone';
 import { UploadedFileList } from '@/components/files/UploadedFileList';
@@ -17,6 +28,16 @@ import type { CustomAgentSummary } from '@/types/customAgents';
 import type { AgentV2Summary } from '@/types/agentDesigner';
 import type { InputConfig } from '@/core/plugins/types';
 import type { QuerySubmission } from '@/types/querySubmission';
+import type { QueryMode } from '@/types';
+import {
+  deriveEnabledMcpServerNamesForSubmit,
+  deriveEnabledSourceIdsForSubmit,
+  deriveQueryModeFromComposerState,
+  deriveSourceScopeFromComposerSources,
+  isEnterpriseAvailableSource,
+  type ComposerMode,
+  type ComposerSources,
+} from './sourceRouting';
 
 interface MessageInputProps {
   onSubmit: (submission: QuerySubmission) => void;
@@ -34,6 +55,12 @@ interface MessageInputProps {
 
 const ENABLED_ENTERPRISE_SOURCES_KEY = 'deep-research-enabled-enterprise-sources';
 const SELECTED_AGENT_KEY = 'deep-research-selected-agent';
+// VariantA composer model (declutter redesign): a 2-mode picker (Answer/Deep)
+// plus a Web/Enterprise/MCP source checkbox set. These persist independently of
+// the legacy queryMode/sourceScope, which are *derived* from them at submit time
+// so the backend contract is unchanged.
+const COMPOSER_MODE_KEY = 'deep-research-composer-mode';
+const COMPOSER_SOURCES_KEY = 'deep-research-composer-sources';
 
 function readSelectedAgentId(): string | null {
   if (typeof window === 'undefined') return null;
@@ -79,6 +106,53 @@ function writeEnabledEnterpriseSources(ids: Set<string>): void {
   }
 }
 
+function readComposerMode(): ComposerMode | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(COMPOSER_MODE_KEY);
+    return raw === 'answer' || raw === 'deep' ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeComposerMode(mode: ComposerMode): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(COMPOSER_MODE_KEY, mode);
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+function readComposerSources(): ComposerSources | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = localStorage.getItem(COMPOSER_SOURCES_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        web: parsed.web !== false,
+        ent: parsed.ent !== false,
+        mcp: parsed.mcp !== false,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writeComposerSources(sources: ComposerSources): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(COMPOSER_SOURCES_KEY, JSON.stringify(sources));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 function agentV2ToSelectorSummary(agent: AgentV2Summary): CustomAgentSummary {
   return {
     id: agent.id,
@@ -110,31 +184,67 @@ export function MessageInput({
   const effectiveShowVerifySources = inputConfig?.showVerifySources ?? true;
   const effectivePlaceholder = inputConfig?.placeholder ?? placeholder ?? 'Ask a research question...';
 
-  // Use hook for persistence (localStorage + optional API sync)
-  // Only sync with preferences when mode selector is visible
-  const { mode: storedMode, setMode: setStoredMode } = useQueryMode({
+  // Persisted queryMode preference (localStorage + optional API sync). We no
+  // longer read it as the primary control — the VariantA model below is the
+  // source of truth — but we keep it in sync with the derived value so the
+  // next session and any server-side preference reflect the effective mode.
+  const { setMode: setStoredMode } = useQueryMode({
     initialMode: 'web_search',
-    syncWithPreferences: effectiveShowModeSelector, // Only sync when visible
+    syncWithPreferences: effectiveShowModeSelector,
   });
 
-  // Effective query mode: plugin default when selector hidden, else user's choice
-  const queryMode = effectiveShowModeSelector
-    ? storedMode
-    : (inputConfig?.defaultQueryMode ?? 'deep_research');
+  // VariantA composer model: primary mode (Answer/Deep) + a Web/Enterprise/MCP
+  // source checkbox set. The legacy queryMode + sourceScope are DERIVED from
+  // these so the submitted payload — and the rest of the app — is unchanged.
+  const [composerMode, setComposerMode] = React.useState<ComposerMode>(
+    () => readComposerMode() ?? 'deep',
+  );
+  const [composerSources, setComposerSources] = React.useState<ComposerSources>(
+    () => readComposerSources() ?? { web: true, ent: true, mcp: true },
+  );
 
-  // Show depth selector only when Deep Research mode is selected AND selector is enabled
+  // Derive the legacy queryMode from (mode, sources):
+  //   deep                    -> deep_research
+  //   answer + any web/ent/mcp on -> web_search   (lightweight retrieval)
+  //   answer + no sources    -> simple       (model only)
+  // When the plugin hides the selector, honor its configured default instead.
+  const derivedQueryMode: QueryMode = !effectiveShowModeSelector
+    ? (inputConfig?.defaultQueryMode ?? 'deep_research')
+    : deriveQueryModeFromComposerState(composerMode, composerSources);
+  const queryMode = derivedQueryMode;
+
+  // Derive the legacy SourceScope from source channels. MCP counts as non-web,
+  // and the concrete MCP server selection is sent through enabledSources plus a
+  // derived enabledMcpServers compatibility field.
+  const derivedSourceScope = deriveSourceScopeFromComposerSources(composerSources);
+
+  // Keep the persisted queryMode preference in sync with the derived value.
+  React.useEffect(() => {
+    if (effectiveShowModeSelector) setStoredMode(derivedQueryMode);
+  }, [derivedQueryMode, effectiveShowModeSelector, setStoredMode]);
+
+  // Persist the VariantA model so it survives reloads.
+  React.useEffect(() => {
+    writeComposerMode(composerMode);
+  }, [composerMode]);
+  React.useEffect(() => {
+    writeComposerSources(composerSources);
+  }, [composerSources]);
+
+  // Show depth selector only when Deep Research mode is selected AND enabled
   const shouldShowDepthSelector = effectiveShowDepthSelector && queryMode === 'deep_research';
-  // Show verify sources checkbox when web_search or deep_research is selected AND checkbox is enabled
+  // Show verify sources checkbox when web_search or deep_research AND enabled
   const shouldShowVerifyCheckbox = effectiveShowVerifySources && (queryMode === 'web_search' || queryMode === 'deep_research');
   // shouldShowSourceScope is computed later, after selectedAgent state is declared
-
-  // Only allow mode changes when selector is visible
-  const setQueryMode = effectiveShowModeSelector ? setStoredMode : () => {};
 
   // Use plugin default for research depth when selector is hidden
   const [researchDepth, setResearchDepth] = React.useState<ResearchDepth>(
     inputConfig?.defaultResearchDepth ?? 'auto'
   );
+
+  // Per-run report style. Empty string => omit from submission (server default).
+  const [tone, setTone] = React.useState<string>('');
+  const [outputLanguage, setOutputLanguage] = React.useState<string>('');
 
   // Default: use plugin config if selector hidden, else true for deep_research
   const [verifySources, setVerifySources] = React.useState<boolean>(
@@ -242,8 +352,12 @@ export function MessageInput({
     refetch: refetchAgents,
   } = useAgentsV2List();
   const agents = React.useMemo(
-    () => (queryMode === 'deep_research' ? (agentsData?.items ?? []).map(agentV2ToSelectorSummary) : []),
-    [agentsData?.items, queryMode],
+    // Agent picker is available in EVERY mode so the run target is always
+    // visible/controllable (selecting an agent makes it own the pipeline — see
+    // the "Running:" indicator). Previously gated to deep_research, which hid it
+    // in Simple/Web and left users unsure what actually executed.
+    () => (agentsData?.items ?? []).map(agentV2ToSelectorSummary),
+    [agentsData?.items],
   );
 
   // Restore selected agent from localStorage on mount / when agents load
@@ -274,6 +388,19 @@ export function MessageInput({
 
   // Plan review toggle state
   const [enablePlanReview, setEnablePlanReview] = React.useState(false);
+  // Per-turn routing for custom-agent chats (auto-detect by default). Only sent
+  // when an agent is selected; the backend ignores it on first turns (no prior
+  // research) and for non-agent chats.
+  const [turnIntent, setTurnIntent] = React.useState<'auto' | 'chat' | 'research'>('auto');
+
+  // Chat-attached skills for THIS query (Feature 2.2 — E1). MCP is selected in
+  // the unified Sources browser as mcp_server sources.
+  const [enabledSkills, setEnabledSkills] = React.useState<string[]>([]);
+
+  // Run-level overrides surfaced in the Options panel (P2). Default false =>
+  // inherit the global flag; the user opts in per query.
+  const [enableCrossSessionMemory, setEnableCrossSessionMemory] = React.useState(false);
+  const [allowLiveSearch, setAllowLiveSearch] = React.useState(false);
 
   // Fetch discovered data sources for the source toggle UI
   const {
@@ -300,39 +427,16 @@ export function MessageInput({
     [discoveryData?.sources]
   );
 
-  // Source scope and disabled sources with localStorage persistence (T050-T051)
+  // Per-source disabled list + Browse-modal selection (T050-T051). The high-level
+  // scope (web/enterprise/all) is now derived from the VariantA source checkboxes
+  // (`derivedSourceScope`), so we only consume the per-source bits here.
   const {
-    scope: sourceScope,
-    setScope: setSourceScope,
     disabledSources,
     setDisabledSources,
-    toggleSource: handleSourceToggle,
   } = useSourceScope({ validSourceIds });
 
-  // Wrap toggle to track explicitly enabled enterprise sources
-  const wrappedSourceToggle = React.useCallback(
-    (sourceId: string, enabled: boolean) => {
-      // Check if this is an enterprise source
-      const source = discoveredSources.find((s) => s.source_id === sourceId);
-      const isEnterprise =
-        source && source.source_type !== 'web_search' && source.source_type !== 'uploaded_file';
-
-      if (isEnterprise) {
-        const enabledSet = readEnabledEnterpriseSources();
-        if (enabled) {
-          enabledSet.add(sourceId);
-        } else {
-          enabledSet.delete(sourceId);
-        }
-        writeEnabledEnterpriseSources(enabledSet);
-      }
-
-      handleSourceToggle(sourceId, enabled);
-    },
-    [handleSourceToggle, discoveredSources]
-  );
-
-  // Convert discovered sources to AvailableSource format for SourceScopeSelector
+  // Convert discovered sources to AvailableSource format (used for submit
+  // payload, enterprise validation, and the Browse modal selection)
   const availableSources: AvailableSource[] = React.useMemo(() => {
     if (!discoveryData?.sources) return [];
     return discoveryData.sources
@@ -358,7 +462,7 @@ export function MessageInput({
   React.useEffect(() => {
     if (!discoveryData?.sources) return;
 
-    const readyEnterpriseSourceIds = discoveryData.sources
+    const readySelectableNonWebSourceIds = discoveryData.sources
       .filter(
         (source) =>
           source.status === 'ready' &&
@@ -367,10 +471,10 @@ export function MessageInput({
       )
       .map((source) => source.source_id);
 
-    if (readyEnterpriseSourceIds.length === 0) return;
+    if (readySelectableNonWebSourceIds.length === 0) return;
 
     const enabledSet = readEnabledEnterpriseSources();
-    const shouldDisable = readyEnterpriseSourceIds.filter((id) => !enabledSet.has(id));
+    const shouldDisable = readySelectableNonWebSourceIds.filter((id) => !enabledSet.has(id));
 
     if (shouldDisable.length === 0) return;
 
@@ -389,14 +493,82 @@ export function MessageInput({
     }
   }, [queryMode, effectiveShowVerifySources]);
 
+  // T053-T054: Validation - Check if submission should be blocked due to source scope issues
+  const enterpriseSources = React.useMemo(() => {
+    return availableSources.filter(isEnterpriseAvailableSource);
+  }, [availableSources]);
+
+  const enabledEnterpriseSources = React.useMemo(() => {
+    return enterpriseSources.filter((s) => s.isEnabled);
+  }, [enterpriseSources]);
+
+  const enabledMcpServerNames = React.useMemo(
+    () => deriveEnabledMcpServerNamesForSubmit(availableSources, composerSources),
+    [availableSources, composerSources],
+  );
+
+  const hasEnabledMcpServer = composerSources.mcp && enabledMcpServerNames.length > 0;
+
+  // Determine if we should block submission due to source configuration
+  const sourceValidation = React.useMemo(() => {
+    if (!shouldShowSourceScope) {
+      return { isValid: true, message: null };
+    }
+
+    if (derivedSourceScope === 'enterprise_only') {
+      if (composerSources.mcp && !hasEnabledMcpServer && !composerSources.ent) {
+        return {
+          isValid: false,
+          message: 'Select an MCP server or turn on Web.',
+        };
+      }
+
+      if (!hasEnabledMcpServer) {
+        // T053: Block when Enterprise Only but no enterprise sources discovered
+        if (enterpriseSources.length === 0) {
+          return {
+            isValid: false,
+            message: 'No enterprise data sources available. Select an MCP server or enable Web.',
+          };
+        }
+        // T054: Block when Enterprise Only but all enterprise sources are disabled
+        if (enabledEnterpriseSources.length === 0) {
+          return {
+            isValid: false,
+            message: 'All enterprise sources are disabled. Enable Enterprise, select an MCP server, or turn on Web.',
+          };
+        }
+      }
+    }
+
+    return { isValid: true, message: null };
+  }, [
+    shouldShowSourceScope,
+    derivedSourceScope,
+    composerSources.mcp,
+    composerSources.ent,
+    hasEnabledMcpServer,
+    enterpriseSources.length,
+    enabledEnterpriseSources.length,
+  ]);
+
+  // Check if any files are still processing (not ready yet)
+  const hasProcessingFiles = React.useMemo(() => {
+    return sessionFiles.some(
+      f => f.processingStatus === 'pending' || f.processingStatus === 'processing'
+    );
+  }, [sessionFiles]);
+
+  // Combined disabled state for submit button and keyboard submit.
+  const isSubmitDisabled =
+    !message.trim() || isLoading || disabled || !sourceValidation.isValid || hasProcessingFiles;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !isLoading && !disabled) {
+    if (!isSubmitDisabled) {
       // Compute enabledSources from availableSources minus disabledSources
       const enabledSourceIds = shouldShowSourceScope && availableSources.length > 0
-        ? availableSources
-            .filter((s) => s.isEnabled)
-            .map((s) => s.id)
+        ? deriveEnabledSourceIdsForSubmit(availableSources, composerSources)
         : undefined;
 
       // Only pass disabledSources if there are any disabled
@@ -410,12 +582,24 @@ export function MessageInput({
         researchDepth,
         verifySources,
         outputType: selectedOutputType ?? inputConfig?.defaultOutputType,
-        sourceScope: shouldShowSourceScope ? sourceScope : undefined,
+        sourceScope: shouldShowSourceScope ? derivedSourceScope : undefined,
         enabledSources: enabledSourceIds,
         disabledSources: disabledSourceIds,
         fileIds: readyFiles.length > 0 ? readyFiles.map(f => f.id) : undefined,
         agentId: selectedAgent?.id ?? undefined,
         enablePlanReview: enablePlanReview || undefined,
+        turnIntent: selectedAgent ? turnIntent : undefined,
+        tone: tone || undefined,
+        outputLanguage: outputLanguage || undefined,
+        enabledSkills: enabledSkills.length > 0 ? enabledSkills : undefined,
+        // Compatibility field for the backend MCP attachment path. The source
+        // browser is now the source of truth via enabledSources mcp:* IDs.
+        enabledMcpServers:
+          enabledMcpServerNames.length > 0
+            ? enabledMcpServerNames
+            : undefined,
+        enableCrossSessionMemory: enableCrossSessionMemory || undefined,
+        allowLiveSearch: allowLiveSearch || undefined,
       };
 
       onSubmit(submission);
@@ -439,93 +623,59 @@ export function MessageInput({
     }
   }, [message]);
 
-  // T053-T054: Validation - Check if submission should be blocked due to source scope issues
-  const enterpriseSources = React.useMemo(() => {
-    return availableSources.filter(
-      (s) => s.type !== 'web_search' && s.type !== 'uploaded_file'
-    );
-  }, [availableSources]);
-
-  const enabledEnterpriseSources = React.useMemo(() => {
-    return enterpriseSources.filter((s) => s.isEnabled);
-  }, [enterpriseSources]);
-
-  // Determine if we should block submission due to source configuration
-  const sourceValidation = React.useMemo(() => {
-    if (!shouldShowSourceScope) {
-      return { isValid: true, message: null };
-    }
-
-    if (sourceScope === 'enterprise_only') {
-      // T053: Block when Enterprise Only but no enterprise sources discovered
-      if (enterpriseSources.length === 0) {
-        return {
-          isValid: false,
-          message: 'No enterprise data sources available. Select "Web Only" or "All Sources".',
-        };
-      }
-      // T054: Block when Enterprise Only but all enterprise sources are disabled
-      if (enabledEnterpriseSources.length === 0) {
-        return {
-          isValid: false,
-          message: 'All enterprise sources are disabled. Enable at least one source or change scope.',
-        };
-      }
-    }
-
-    return { isValid: true, message: null };
-  }, [shouldShowSourceScope, sourceScope, enterpriseSources.length, enabledEnterpriseSources.length]);
-
-  // Check if any files are still processing (not ready yet)
-  const hasProcessingFiles = React.useMemo(() => {
-    return sessionFiles.some(
-      f => f.processingStatus === 'pending' || f.processingStatus === 'processing'
-    );
-  }, [sessionFiles]);
-
-  // Combined disabled state for submit button
-  const isSubmitDisabled =
-    !message.trim() || isLoading || disabled || !sourceValidation.isValid || hasProcessingFiles;
-
   return (
-    <form onSubmit={handleSubmit} className="border-t bg-background">
-      <div className="px-4 pt-2 flex flex-wrap gap-4 items-center">
+    <form onSubmit={handleSubmit} className="db-root border-t border-db-gray-lines bg-white">
+      {/* VariantA grouped toolbar — primary mode + contextual scope on the left,
+          run target + advanced on the right; everything else behind the gear. */}
+      <div className="flex flex-wrap items-center gap-2 px-4 pt-2.5">
+        {/* Primary mode: Answer / Deep Research */}
         {effectiveShowModeSelector && (
-          <QueryModeSelector
-            value={queryMode}
-            onChange={setQueryMode}
+          <ComposerSegmented
+            mode={composerMode}
+            onChange={setComposerMode}
             disabled={disabled || isLoading}
           />
         )}
-        {shouldShowDepthSelector && (
-          <ResearchDepthSelector
+
+        {/* Contextual scope: Depth (built-in Deep only) + Sources (Web/Ent/MCP) */}
+        {effectiveShowModeSelector &&
+          ((shouldShowDepthSelector && !selectedAgent) || !agentDefinesSources) && (
+            <span className="mx-0.5 h-5 w-px shrink-0 bg-db-gray-lines" aria-hidden="true" />
+          )}
+        {/* Depth applies only to the built-in Deep Research pipeline. A selected
+            custom agent runs its own saved workflow, so depth is moot — hide it. */}
+        {shouldShowDepthSelector && !selectedAgent && (
+          <DepthChip
             value={researchDepth}
             onChange={setResearchDepth}
             disabled={disabled || isLoading}
           />
         )}
-        {shouldShowVerifyCheckbox && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={verifySources}
-              onChange={(e) => setVerifySources(e.target.checked)}
-              disabled={disabled || isLoading}
-              className="h-3.5 w-3.5 rounded border-input cursor-pointer accent-primary"
-            />
-            <span>Verify sources</span>
-          </label>
+        {/* Sources is the control that decides Answer→Simple vs Web; show it in
+            both modes (unless the selected agent defines its own sources). */}
+        {effectiveShowModeSelector && !agentDefinesSources && (
+          <SourcesChip
+            sources={composerSources}
+            onChange={setComposerSources}
+            onBrowse={() => setShowSourceBrowser(true)}
+            browseCount={selectedSourceIds.length}
+            isDiscovering={isDiscoveryLoading}
+            disabled={disabled || isLoading}
+          />
         )}
+
+        <span className="flex-1" />
+
         {/* Deliverable selector — choose the structured output type when >1 exists */}
         {showDeliverableSelector && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground select-none">
+          <label className="flex select-none items-center gap-1.5 text-[12px] text-db-gray-text">
             <span>Deliverable</span>
             <select
               data-testid="deliverable-selector"
               value={selectedOutputType ?? deliverableOptions[0]?.value ?? ''}
               onChange={(e) => setSelectedOutputType(e.target.value)}
               disabled={disabled || isLoading}
-              className="bg-background border border-input rounded px-1.5 py-1 text-xs cursor-pointer"
+              className="cursor-pointer rounded-db-md border border-db-gray-lines bg-white px-1.5 py-1 text-[12px] text-db-navy-800"
             >
               {deliverableOptions.map((o) => (
                 <option key={o.value} value={o.value}>
@@ -535,8 +685,10 @@ export function MessageInput({
             </select>
           </label>
         )}
-        {/* Agent selector (deep_research mode) */}
-        {queryMode === 'deep_research' && effectiveShowModeSelector && (
+
+        {/* Agent chip — shown in every mode so the run target is always
+            visible and selectable. */}
+        {effectiveShowModeSelector && (
           <div className="relative" ref={agentPickerRef}>
             <button
               type="button"
@@ -549,15 +701,15 @@ export function MessageInput({
               }}
               disabled={disabled || isLoading}
               className={cn(
-                'flex items-center gap-1.5 px-2 py-1 rounded text-xs transition-colors',
+                'inline-flex items-center gap-1.5 rounded-db-md border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors',
                 selectedAgent
-                  ? 'bg-accent text-accent-foreground'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-                (disabled || isLoading) && 'opacity-50 cursor-not-allowed'
+                  ? 'border-db-navy-300 bg-db-oat-medium text-db-navy-800'
+                  : 'border-db-gray-lines bg-white text-db-navy-800 hover:bg-db-oat-light',
+                (disabled || isLoading) && 'cursor-not-allowed opacity-50',
               )}
             >
-              <AgentIcon className="h-3.5 w-3.5" />
-              <span data-testid="agent-selected-name" className="max-w-[100px] truncate">
+              <Bot size={14} className="text-db-gray-text" />
+              <span data-testid="agent-selected-name" className="max-w-[120px] truncate">
                 {selectedAgent?.name ?? 'Default Agent'}
               </span>
               {selectedAgent && (
@@ -570,7 +722,7 @@ export function MessageInput({
                       e.stopPropagation();
                       handleAgentSelect(null);
                     }}
-                    className="ml-0.5 hover:text-foreground"
+                    className="ml-0.5 hover:text-db-lava-700"
                     title="Clear agent selection"
                   >
                     ×
@@ -579,7 +731,10 @@ export function MessageInput({
               )}
             </button>
             {selectedAgent && selectedAgent.sourceScope && selectedAgent.sourceScope !== 'all' && (
-              <span data-testid="agent-source-scope-indicator" className="text-xs text-muted-foreground">
+              <span
+                data-testid="agent-source-scope-indicator"
+                className="ml-1 text-[11px] text-db-gray-text"
+              >
                 {selectedAgent.sourceScope}
               </span>
             )}
@@ -597,72 +752,34 @@ export function MessageInput({
             )}
           </div>
         )}
-        {/* Plan review toggle (deep_research mode) */}
-        {queryMode === 'deep_research' && effectiveShowModeSelector && (
-          <label className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={enablePlanReview}
-              onChange={(e) => setEnablePlanReview(e.target.checked)}
+
+        {/* Follow-up routing (custom-agent chats): converse vs re-run. */}
+        {effectiveShowModeSelector && selectedAgent && (
+          <label className="flex select-none items-center gap-1.5 text-[12px] text-db-gray-text">
+            <span>Follow-up</span>
+            <select
+              data-testid="turn-intent-select"
+              value={turnIntent}
+              onChange={(e) => setTurnIntent(e.target.value as 'auto' | 'chat' | 'research')}
               disabled={disabled || isLoading}
-              className="h-3.5 w-3.5 rounded border-input cursor-pointer accent-primary"
-            />
-            <span>Review plan</span>
+              className="rounded-db-md border border-db-gray-lines bg-white px-1.5 py-1 text-[12px] text-db-navy-800"
+              title="How to handle this message: auto-detect, chat about already-gathered data, or re-run the agent"
+            >
+              <option value="auto">Auto</option>
+              <option value="chat">Chat about results</option>
+              <option value="research">Re-run research</option>
+            </select>
           </label>
         )}
-        {shouldShowSourceScope && (
-          <>
-            <SourceScopeSelector
-              selectedScope={sourceScope}
-              onScopeChange={setSourceScope}
-              availableSources={availableSources}
-              onSourceToggle={wrappedSourceToggle}
-              disabled={disabled || isLoading}
-              compact={true}
-            />
-            {/* Browse button to open full source browser modal */}
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              onClick={() => setShowSourceBrowser(true)}
-              disabled={disabled || isLoading}
-              className="h-7 text-xs"
-            >
-              Browse ({selectedSourceIds.length})
-            </Button>
-            {/* Discovery status feedback */}
-            {isDiscoveryLoading && (
-              <span className="text-xs text-muted-foreground animate-pulse">
-                Discovering sources...
-              </span>
-            )}
-            {discoveryError && !isDiscoveryLoading && (
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-destructive">Discovery failed</span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    refreshDiscoveryMutation.mutate({});
-                    refetchDiscovery();
-                  }}
-                  disabled={refreshDiscoveryMutation.isPending}
-                  className="h-6 px-2 text-xs"
-                >
-                  {refreshDiscoveryMutation.isPending ? 'Retrying...' : 'Retry'}
-                </Button>
-              </div>
-            )}
-            {!isDiscoveryLoading && !discoveryError && availableSources.length === 0 && (
-              <span className="text-xs text-muted-foreground">
-                No enterprise sources discovered.
-              </span>
-            )}
-          </>
-        )}
-        {/* File attach button — last position in toolbar */}
+
+        {/* Skills attachments for this query */}
+        <ChatAttachmentsSelector
+          selectedSkills={enabledSkills}
+          onChange={setEnabledSkills}
+          disabled={disabled || isLoading}
+        />
+
+        {/* Attach files */}
         {sessionId && (
           <button
             type="button"
@@ -674,24 +791,70 @@ export function MessageInput({
             }}
             disabled={disabled || isLoading}
             className={cn(
-              'flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors',
+              'inline-flex items-center gap-1 rounded-db-md border px-2 py-1.5 text-[12px] transition-colors',
               showFileUpload
-                ? 'bg-accent text-accent-foreground'
-                : 'text-muted-foreground hover:text-foreground hover:bg-accent',
-              (disabled || isLoading) && 'opacity-50 cursor-not-allowed'
+                ? 'border-db-navy-300 bg-db-oat-medium text-db-navy-800'
+                : 'border-db-gray-lines bg-white text-db-navy-800 hover:bg-db-oat-light',
+              (disabled || isLoading) && 'cursor-not-allowed opacity-50',
             )}
             title="Attach files"
           >
             <PaperclipIcon className="h-3.5 w-3.5" />
-            <span>Attach files</span>
             {sessionFiles.length > 0 && (
-              <span className="bg-primary text-primary-foreground rounded-full px-1.5 py-0.5 text-[10px] font-medium leading-none">
+              <span className="rounded-full bg-db-navy-800 px-1.5 py-0.5 text-[10px] font-medium leading-none text-white">
                 {sessionFiles.length}
               </span>
             )}
           </button>
         )}
+
+        {/* Advanced (report style + this-run options) behind one gear */}
+        {effectiveShowModeSelector && queryMode !== 'simple' && (
+          <ChatOptionsPanel
+            tone={tone}
+            outputLanguage={outputLanguage}
+            onToneChange={setTone}
+            onLanguageChange={setOutputLanguage}
+            showVerify={shouldShowVerifyCheckbox}
+            verifySources={verifySources}
+            onVerifyChange={setVerifySources}
+            showPlanReview={queryMode === 'deep_research' && effectiveShowModeSelector}
+            enablePlanReview={enablePlanReview}
+            onPlanReviewChange={setEnablePlanReview}
+            enableCrossSessionMemory={enableCrossSessionMemory}
+            onCrossSessionMemoryChange={setEnableCrossSessionMemory}
+            allowLiveSearch={allowLiveSearch}
+            onAllowLiveSearchChange={setAllowLiveSearch}
+            disabled={disabled || isLoading}
+          />
+        )}
       </div>
+
+      {/* Run target hint — what actually runs (kept for clarity + tests) */}
+      {effectiveShowModeSelector && (
+        <div className="px-4 pt-1.5">
+          <span
+            data-testid="run-target-indicator"
+            className="text-[11px] text-db-gray-text"
+            title={
+              selectedAgent
+                ? 'A selected agent runs its own saved workflow; the mode/sources do not change it.'
+                : 'No agent selected — the built-in pipeline for the current mode runs.'
+            }
+          >
+            Running:{' '}
+            <span className="font-medium text-db-navy-800">
+              {selectedAgent
+                ? selectedAgent.name
+                : queryMode === 'simple'
+                  ? 'Answer · model only'
+                  : queryMode === 'web_search'
+                    ? 'Answer · with sources'
+                    : 'Deep Research'}
+            </span>
+          </span>
+        </div>
+      )}
       {/* Source validation warning (T053-T054) */}
       {!sourceValidation.isValid && sourceValidation.message && (
         <div className="px-4 py-1">
@@ -759,7 +922,7 @@ export function MessageInput({
           )}
         </div>
       )}
-      <div className="flex gap-2 p-4 pt-2">
+      <div className="flex items-end gap-2 px-4 pb-4 pt-2.5">
         <textarea
           data-testid="message-input"
           ref={textareaRef}
@@ -771,8 +934,8 @@ export function MessageInput({
           rows={1}
           aria-label="Message input"
           className={cn(
-            'flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors',
-            'placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+            'flex-1 resize-none rounded-db-md border border-db-gray-lines bg-white px-3 py-2 text-[14px] text-db-navy-800 shadow-db-xs transition-colors',
+            'placeholder:text-db-navy-300 focus:border-db-navy-400 focus:shadow-db-focus focus:outline-none',
             'disabled:cursor-not-allowed disabled:opacity-50',
             'min-h-[40px] max-h-[200px]'
           )}
@@ -792,7 +955,7 @@ export function MessageInput({
             data-testid="send-button"
             type="submit"
             disabled={isSubmitDisabled}
-            className="self-end"
+            className="self-end bg-db-lava-600 text-white hover:bg-db-lava-700"
             title={sourceValidation.message ?? undefined}
           >
             Send
@@ -810,7 +973,9 @@ export function MessageInput({
           const nextDisabled = allIds.filter((id) => !ids.includes(id));
           setDisabledSources(nextDisabled);
 
-          // Update enabled enterprise sources tracking
+          // Update persisted non-web source tracking. Databricks enterprise
+          // sources and MCP servers are opt-in, while web stays controlled by
+          // the high-level Web channel.
           const enabledSet = new Set<string>();
           for (const id of ids) {
             const source = discoveredSources.find((s) => s.source_id === id);
@@ -828,6 +993,251 @@ export function MessageInput({
         isRefreshing={refreshDiscoveryMutation.isPending}
       />
     </form>
+  );
+}
+
+// =============================================================================
+// VariantA composer primitives (Databricks-styled — declutter redesign)
+// =============================================================================
+
+/** Answer / Deep Research segmented control. */
+function ComposerSegmented({
+  mode,
+  onChange,
+  disabled,
+}: {
+  mode: ComposerMode;
+  onChange: (m: ComposerMode) => void;
+  disabled?: boolean;
+}) {
+  const opts: { id: ComposerMode; label: string; icon: typeof Zap }[] = [
+    { id: 'answer', label: 'Answer', icon: Zap },
+    { id: 'deep', label: 'Deep Research', icon: Microscope },
+  ];
+  return (
+    <div
+      role="radiogroup"
+      aria-label="Research mode"
+      className="inline-flex items-center gap-0.5 rounded-db-lg border border-db-gray-lines bg-db-oat-medium p-0.5"
+    >
+      {opts.map((o) => {
+        const active = o.id === mode;
+        const Ico = o.icon;
+        return (
+          <button
+            key={o.id}
+            type="button"
+            role="radio"
+            aria-checked={active}
+            data-testid={`composer-mode-${o.id}`}
+            disabled={disabled}
+            onClick={() => onChange(o.id)}
+            className={cn(
+              'inline-flex items-center gap-1.5 rounded-db-md px-3 py-1.5 text-[12.5px] font-medium transition-colors',
+              active
+                ? 'bg-white text-db-navy-800 shadow-db-xs'
+                : 'text-db-gray-text hover:text-db-navy-800',
+              disabled && 'cursor-not-allowed opacity-50',
+            )}
+          >
+            <Ico size={14} className={active ? 'text-db-lava-600' : 'text-db-gray-text'} />
+            {o.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Shared chip trigger style for the Depth/Sources popover buttons. */
+function composerChipClass(active: boolean): string {
+  return cn(
+    'inline-flex items-center gap-1.5 rounded-db-md border px-2.5 py-1.5 text-[12.5px] font-medium transition-colors',
+    active
+      ? 'border-db-navy-300 bg-db-oat-medium text-db-navy-800'
+      : 'border-db-gray-lines bg-white text-db-navy-800 hover:bg-db-oat-light',
+  );
+}
+
+const DEPTH_CHIP_OPTIONS: { value: ResearchDepth; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'light', label: 'Light' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'extended', label: 'Extended' },
+];
+
+/** Depth chip + popover (Auto / Light / Medium / Extended). */
+function DepthChip({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ResearchDepth;
+  onChange: (d: ResearchDepth) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const label = DEPTH_CHIP_OPTIONS.find((o) => o.value === value)?.label ?? 'Auto';
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          data-testid="composer-depth-chip"
+          className={composerChipClass(open)}
+        >
+          <Zap size={14} className="text-db-gray-text" />
+          <span className="text-db-gray-text">Depth</span>
+          <span className="font-semibold text-db-navy-800">{label}</span>
+          <ChevronDown size={13} className="text-db-navy-400" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          className="z-50 w-44 rounded-db-md border border-db-gray-lines bg-white p-1 shadow-lg"
+        >
+          {DEPTH_CHIP_OPTIONS.map((o) => {
+            const active = o.value === value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-db-md px-2 py-1.5 text-left text-[13px] transition-colors',
+                  active
+                    ? 'bg-db-oat-light font-medium text-db-navy-800'
+                    : 'text-db-navy-800 hover:bg-db-oat-light',
+                )}
+              >
+                {active ? (
+                  <Check size={13} className="text-db-lava-600" />
+                ) : (
+                  <span className="w-[13px]" />
+                )}
+                {o.label}
+              </button>
+            );
+          })}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
+const SOURCE_CHANNELS: { id: keyof ComposerSources; label: string; icon: typeof Globe }[] = [
+  { id: 'web', label: 'Web', icon: Globe },
+  { id: 'ent', label: 'Enterprise', icon: Database },
+  { id: 'mcp', label: 'MCP', icon: Boxes },
+];
+
+function sourcesSummary(s: ComposerSources): string {
+  const on = SOURCE_CHANNELS.filter((c) => s[c.id]);
+  if (on.length === 0) return 'None';
+  if (on.length === SOURCE_CHANNELS.length) return 'All';
+  return on.map((c) => c.label).join(', ');
+}
+
+/** Sources chip + popover — Web / Enterprise / MCP channels + Browse. */
+function SourcesChip({
+  sources,
+  onChange,
+  onBrowse,
+  browseCount,
+  isDiscovering,
+  disabled,
+}: {
+  sources: ComposerSources;
+  onChange: (s: ComposerSources) => void;
+  onBrowse: () => void;
+  browseCount: number;
+  isDiscovering?: boolean;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const summary = sourcesSummary(sources);
+  const toggle = (id: keyof ComposerSources) =>
+    onChange({ ...sources, [id]: !sources[id] });
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          data-testid="composer-sources-chip"
+          className={composerChipClass(open)}
+        >
+          <Database size={14} className="text-db-gray-text" />
+          <span className="text-db-gray-text">Sources</span>
+          <span className="font-semibold text-db-navy-800">{summary}</span>
+          <ChevronDown size={13} className="text-db-navy-400" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          className="z-50 w-60 rounded-db-md border border-db-gray-lines bg-white p-2 shadow-lg"
+        >
+          {SOURCE_CHANNELS.map((c) => {
+            const on = sources[c.id];
+            const Ico = c.icon;
+            return (
+              <button
+                key={c.id}
+                type="button"
+                data-testid={`composer-source-${c.id}`}
+                aria-pressed={on}
+                onClick={() => toggle(c.id)}
+                className="flex w-full items-center gap-2.5 rounded-db-md px-2 py-1.5 text-left transition-colors hover:bg-db-oat-light"
+              >
+                <span
+                  className={cn(
+                    'flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-[5px] border-[1.5px] transition-colors',
+                    on ? 'border-db-lava-600 bg-db-lava-600' : 'border-db-navy-300 bg-white',
+                  )}
+                >
+                  {on && <Check size={11} className="text-white" strokeWidth={3} />}
+                </span>
+                <Ico size={15} className="text-db-gray-text" />
+                <span className="text-[13px] font-medium text-db-navy-800">{c.label}</span>
+              </button>
+            );
+          })}
+          {summary === 'None' && (
+            <p className="px-2 pt-1.5 text-[11px] italic text-db-gray-text">
+              No retrieval — a plain model answer.
+            </p>
+          )}
+          <div className="mt-1.5 border-t border-db-gray-lines pt-1.5">
+            <button
+              type="button"
+              onClick={() => {
+                onBrowse();
+                setOpen(false);
+              }}
+              className="flex w-full items-center justify-between rounded-db-md px-2 py-1.5 text-[12.5px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-light"
+            >
+              <span>Browse all sources…</span>
+              <span className="font-db-mono text-[11px] text-db-gray-text">{browseCount}</span>
+            </button>
+            {isDiscovering && (
+              <p className="px-2 pt-1 text-[11px] text-db-gray-text">Discovering sources…</p>
+            )}
+          </div>
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
   );
 }
 
@@ -962,24 +1372,5 @@ function AgentPickerDropdown({
         </div>
       )}
     </div>
-  );
-}
-
-function AgentIcon({ className }: { className?: string }) {
-  return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
-    </svg>
   );
 }

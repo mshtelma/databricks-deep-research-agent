@@ -16,10 +16,9 @@ import base64
 import hashlib
 import json
 import time
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # Helpers to build minimal fake JWTs (no signature needed for unit tests)
@@ -113,8 +112,8 @@ class TestRefreshSuccess:
         mock_wc = MagicMock()
         mock_wc.token_management.create_obo_token.return_value = mock_response
 
-        from deep_research.storage.observability import RecordingSink, use_sink
         from deep_research.services.obo_client import refresh
+        from deep_research.storage.observability import RecordingSink, use_sink
 
         sink = RecordingSink()
         with use_sink(sink):
@@ -142,13 +141,12 @@ class TestRefreshFailures:
         mock_wc = MagicMock()
         mock_wc.token_management.create_obo_token.side_effect = ConnectionError("timeout")
 
-        from deep_research.storage.observability import RecordingSink, use_sink
         from deep_research.services.obo_client import refresh
+        from deep_research.storage.observability import RecordingSink, use_sink
 
         sink = RecordingSink()
-        with use_sink(sink):
-            with pytest.raises(ConnectionError):
-                await refresh(old_token, mock_wc)
+        with use_sink(sink), pytest.raises(ConnectionError):
+            await refresh(old_token, mock_wc)
 
         assert sink.count("agent_designer.token_refresh_failure", error_kind="network") == 1.0
         assert sink.count("agent_designer.token_refresh_attempt", outcome="failure") == 1.0
@@ -163,13 +161,12 @@ class TestRefreshFailures:
         mock_wc = MagicMock()
         mock_wc.token_management.create_obo_token.side_effect = Exception("403 PERMISSION_DENIED")
 
-        from deep_research.storage.observability import RecordingSink, use_sink
         from deep_research.services.obo_client import refresh
+        from deep_research.storage.observability import RecordingSink, use_sink
 
         sink = RecordingSink()
-        with use_sink(sink):
-            with pytest.raises(Exception, match="403"):
-                await refresh(old_token, mock_wc)
+        with use_sink(sink), pytest.raises(Exception, match="403"):
+            await refresh(old_token, mock_wc)
 
         assert sink.count("agent_designer.token_refresh_failure", error_kind="permission") == 1.0
         assert sink.count("agent_designer.token_refresh_attempt", outcome="failure") == 1.0
@@ -231,8 +228,8 @@ class TestRefreshProducesNewHash:
         mock_wc = MagicMock()
         mock_wc.token_management.create_obo_token.return_value = mock_response
 
-        from deep_research.storage.observability import RecordingSink, use_sink
         from deep_research.services.obo_client import refresh
+        from deep_research.storage.observability import RecordingSink, use_sink
 
         sink = RecordingSink()
         with use_sink(sink):
@@ -261,8 +258,8 @@ class TestCacheInvalidationOnRotation:
         mock_wc = MagicMock()
         mock_wc.token_management.create_obo_token.return_value = mock_response
 
-        from deep_research.storage.observability import RecordingSink, use_sink
         from deep_research.services.obo_client import get_rotated_token, refresh
+        from deep_research.storage.observability import RecordingSink, use_sink
 
         sink = RecordingSink()
         with use_sink(sink):

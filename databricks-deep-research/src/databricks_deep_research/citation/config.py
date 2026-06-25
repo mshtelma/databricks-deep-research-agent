@@ -433,6 +433,15 @@ class CitationConfig(BaseModel):
     enable_numeric_qa_verification: bool = True
     enable_verification_retrieval: bool = False
 
+    # Stage 4 (isolated per-claim NLI verification) master gate. Distinct from
+    # the top-level ``enabled`` (which also gates citation *generation*): set
+    # this False to run the cheap "grounding-only" lane — Stages 1-3 still
+    # generate, link, and render ``[N]`` citations, but the expensive per-claim
+    # NLI overlay (Stages 4a/4b) AND the verdict-based Stage 8 disposition are
+    # skipped. Claims persist as resolvable-but-unverified (a normal clickable
+    # citation, no verdict). Default True preserves full verification behavior.
+    enable_isolated_verification: bool = True
+
     # Defect E (prevention): when numeric QA corroborates a claim's value
     # against the cited evidence (verbatim match -> 0.95, or all QA pairs
     # agreeing -> 1.0), promote a PARTIAL/UNSUPPORTED NLI verdict to SUPPORTED

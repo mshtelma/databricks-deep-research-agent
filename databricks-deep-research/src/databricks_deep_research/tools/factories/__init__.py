@@ -27,6 +27,7 @@ BUILTIN_FACTORIES: dict[str, type] = {
     "file_search_v1": BuiltinToolFactory,
     "compute_v1": BuiltinToolFactory,
     "compute_namespace_v1": BuiltinToolFactory,
+    "read_skill_v1": BuiltinToolFactory,
     "table_discovery_v1": BuiltinToolFactory,
     "table_search_v1": BuiltinToolFactory,
     "table_read_v1": BuiltinToolFactory,

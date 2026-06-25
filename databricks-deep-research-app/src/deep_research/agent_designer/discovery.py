@@ -26,6 +26,8 @@ SourceKind = Literal[
     "serving_endpoint",
     "delta_table",
     "sql_warehouse",
+    "mcp_server",
+    "skill",
 ]
 
 # Map from DiscoveryService DataSourceType.value strings to our SourceKind literals.
@@ -203,7 +205,66 @@ class DesignerDiscoveryAdapter:
                     raise
                 logger.warning("DESIGNER_SQL_WAREHOUSE_DISCOVERY_SKIPPED", exc_info=True)
 
+        # MCP servers and skills are OPT-IN discovery kinds: surfaced only when
+        # explicitly requested (the UI requests them by kind), never as part of an
+        # unfiltered "discover everything" sweep — so the default resource set is
+        # byte-identical to before this feature.
+        if kinds is not None and "mcp_server" in kinds:
+            try:
+                resources.extend(self._list_mcp_servers(user_token or None))
+            except Exception:
+                logger.warning("DESIGNER_MCP_DISCOVERY_FAILED", exc_info=True)
+                raise
+
+        if kinds is not None and "skill" in kinds:
+            try:
+                resources.extend(await self._list_skills(user_token or None))
+            except Exception:
+                logger.warning("DESIGNER_SKILL_DISCOVERY_FAILED", exc_info=True)
+                raise
+
         return resources
+
+    def _list_mcp_servers(self, user_token: str | None) -> list[DiscoveredResource]:
+        """Discover external UC-connection MCP servers (kind='mcp_server')."""
+        from deep_research.services.mcp_discovery import discover_mcp_connections
+
+        client = self._workspace_client_factory(user_token)
+        servers = discover_mcp_connections(client)
+        return [
+            DiscoveredResource(
+                kind="mcp_server",
+                source_id=server.connection_name or server.name,
+                name=server.name,
+                full_name=server.connection_name or None,
+                description=server.description or None,
+                metadata={
+                    "client_kind": server.client_kind,
+                    "connection_name": server.connection_name,
+                    "managed_target": server.managed_target,
+                    **server.metadata,
+                },
+            )
+            for server in servers
+        ]
+
+    async def _list_skills(self, user_token: str | None) -> list[DiscoveredResource]:
+        """List the caller's available skills (kind='skill')."""
+        from deep_research.services.skill_runtime import list_runtime_skills
+
+        client = self._workspace_client_factory(user_token)
+        metas = await list_runtime_skills(
+            workspace_client=client, user_token=user_token
+        )
+        return [
+            DiscoveredResource(
+                kind="skill",
+                source_id=meta.name,
+                name=meta.name,
+                description=meta.description,
+            )
+            for meta in metas
+        ]
 
     def _list_sql_warehouses(self, user_token: str | None) -> list[DiscoveredResource]:
         client = self._workspace_client_factory(user_token)

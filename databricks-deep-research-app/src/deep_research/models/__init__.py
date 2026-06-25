@@ -53,6 +53,7 @@ from deep_research.models.research_session import (
     ResearchSessionStatus,
     ResearchStatus,
 )
+from deep_research.models.skill import Skill, SkillRevision
 from deep_research.models.source import Source
 from deep_research.models.uploaded_file import (
     FileChunk,
@@ -62,6 +63,7 @@ from deep_research.models.uploaded_file import (
 )
 from deep_research.models.user import User
 from deep_research.models.user_preferences import UserPreferences
+from deep_research.models.user_skill_folder import UserSkillFolder
 from deep_research.models.visibility import AgentVisibility
 
 __all__ = [
@@ -87,6 +89,10 @@ __all__ = [
     "ResearchEvent",
     # Source
     "Source",
+    # Skills (Feature 2.2)
+    "Skill",
+    "SkillRevision",
+    "UserSkillFolder",
     # Uploaded File (US7)
     "UploadedFile",
     "FileChunk",

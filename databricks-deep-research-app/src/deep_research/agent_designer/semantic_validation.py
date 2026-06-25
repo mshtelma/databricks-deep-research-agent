@@ -174,6 +174,23 @@ def semantic_validation_errors(
                         )
                     )
 
+    # Valid MCP server names: the workflow's top-level ``mcp_servers`` PLUS any
+    # ``kind == 'mcp'`` tool cards not yet lifted (so the rule holds pre- and
+    # post-normalization). Agents bind to these by name via ``config.mcp_servers``
+    # (B2) — separate from the declared-tools rule, since discovered MCP tool
+    # names are not statically known at author time.
+    mcp_server_names: set[str] = set()
+    for server in definition.get("mcp_servers", []) or []:
+        if isinstance(server, dict) and isinstance(server.get("name"), str):
+            mcp_server_names.add(server["name"])
+    for tool in tools:
+        if isinstance(tool, dict) and tool.get("kind") == "mcp":
+            cfg = tool.get("config")
+            cfg = cfg if isinstance(cfg, dict) else {}
+            mcp_name = cfg.get("name") or tool.get("name")
+            if isinstance(mcp_name, str) and mcp_name:
+                mcp_server_names.add(mcp_name)
+
     def validate_agent_tools(config: dict[str, Any], path: str) -> None:
         raw_tools = config.get("tools", [])
         if not isinstance(raw_tools, list):
@@ -189,6 +206,22 @@ def semantic_validation_errors(
                     )
                 )
 
+    def validate_agent_mcp_servers(config: dict[str, Any], path: str) -> None:
+        refs = config.get("mcp_servers", [])
+        if not isinstance(refs, list):
+            return
+        for ref in refs:
+            if isinstance(ref, str) and ref and ref not in mcp_server_names:
+                errors.append(
+                    SemanticValidationError(
+                        message=(
+                            f"Agent references undeclared MCP server '{ref}'; "
+                            "declare it in the workflow's mcp_servers list."
+                        ),
+                        path=f"{path}.config.mcp_servers",
+                    )
+                )
+
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, dict):
             return
@@ -197,11 +230,13 @@ def semantic_validation_errors(
             config = {}
         if node.get("type") == "agent":
             validate_agent_tools(config, path)
+            validate_agent_mcp_servers(config, path)
         if node.get("type") == "plan_and_execute":
             for nested_key in ("planner", "evaluator"):
                 nested = config.get(nested_key)
                 if isinstance(nested, dict):
                     validate_agent_tools(nested, f"{path}.config.{nested_key}")
+                    validate_agent_mcp_servers(nested, f"{path}.config.{nested_key}")
             body = config.get("body")
             if isinstance(body, dict):
                 walk(body, f"{path}.config.body")

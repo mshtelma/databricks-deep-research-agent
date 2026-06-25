@@ -139,7 +139,8 @@ export function SchemaField({
     | 'password'
     | 'code'
     | 'prompt'
-    | 'resource-select';
+    | 'resource-select'
+    | 'json';
 
   if (Array.isArray(enumValues) || Array.isArray(enumOptions)) {
     widgetKind = 'select';
@@ -153,6 +154,8 @@ export function SchemaField({
       widgetKind = 'resource-select';
     } else if (w === 'password') {
       widgetKind = 'password';
+    } else if (w === 'json') {
+      widgetKind = 'json';
     } else {
       console.warn(
         `agent-designer: unknown widget '${w}' for field '${name}'; falling back to default`,
@@ -439,6 +442,21 @@ export function SchemaField({
     );
   }
 
+  if (widgetKind === 'json') {
+    return (
+      <JsonField
+        fieldId={fieldId}
+        name={name}
+        label={label}
+        value={value}
+        onChange={onChange}
+        required={required}
+        description={descEl}
+        errors={errEls}
+      />
+    );
+  }
+
   if (widgetKind === 'object') {
     const properties =
       schema['properties'] && typeof schema['properties'] === 'object'
@@ -499,6 +517,109 @@ export function SchemaField({
       />
       {descEl}
       {errEls}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// JSON widget — free-form dict/object fields (x-widget: "json")
+//
+// For schemas whose object has no renderable ``properties`` (e.g. a Pydantic
+// ``dict`` / ``additionalProperties`` map like ``spawnable_subagents`` or
+// ``per_tool_limits``). Edits a JSON document directly: emits the parsed value
+// on valid JSON, ``undefined`` when emptied, and surfaces a parse error inline
+// without discarding keystrokes. Re-syncs from props only while unfocused so a
+// node switch reflects the new value but typing is never clobbered.
+// ---------------------------------------------------------------------------
+
+interface JsonFieldProps {
+  fieldId: string;
+  name: string;
+  label: string;
+  value: unknown;
+  onChange: (value: unknown) => void;
+  required: boolean;
+  description: React.ReactNode;
+  errors: React.ReactNode;
+}
+
+function safeJsonStringify(value: unknown): string {
+  if (value === undefined || value === null) return '';
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return '';
+  }
+}
+
+function JsonField({
+  fieldId,
+  name,
+  label,
+  value,
+  onChange,
+  required,
+  description,
+  errors,
+}: JsonFieldProps): React.ReactElement {
+  const incoming = safeJsonStringify(value);
+  const [text, setText] = React.useState<string>(incoming);
+  const [parseError, setParseError] = React.useState<string | null>(null);
+  const focused = React.useRef(false);
+
+  // Reflect external value changes (node switch / programmatic set) ONLY when the
+  // field isn't being edited, so pretty-printing on switch never clobbers typing.
+  React.useEffect(() => {
+    if (!focused.current) {
+      setText(incoming);
+      setParseError(null);
+    }
+  }, [incoming]);
+
+  const handleChange = (next: string): void => {
+    setText(next);
+    if (next.trim() === '') {
+      setParseError(null);
+      onChange(undefined);
+      return;
+    }
+    try {
+      const parsed: unknown = JSON.parse(next);
+      setParseError(null);
+      onChange(parsed);
+    } catch (e) {
+      setParseError(e instanceof Error ? e.message : 'Invalid JSON');
+    }
+  };
+
+  return (
+    <div className="mb-3.5">
+      <label htmlFor={fieldId} className={LABEL_CLASS}>
+        {label}
+        {required && <span className={REQUIRED_MARK_CLASS}>*</span>}
+      </label>
+      <textarea
+        id={fieldId}
+        name={name}
+        value={text}
+        spellCheck={false}
+        rows={4}
+        onFocus={() => {
+          focused.current = true;
+        }}
+        onBlur={() => {
+          focused.current = false;
+          setText(safeJsonStringify(value));
+        }}
+        onChange={(e) => handleChange(e.target.value)}
+        className={FIELD_TEXTAREA_MONO_CLASS}
+        aria-invalid={parseError !== null}
+      />
+      {parseError !== null && (
+        <p className={ERROR_ITEM_CLASS}>Invalid JSON: {parseError}</p>
+      )}
+      {description}
+      {errors}
     </div>
   );
 }

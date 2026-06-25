@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from enum import Enum
 from uuid import UUID
@@ -52,7 +52,7 @@ class TestEncode:
         assert t == "TIMESTAMP"
 
     def test_aware_datetime_preserves_tz(self) -> None:
-        v, t = encoded(datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc))
+        v, t = encoded(datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC))
         assert "+00:00" in v
         assert t == "TIMESTAMP"
 
@@ -84,7 +84,7 @@ class TestEncode:
         assert json.loads(v) == {"id": str(u)}
 
     def test_nested_datetime_serializes(self) -> None:
-        dt = datetime(2025, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
+        dt = datetime(2025, 1, 2, 3, 4, 5, tzinfo=UTC)
         v, _ = encoded({"ts": dt})
         assert json.loads(v)["ts"] == dt.isoformat()
 

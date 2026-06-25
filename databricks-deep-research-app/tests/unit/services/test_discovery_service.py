@@ -24,6 +24,7 @@ from deep_research.services.discovery_cache import DiscoveryCache
 from deep_research.services.discovery_service import (
     ASSISTANT_NAME_PATTERNS,
     DISCOVERY_TIMEOUT_GENIE,
+    DISCOVERY_TIMEOUT_MCP,
     DISCOVERY_TIMEOUT_SERVING,
     DISCOVERY_TIMEOUT_VS,
     GENIE_MAX_PAGES,
@@ -32,6 +33,7 @@ from deep_research.services.discovery_service import (
     get_discovery_service,
     reset_discovery_service,
 )
+from deep_research.services.mcp_discovery import DiscoveredMcpServer
 
 
 @pytest.fixture
@@ -368,6 +370,49 @@ class TestServingEndpointDiscovery:
         assert discovery_service._is_knowledge_assistant(endpoint)
 
 
+class TestMcpServerDiscovery:
+    """Tests for MCP server discovery."""
+
+    @pytest.mark.asyncio
+    async def test_discover_mcp_server_sources_maps_connections(
+        self,
+        discovery_service: DiscoveryService,
+    ) -> None:
+        """MCP connections should appear as selectable discovery sources."""
+        mock_client = MagicMock()
+        servers = [
+            DiscoveredMcpServer(
+                name="tavily_mcp",
+                client_kind="databricks",
+                connection_name="tavily_mcp",
+                description="Tavily search",
+                metadata={"connection_type": "HTTP"},
+            )
+        ]
+
+        with (
+            patch.object(discovery_service, "_get_client", return_value=mock_client),
+            patch(
+                "deep_research.services.discovery_service.discover_mcp_connections",
+                return_value=servers,
+            ) as discover,
+        ):
+            sources, error = await discovery_service.discover_mcp_server_sources(
+                "test-token"
+            )
+
+        assert error is None
+        assert len(sources) == 1
+        source = sources[0]
+        assert source.source_id == "mcp:tavily_mcp"
+        assert source.source_type == DataSourceType.MCP_SERVER
+        assert source.name == "tavily_mcp"
+        assert source.endpoint_name == "tavily_mcp"
+        assert source.capabilities == ["mcp", "tools"]
+        assert source.metadata["connection_name"] == "tavily_mcp"
+        discover.assert_called_once_with(mock_client)
+
+
 class TestParallelDiscovery:
     """Tests for parallel discovery execution."""
 
@@ -448,6 +493,56 @@ class TestParallelDiscovery:
         # Only VS should be discovered
         assert response.total_count == 1
         assert "vector_search" in response.by_type
+
+    @pytest.mark.asyncio
+    async def test_discover_all_includes_mcp_by_default(
+        self,
+        discovery_service: DiscoveryService,
+    ) -> None:
+        """Default discovery should include MCP sources."""
+        mcp_source = DiscoveredSource(
+            source_id="mcp:tavily_mcp",
+            source_type=DataSourceType.MCP_SERVER,
+            name="tavily_mcp",
+            endpoint_name="tavily_mcp",
+            status=DiscoveryStatus.READY,
+            capabilities=["mcp", "tools"],
+            metadata={},
+            discovered_at=datetime.now(UTC),
+        )
+
+        with (
+            patch.object(
+                discovery_service,
+                "discover_vector_search_sources",
+                AsyncMock(return_value=([], None)),
+            ),
+            patch.object(
+                discovery_service,
+                "discover_genie_spaces",
+                AsyncMock(return_value=([], None)),
+            ),
+            patch.object(
+                discovery_service,
+                "discover_serving_endpoints",
+                AsyncMock(return_value=([], None)),
+            ),
+            patch.object(
+                discovery_service,
+                "discover_mcp_server_sources",
+                AsyncMock(return_value=([mcp_source], None)),
+            ) as discover_mcp,
+        ):
+            response = await discovery_service.discover_all(
+                user_id="test-user-id",
+                user_token="test-token",
+                force_refresh=True,
+            )
+
+        assert response.total_count == 1
+        assert response.sources == [mcp_source]
+        assert "mcp_server" in response.by_type
+        discover_mcp.assert_called_once_with("test-token")
 
 
 class TestCacheIntegration:
@@ -682,6 +777,7 @@ class TestGracefulDegradation:
         assert timedelta(seconds=15) == DISCOVERY_TIMEOUT_VS
         assert timedelta(seconds=10) == DISCOVERY_TIMEOUT_GENIE
         assert timedelta(seconds=10) == DISCOVERY_TIMEOUT_SERVING
+        assert timedelta(seconds=5) == DISCOVERY_TIMEOUT_MCP
 
     @pytest.mark.asyncio
     async def test_partial_results_are_cached(

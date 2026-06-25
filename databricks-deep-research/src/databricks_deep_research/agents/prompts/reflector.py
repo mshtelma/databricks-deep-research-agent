@@ -73,6 +73,31 @@ Consider marking COMPLETE when ALL hold:
   (source-focused plans assign different sources to different steps)
 - Web search steps remain and no external validation has been gathered
 - The query explicitly asks for perspectives not yet covered
+
+## Multi-Dimensional Quality Rubric
+
+Score the evidence gathered so far on four dimensions, each 1-10 (advisory —
+it informs but does not override the decision rules above):
+- **completeness**: How much of the user's question is answerable from current sources?
+- **depth**: Is the evidence substantive (figures, specifics) vs. shallow (metadata, snippets)?
+- **reliability**: Are sources authoritative and cross-validated vs. single weak sources?
+- **recency**: Is the evidence current enough for the query's time sensitivity?
+Set **overall** to your holistic 1-10 aggregate.
+
+## Explicit Knowledge Gaps
+
+List the concrete, still-unaddressed gaps the NEXT planning step should target
+(at most ~10, most important first). Each gap is a short phrase naming a missing
+fact, entity, comparison, or perspective — not a restatement of a whole step.
+When coverage is complete, the gaps list is empty.
+
+## Diminishing-Returns Self-Check (bias toward COMPLETE)
+
+Before choosing CONTINUE or ADJUST, compare this step's rubric to the previous
+step's. If the last step improved overall coverage by less than ~0.5 on the
+rubric (i.e. you are near saturation) AND the minimum steps are met, PREFER
+COMPLETE over spending another step for marginal gain. Spend additional steps
+only when they target genuinely uncovered gaps, not already-mined sources.
 """
 
 REFLECTOR_USER_PROMPT = """Evaluate research progress.
@@ -120,6 +145,14 @@ Treat metadata-only, availability-only, and schema-only evidence as insufficient
   "remaining_topics": ["topic1", "topic2"],
   "covered_topics": ["topic1"],
   "coverage_gaps": ["topic2"],
+  "knowledge_gaps": ["concrete gap the next step should target", "..."],
+  "rubric": {{
+    "completeness": 1-10,
+    "depth": 1-10,
+    "reliability": 1-10,
+    "recency": 1-10,
+    "overall": 1-10
+  }},
   "decision": "continue" | "adjust" | "complete",
   "reasoning": "Explicit coverage gap analysis",
   "suggested_changes": [],
@@ -132,6 +165,10 @@ Treat metadata-only, availability-only, and schema-only evidence as insufficient
     }}
   ]
 }}
+
+The ``knowledge_gaps`` and ``rubric`` fields are OPTIONAL — omit ``rubric``
+or leave ``knowledge_gaps`` empty when coverage is complete. When present,
+``knowledge_gaps`` directly seeds the next planning step.
 
 ### Directives Contract (REQUIRED when decision='adjust')
 

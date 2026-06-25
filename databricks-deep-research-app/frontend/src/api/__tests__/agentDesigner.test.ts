@@ -31,9 +31,11 @@ import {
   getRegistry,
   clearRegistryCache,
   chatStream,
+  slimWireMessages,
   listDesignerResources,
   startDesignerSqlWarehouse,
 } from '../agentDesigner'
+import type { ChatMessage } from '../agentDesigner'
 
 import { ApiError } from '../client'
 
@@ -259,6 +261,54 @@ describe('updateAgentV2', () => {
 })
 
 // ---------------------------------------------------------------------------
+// slimWireMessages — trims redundant resent transcript payloads on the wire
+// ---------------------------------------------------------------------------
+
+describe('slimWireMessages', () => {
+  const big = 'R'.repeat(4000) // above the ~2 KB per-message summarize threshold
+
+  it('summarizes OLD oversized tool content but preserves role + tool_call_id', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'start' },
+      { role: 'assistant', content: 'ok' },
+      { role: 'tool', content: big, tool_call_id: 'c1' }, // old + oversized
+      { role: 'user', content: 'u0' },
+      { role: 'user', content: 'u1' },
+      { role: 'user', content: 'u2' },
+      { role: 'user', content: 'u3' },
+      { role: 'user', content: 'u4' },
+      { role: 'user', content: 'CURRENT' },
+    ]
+    const slimmed = slimWireMessages(messages)
+    const oldTool = slimmed[2]!
+    expect(oldTool.role).toBe('tool')
+    expect(oldTool.tool_call_id).toBe('c1') // wire-shape pairing preserved
+    expect(oldTool.content.startsWith('[tool content summarized')).toBe(true)
+    expect(oldTool.content.length).toBeLessThan(200)
+    expect(slimmed[slimmed.length - 1]!.content).toBe('CURRENT') // final msg untouched
+  })
+
+  it('keeps the recent window verbatim (recent oversized tool result survives)', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'u0' },
+      { role: 'tool', content: big, tool_call_id: 'recent' }, // inside last 6
+      { role: 'user', content: 'CURRENT' },
+    ]
+    const tool = slimWireMessages(messages).find((m) => m.tool_call_id === 'recent')
+    expect(tool?.content).toBe(big)
+  })
+
+  it('leaves small messages unchanged', () => {
+    const messages: ChatMessage[] = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: 'hello' },
+      { role: 'user', content: 'bye' },
+    ]
+    expect(slimWireMessages(messages)).toEqual(messages)
+  })
+})
+
+// ---------------------------------------------------------------------------
 // 6. chatStream — parses message + done events
 // ---------------------------------------------------------------------------
 
@@ -280,7 +330,7 @@ describe('chatStream', () => {
     )
 
     const events = []
-    for await (const event of chatStream({
+    for await (const { event } of chatStream({
       messages: [{ role: 'user', content: 'Hi' }],
       current_ast: null,
     })) {
@@ -303,7 +353,7 @@ describe('chatStream', () => {
     vi.stubGlobal('fetch', fetchMock)
 
     const events = []
-    for await (const event of chatStream({
+    for await (const { event } of chatStream({
       messages: [
         {
           role: 'tool',
@@ -350,6 +400,34 @@ describe('chatStream', () => {
     })
   })
 
+  // 7b. chatStream surfaces the REAL 413 reason from the { code, message } envelope
+  it('surfaces the real 413 reason from the { code, message } error envelope', async () => {
+    // The backend wraps every HTTPException as { code: 'HTTP_ERROR', message: <detail> }.
+    // The banner must show that reason, not the generic fallback string.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        makeResponse(
+          { code: 'HTTP_ERROR', message: 'total payload exceeds 524288 bytes (600000)' },
+          { status: 413 }
+        )
+      )
+    )
+
+    const iter = chatStream({
+      messages: [{ role: 'user', content: 'too big' }],
+      current_ast: null,
+    })
+
+    await expect(iter[Symbol.asyncIterator]().next()).rejects.toSatisfy((err: unknown) => {
+      return (
+        err instanceof ApiError &&
+        err.status === 413 &&
+        err.message === 'total payload exceeds 524288 bytes (600000)'
+      )
+    })
+  })
+
   // 8. chatStream yields tool_call then mutation_proposed from a multi-event stream
   it('yields tool_call then mutation_proposed from a multi-event stream', async () => {
     const oldAst = { id: 'draft', name: 'Old', root: {} }
@@ -384,7 +462,7 @@ describe('chatStream', () => {
     )
 
     const events = []
-    for await (const event of chatStream({
+    for await (const { event } of chatStream({
       messages: [{ role: 'user', content: 'Build me an agent' }],
       current_ast: null,
     })) {
@@ -427,7 +505,7 @@ describe('chatStream', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
 
     const events = []
-    for await (const event of chatStream({
+    for await (const { event } of chatStream({
       messages: [{ role: 'user', content: 'test' }],
       current_ast: null,
     })) {

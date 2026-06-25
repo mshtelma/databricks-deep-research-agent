@@ -9,8 +9,6 @@ from __future__ import annotations
 import tempfile
 from pathlib import Path
 
-import pytest
-
 from databricks_deep_research.api import Agent, Parallel, Sequence, SubAgent, tool
 from databricks_deep_research.workflow.loader import load_workflow, save_workflow
 

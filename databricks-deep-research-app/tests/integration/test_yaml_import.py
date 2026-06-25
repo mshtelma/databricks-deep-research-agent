@@ -342,9 +342,8 @@ def test_invalid_ast_node_type_returns_400() -> None:
 def test_success_increments_outcome_counter_once() -> None:
     """A successful import increments yaml_import_outcome{outcome=success} by 1."""
     sink = RecordingSink()
-    with use_sink(sink):
-        with _noauth_client() as client:
-            resp = client.post(_URL, content=_make_valid_yaml())
+    with use_sink(sink), _noauth_client() as client:
+        resp = client.post(_URL, content=_make_valid_yaml())
     assert resp.status_code == 200, resp.text
     assert sink.count("agent_designer.yaml_import_outcome", outcome="success") == 1.0
 

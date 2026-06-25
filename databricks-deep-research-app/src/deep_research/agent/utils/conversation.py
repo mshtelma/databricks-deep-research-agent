@@ -8,6 +8,32 @@ previous research reports in their entirety.
 from __future__ import annotations
 
 
+def _to_openai_role(role: str) -> str:
+    """Map the app's internal ``agent`` role to OpenAI's ``assistant``.
+
+    All other roles (``user``, ``system``, already-``assistant``, …) are
+    returned unchanged. Centralizes the single app-ism — ``MessageRole.AGENT``
+    is stored as ``"agent"`` — so every place that builds LLM messages agrees.
+    """
+    return "assistant" if role in ("agent", "assistant") else role
+
+
+def normalize_history_roles(
+    history: list[dict[str, str]] | None,
+) -> list[dict[str, str]]:
+    """Map ``agent`` → ``assistant`` for conversation history handed to the
+    framework, so the app's internal role never reaches the LLM gateway.
+
+    Pure and idempotent: returns NEW dicts for rewritten roles and leaves
+    ``user``/``assistant``/``system`` untouched. Mirrors the framework-side
+    normalizer (``databricks_deep_research.llm.roles.normalize_history_roles``)
+    which is the load-bearing backstop; this is the explicit source-side fix.
+    """
+    if not history:
+        return []
+    return [{**m, "role": _to_openai_role(m.get("role", "user"))} for m in history]
+
+
 def build_messages_with_history(
     system_prompt: str,
     user_query: str,
@@ -53,10 +79,8 @@ def build_messages_with_history(
 
         for msg in recent_history:
             # Normalize role: 'agent' -> 'assistant' for LLM API compatibility
-            role = msg.get("role", "user")
-            if role in ("agent", "assistant"):
-                role = "assistant"
-            elif role != "user":
+            role = _to_openai_role(msg.get("role", "user"))
+            if role not in ("user", "assistant"):
                 # Skip system messages or unknown roles in history
                 continue
 

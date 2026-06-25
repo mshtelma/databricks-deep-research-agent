@@ -56,9 +56,14 @@ from deep_research.agent_designer.semantic_validation import (
     semantic_validation_errors,
 )
 from deep_research.agent_designer.tool_probe import ProbeConfig, ProbeOrchestrator
+from deep_research.agent_designer.turn_registry import (
+    BufferedTurn,
+    designer_turn_registry,
+)
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
 from deep_research.agent_designer.yaml_import import YamlImportError, parse_and_validate_yaml
 from deep_research.core.app_config import get_app_config
+from deep_research.core.config import get_settings
 from deep_research.db.session import get_db
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.agent_v2 import CustomToolDef
@@ -451,6 +456,8 @@ _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
         "serving_endpoint",
         "delta_table",
         "sql_warehouse",
+        "mcp_server",
+        "skill",
     }
 )
 
@@ -553,6 +560,44 @@ async def get_registry(
     )
     record_registry_fetch((time.monotonic() - _t0) * 1000)
     return result
+
+
+class CapabilitiesResponse(BaseModel):
+    """Global feature-gate states the Designer/chat UI needs to annotate knobs.
+
+    A per-agent toggle (e.g. ``allow_skill_scripts``) is a no-op unless its global
+    switch is also on; exposing these lets the UI warn the author instead of
+    silently doing nothing.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skill_scripts_global: bool = Field(
+        description="skills.allow_script_execution — global gate for executing skill scripts."
+    )
+    cross_session_memory_global: bool = Field(
+        description="cross_session_memory_enabled — default for recalling facts from prior chats."
+    )
+    live_search_global: bool = Field(
+        description="followup_live_search_enabled — default for the chat-over-report live-search escape hatch."
+    )
+
+
+@router.get("/capabilities", response_model=CapabilitiesResponse)
+async def get_capabilities() -> CapabilitiesResponse:
+    """Report global feature-gate states so the UI can annotate gated knobs.
+
+    Returns only non-sensitive global booleans; route auth is enforced by the
+    app's middleware stack (no per-route identity needed).
+    """
+    settings = get_settings()
+    return CapabilitiesResponse(
+        skill_scripts_global=bool(get_app_config().skills.allow_script_execution),
+        cross_session_memory_global=bool(
+            getattr(settings, "cross_session_memory_enabled", False)
+        ),
+        live_search_global=bool(getattr(settings, "followup_live_search_enabled", False)),
+    )
 
 
 def _tool_declarations_from_definition(
@@ -784,11 +829,59 @@ class ChatRequest(BaseModel):
     current_ast: dict[str, Any] | None = None
     session_id: str | None = None
     assets: list[DesignerAsset] = Field(default_factory=list)
+    # Skill -> Workflow (P5): skill names to COMPILE into the drafted workflow.
+    # Kept separate from `assets` so they never enter the resource-asset /
+    # tool-contract / structural-gate paths (Codex CRITICAL #5).
+    skill_names: list[str] = Field(default_factory=list)
 
 
-def _format_sse(event_type: str, payload: dict[str, Any]) -> str:
-    """Serialise a single SSE frame."""
-    return f"event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+def _format_sse(event_type: str, payload: dict[str, Any], *, seq: int | None = None) -> str:
+    """Serialise a single SSE frame, optionally tagged with a sequence ``id:``.
+
+    Buffered designer events carry their sequence number as the SSE ``id:`` line
+    (idiomatic Last-Event-ID semantics) so the frontend can resume a reconnect
+    from ``?since=<lastSeq + 1>``. Connection-scoped frames (``turn_started``) and
+    keepalives carry no id.
+    """
+    id_line = f"id: {seq}\n" if seq is not None else ""
+    return f"{id_line}event: {event_type}\ndata: {json.dumps(payload)}\n\n"
+
+
+# Designer turns can run for minutes (an 8-lane Best-of-N architect-critic loop =
+# repeated ~50s Opus/GPT-5 calls), and the Databricks Apps gateway enforces an
+# *absolute* wall-clock cap (~4 min, observed on AIS) on a single streamed
+# response that a keepalive CANNOT defeat. The turn therefore runs decoupled from
+# the request in ``designer_turn_registry`` (turn_registry.py); each HTTP reader
+# (initial POST or resume GET) streams from the buffer and emits this keepalive
+# during idle gaps so the *idle* cut never fires before the absolute cap.
+# Env-tunable, mirroring the DESIGNER_CHAT_MAX_* byte-cap knobs.
+DESIGNER_CHAT_HEARTBEAT_SECONDS = float(
+    os.environ.get("DESIGNER_CHAT_HEARTBEAT_SECONDS", "10")
+)
+
+# SSE responses must not be cached or buffered by any intermediary; X-Accel-Buffering
+# disables proxy response buffering where honoured (no-op otherwise).
+_SSE_HEADERS = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
+
+
+async def _sse_render(turn: BufferedTurn, *, start_seq: int) -> AsyncIterator[str]:
+    """Map a turn's buffered events (from ``start_seq``) to SSE wire frames.
+
+    A ``StreamChunk`` with ``event is None`` is an idle keepalive → an SSE comment
+    (``:keepalive``); the frontend parser ignores any line not starting with
+    ``event:``/``data:``. A real event → an ``id:``-tagged event frame. When this
+    generator is closed on a client disconnect, the registry does NOT cancel the
+    producer — the turn survives in the buffer for a reconnect.
+    """
+    async for chunk in designer_turn_registry.stream(
+        turn, start_seq=start_seq, heartbeat_seconds=DESIGNER_CHAT_HEARTBEAT_SECONDS
+    ):
+        if chunk.event is None:
+            yield ":keepalive\n\n"
+        else:
+            yield _format_sse(
+                chunk.event.type, chunk.event.model_dump(exclude={"type"}), seq=chunk.seq
+            )
 
 
 @router.post("/chat")
@@ -850,40 +943,98 @@ async def chat(
     # Pre-flight size check — must happen BEFORE StreamingResponse is returned
     # so the client receives HTTP 413, not an SSE error frame.
     messages_dicts = [m.model_dump(exclude_none=True) for m in request.messages]
+    # Graceful oldest-first trim so a long/retried session never wedges, THEN the
+    # hard byte guard (surfaced as 413, never silent). run_turn re-trims
+    # defensively, so this pre-flight and the SSE path agree on the same list.
+    messages_dicts = orchestrator.prepare_messages(
+        messages_dicts, request.current_ast, request.assets
+    )
     try:
         orchestrator.check_limits(messages_dicts, request.current_ast, request.assets)
     except RequestTooLargeError as exc:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail=str(exc)) from exc
 
-    async def event_generator() -> AsyncIterator[str]:
-        try:
-            async for event in orchestrator.run_turn(
-                messages=messages_dicts,
-                current_ast=request.current_ast,
-                session_id=request.session_id,
-                user_token=obo_token,
-                current_user_id=user.user_id,
-                assets=request.assets,
-            ):
-                yield _format_sse(event.type, event.model_dump(exclude={"type"}))
-        except Exception:
-            # Never echo raw exception text to clients — it can leak internal
-            # class names, paths, or upstream error detail (codex finding W6).
-            # The real exception is captured in structured server logs.
-            logger.exception(
-                "DESIGNER_CHAT_STREAM_FAILED",
-                extra={"session_id": request.session_id, "user_id": user.user_id},
-            )
-            yield _format_sse(
-                "error",
-                {
-                    "error_kind": "agent_error",
-                    "message": "The designer chat failed. See server logs for details.",
-                },
-            )
-            yield _format_sse("done", {})
+    def _log_stream_error(exc: BaseException) -> None:
+        logger.error(
+            "DESIGNER_CHAT_STREAM_FAILED",
+            extra={"session_id": request.session_id, "user_id": user.user_id},
+            exc_info=exc,
+        )
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
+    # Per-user concurrency backstop (mirrors job_manager's per-user cap → 429).
+    # A user has one designer chat open; this bounds double-submits and buffered
+    # ASTs in memory. Reconnects are GETs (no new turn) so they don't count here.
+    if (
+        designer_turn_registry.active_count_for_user(user.user_id)
+        >= designer_turn_registry.per_user_max
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="A designer turn is already running. Wait for it to finish or reload the chat.",
+        )
+
+    # Decouple the turn from this request: a registry-owned task drains run_turn
+    # into an append-only buffer that survives the gateway's absolute connection
+    # cap, so the client can reconnect (GET …/events?since=N) and resume.
+    turn = designer_turn_registry.start(
+        owner_user_id=user.user_id,
+        session_id=request.session_id,
+        producer=orchestrator.run_turn(
+            messages=messages_dicts,
+            current_ast=request.current_ast,
+            session_id=request.session_id,
+            user_token=obo_token,
+            current_user_id=user.user_id,
+            assets=request.assets,
+            skill_names=request.skill_names,
+        ),
+        on_error=_log_stream_error,
+    )
+
+    async def _initial_stream() -> AsyncIterator[str]:
+        # First frame carries the turn_id so the client can reconnect if the
+        # connection is cut. Not buffered (no seq) → never replayed on resume.
+        yield _format_sse("turn_started", {"turn_id": turn.turn_id})
+        async for frame in _sse_render(turn, start_seq=0):
+            yield frame
+
+    return StreamingResponse(
+        _initial_stream(),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
+
+
+@router.get("/chat/{turn_id}/events")
+async def chat_events(
+    turn_id: str,
+    user: CurrentUser,
+    since: int = Query(0, ge=0),
+) -> StreamingResponse:
+    """Resume an in-flight (or finished) designer turn from sequence ``since``.
+
+    The frontend calls this when the streamed POST connection is severed by the
+    gateway's absolute cap. It replays ``events[since:]`` — including a terminal
+    ``mutation_proposed`` + ``done`` produced while disconnected — and keeps the
+    keepalive so this connection also survives idle gaps until the next cap.
+
+    Authorization: the turn resolves only for its owner; unknown id, expired
+    (swept), or foreign owner all return 404 (no existence leak).
+    """
+    turn = designer_turn_registry.get(turn_id, owner_user_id=user.user_id)
+    if turn is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Designer turn not found or expired. Please resend your message.",
+        )
+    logger.info(
+        "DESIGNER_TURN_RECONNECT turn_id=%s user=%s since=%d", turn_id, user.user_id, since
+    )
+    return StreamingResponse(
+        _sse_render(turn, start_seq=since),
+        media_type="text/event-stream",
+        headers=_SSE_HEADERS,
+    )
 
 
 # Rebuild models that reference `Any` via forward-ref string annotations
