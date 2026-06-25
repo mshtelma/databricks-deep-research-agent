@@ -8,6 +8,7 @@ from databricks_deep_research.workflow.definition import (
     WorkflowNode,
 )
 
+from deep_research.agent.adapters.config_translator import translate
 from deep_research.agent.framework_orchestrator import _merge_chat_attachments
 
 
@@ -113,8 +114,60 @@ def test_mcp_binds_plan_and_execute_researcher_body_only() -> None:
     assert "mcp_servers" not in defn.root.config["planner"]
 
 
+def test_mcp_binds_plan_and_execute_workflow_node_body_config_only() -> None:
+    body = {
+        "id": "researcher",
+        "type": "agent",
+        "label": "Researcher",
+        "config": {"subtype": "researcher", "system_prompt": "y"},
+    }
+    planner = {"subtype": "planner", "system_prompt": "p"}
+    root = WorkflowNode(
+        id="pae",
+        type=NodeType.plan_and_execute,
+        label="PAE",
+        config={"planner": planner, "body": body},
+    )
+    defn = WorkflowDefinition(id="w", name="w", root=root)
+    _merge_chat_attachments(defn, None, ["tavily_mcp"])
+    assert defn.root.config["body"]["config"]["mcp_servers"] == ["tavily_mcp"]
+    assert "mcp_servers" not in defn.root.config["body"]
+    assert "mcp_servers" not in defn.root.config["planner"]
+
+
 def test_mcp_agent_binding_dedups_with_existing() -> None:
     defn = _agent_def()
     defn.root.config["mcp_servers"] = ["tavily_mcp"]
     _merge_chat_attachments(defn, None, ["tavily_mcp", "sales"])
     assert defn.root.config["mcp_servers"] == ["tavily_mcp", "sales"]
+
+
+def test_mcp_only_lightweight_search_binds_researcher_without_web_tools() -> None:
+    """Answer + MCP-only should run the lightweight researcher, not Deep Research."""
+    config = type(
+        "Config",
+        (),
+        {
+            "query_mode": "web_search",
+            "source_scope": "enterprise_only",
+            "system_instructions": None,
+            "output_format": "markdown",
+            "output_schema": None,
+            "structured_system_prompt": None,
+            "structured_user_prompt": None,
+            "synthesis_mode": "simple",
+            "research_depth": "light",
+            "verify_sources": False,
+            "enable_post_verification": False,
+            "tone": None,
+            "output_language": None,
+        },
+    )()
+    defn = translate(config, available_tools=["web_search", "web_crawl"])
+
+    _merge_chat_attachments(defn, None, ["tavily_mcp"])
+
+    researcher = next(child for child in defn.root.children if child.id == "researcher")
+    assert researcher.config["tools"] == []
+    assert researcher.config["mcp_servers"] == ["tavily_mcp"]
+    assert [server.name for server in defn.mcp_servers] == ["tavily_mcp"]

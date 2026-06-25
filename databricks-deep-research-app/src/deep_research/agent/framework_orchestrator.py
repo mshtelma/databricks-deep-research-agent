@@ -42,6 +42,7 @@ from databricks_deep_research.workflow.context import (
 from databricks_deep_research.workflow.definition import (
     NodeType,
     WorkflowDefinition,
+    WorkflowNode,
 )
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.state import WorkflowState
@@ -184,29 +185,55 @@ def _merge_chat_attachments(
     UC-connection ``MCPServerConfig`` entries on ``definition.mcp_servers``
     (deduped). No-op when both lists are empty => byte-identical to today.
     """
+    def _walk_agent_configs(value: Any) -> list[dict[str, Any]]:
+        """Return mutable agent config dicts from raw configs or node-shaped dicts."""
+        configs: list[dict[str, Any]] = []
+
+        if isinstance(value, WorkflowNode):
+            configs.extend(_walk_agent_configs(value.config))
+            for child in value.children:
+                configs.extend(_walk_agent_configs(child))
+            return configs
+
+        if not isinstance(value, dict):
+            return configs
+
+        # Raw AgentNodeConfig shape.
+        if "subtype" in value:
+            configs.append(value)
+
+        # WorkflowNode dict shape: {"type": "agent", "config": {"subtype": ...}}.
+        nested_config = value.get("config")
+        if isinstance(nested_config, dict):
+            configs.extend(_walk_agent_configs(nested_config))
+
+            # Plan-and-execute config nested inside a node-shaped dict.
+            for nested_key in ("planner", "evaluator", "body"):
+                configs.extend(_walk_agent_configs(nested_config.get(nested_key)))
+
+        # Plan-and-execute config raw shape.
+        for nested_key in ("planner", "evaluator", "body"):
+            configs.extend(_walk_agent_configs(value.get(nested_key)))
+
+        for child in value.get("children") or []:
+            configs.extend(_walk_agent_configs(child))
+
+        return configs
+
+    def _iter_definition_agent_configs() -> list[dict[str, Any]]:
+        return _walk_agent_configs(definition.root)
+
     if enabled_skills:
 
         def _add_skills(agent_cfg: dict[str, Any]) -> None:
-            if "subtype" not in agent_cfg:
-                return
             merged = list(agent_cfg.get("skills") or [])
             for skill in enabled_skills:
                 if skill and skill not in merged:
                     merged.append(skill)
             agent_cfg["skills"] = merged
 
-        stack = [definition.root]
-        while stack:
-            node = stack.pop()
-            cfg = getattr(node, "config", None)
-            if isinstance(cfg, dict):
-                if str(getattr(node, "type", "")) == "agent":
-                    _add_skills(cfg)
-                for nested_key in ("planner", "evaluator", "body"):
-                    nested = cfg.get(nested_key)
-                    if isinstance(nested, dict):
-                        _add_skills(nested)
-            stack.extend(getattr(node, "children", None) or [])
+        for agent_cfg in _iter_definition_agent_configs():
+            _add_skills(agent_cfg)
 
     if enabled_mcp_servers:
         from databricks_deep_research import MCPServerConfig
@@ -239,18 +266,28 @@ def _merge_chat_attachments(
                     merged.append(mcp_name)
             agent_cfg["mcp_servers"] = merged
 
-        stack = [definition.root]
-        while stack:
-            node = stack.pop()
-            cfg = getattr(node, "config", None)
-            if isinstance(cfg, dict):
-                if str(getattr(node, "type", "")) == "agent":
-                    _add_mcp(cfg)
-                for nested_key in ("planner", "evaluator", "body"):
-                    nested = cfg.get(nested_key)
-                    if isinstance(nested, dict):
-                        _add_mcp(nested)
-            stack.extend(getattr(node, "children", None) or [])
+        for agent_cfg in _iter_definition_agent_configs():
+            _add_mcp(agent_cfg)
+
+
+def _stash_mcp_tools_by_server(
+    runner: Any,
+    tool_resolver: Any,
+    tools_by_server: dict[str, list[Any]],
+) -> None:
+    """Stash discovered MCP tools in every factory context used at execution.
+
+    ``ToolResolver`` intentionally shallow-copies ``ToolFactoryContext.extras``
+    at construction time to isolate resolver caches. MCP discovery happens
+    after resolver construction, so writing only to ``runner.factory_context``
+    leaves the resolver's copied context without ``_mcp_tools_by_server`` and
+    makes researcher auto-attach see zero tools.
+    """
+    for owner in (runner, tool_resolver):
+        factory_context = getattr(owner, "factory_context", None)
+        extras = getattr(factory_context, "extras", None)
+        if isinstance(extras, dict):
+            extras["_mcp_tools_by_server"] = tools_by_server
 
 
 async def _load_skill_folder_roots(
@@ -1508,13 +1545,11 @@ async def stream_workflow_via_framework(
                                 _mcp_tool.definition.name, _mcp_tool
                             )
                             _mcp_injected += 1
-                    # Stash on the shared factory context (same extras dict the
-                    # skill auto-attach reads). The executor's ToolResolver shares
-                    # this context, so a researcher agent binding the server picks
-                    # the tools up. Without this the tools stay orphaned.
-                    _fctx = getattr(runner, "factory_context", None)
-                    if _fctx is not None:
-                        _fctx.extras["_mcp_tools_by_server"] = _mcp_tools_by_server
+                    # Stash on both the runner context and the resolver's copied
+                    # context. ToolResolver deliberately copies extras at
+                    # construction time for cache isolation, so late MCP discovery
+                    # must be written to the resolver context explicitly.
+                    _stash_mcp_tools_by_server(runner, tool_resolver, _mcp_tools_by_server)
                     # skipped = servers that failed to build (SSRF / MCPConfigError
                     # / missing mcp packages) — surfaced so an attached-but-unused
                     # server is never silently dropped.
@@ -2641,12 +2676,23 @@ async def _load_enterprise_tools(
         return tools
 
     disabled_source_ids = set(config.disabled_sources or [])
+    has_explicit_source_selection = config.enabled_sources is not None
     selected_source_ids = [
         source_id
         for source_id in (config.enabled_sources or [])
         if _is_enterprise_source_id(source_id) and source_id not in disabled_source_ids
     ]
     remaining_source_ids = list(selected_source_ids)
+
+    if has_explicit_source_selection and not selected_source_ids:
+        logger.info(
+            "FWK_ENTERPRISE_TOOLS_EMPTY_SELECTION source_scope=%s enabled_sources=%s "
+            "disabled_sources=%s",
+            config.source_scope,
+            config.enabled_sources,
+            config.disabled_sources,
+        )
+        return tools
 
     try:
         if (db is not None or storage_stack is not None) and user_id:

@@ -16,6 +16,7 @@ All tests run without network access (a fake duck-typed MCP client is injected).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import pytest
@@ -79,6 +80,18 @@ class _CountingDiscoveryClient(_FakeResearchClient):
         return super().list_tools()
 
 
+class _SyncClientWithInternalAsyncRun(_FakeResearchClient):
+    """Mimics sync SDK clients that drive async internals themselves."""
+
+    def call_tool(self, name, arguments):  # type: ignore[no-untyped-def]
+        self.last_arguments = dict(arguments or {})
+        return asyncio.run(self._call_tool_async(name, arguments))
+
+    async def _call_tool_async(self, name, arguments):  # type: ignore[no-untyped-def]
+        await asyncio.sleep(0)
+        return _FakeTextResult(self._answer)
+
+
 # ---------------------------------------------------------------------------
 # §4.3 #11 — citeable source emission
 # ---------------------------------------------------------------------------
@@ -105,6 +118,20 @@ async def test_citeable_mcp_result_carries_source() -> None:
     assert src.url.startswith("mcp://")
     assert src.content == result.content
     assert src.source_kind == SourceKind.qa_assistant
+
+
+@pytest.mark.asyncio
+async def test_sync_mcp_client_with_internal_asyncio_run_executes_in_thread() -> None:
+    """Regression: Databricks MCP sync call_tool internally uses asyncio.run()."""
+    client = _SyncClientWithInternalAsyncRun()
+    ts = MCPToolset(client=client, name_prefix="corp_")
+    tool = ts.tools[0]
+
+    result = await tool.execute({"query": "2024 revenue"}, ToolContext())
+
+    assert result.success
+    assert "45.2 billion" in result.content
+    assert client.last_arguments == {"query": "2024 revenue"}
 
 
 @pytest.mark.asyncio

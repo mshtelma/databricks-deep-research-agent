@@ -183,18 +183,76 @@ def collect_body_tool_refs(raw_node: dict[str, Any] | WorkflowNode | None) -> li
     return refs
 
 
+def collect_body_mcp_servers(raw_node: dict[str, Any] | WorkflowNode | None) -> list[str]:
+    if not raw_node:
+        return []
+    node = raw_node if isinstance(raw_node, WorkflowNode) else WorkflowNode(**raw_node)
+    servers: list[str] = []
+    if node.type == NodeType.agent:
+        servers.extend(AgentNodeConfig(**node.config).mcp_servers)
+    elif node.type == NodeType.plan_and_execute:
+        servers.extend(collect_body_mcp_servers(PlanAndExecuteNodeConfig(**node.config).body))
+    for child in node.children:
+        servers.extend(collect_body_mcp_servers(child.model_dump(mode="json")))
+    return servers
+
+
 def is_evidence_tool_kind(tool_kind: str, source_kind: str) -> bool:
     return tool_kind not in {"web_crawl"} and source_kind not in {"builtin", "web_crawl"}
 
 
 async def build_available_source_catalog(definition: WorkflowDefinition, resolver: ToolResolver, body: dict[str, Any] | WorkflowNode | None) -> list[AvailableSourceDescriptor]:
     refs = collect_body_tool_refs(body)
-    if not refs:
+    mcp_servers = collect_body_mcp_servers(body)
+    factory_context = getattr(resolver, "factory_context", None)
+    extras = getattr(factory_context, "extras", None) or {}
+    mcp_tools_by_server = extras.get("_mcp_tools_by_server") or {}
+    mcp_tools = [
+        tool
+        for server_name in mcp_servers
+        for tool in mcp_tools_by_server.get(server_name, [])
+    ]
+    if not refs and not mcp_tools:
         return []
     decl_by_name = {tool.name: tool for tool in definition.tools}
     source_by_name = {source.name: source for source in definition.sources}
     seen: set[str] = set()
     catalog: list[AvailableSourceDescriptor] = []
+
+    def add_tool_descriptor(tool: Any, *, fallback_kind: str = "mcp") -> None:
+        tool_definition = getattr(tool, "definition", None)
+        name = str(getattr(tool_definition, "name", "") or "")
+        if not name or name in seen:
+            return
+        source_kind = str(getattr(tool_definition, "source_kind", "") or "builtin")
+        tool_kind = str(
+            (getattr(tool_definition, "metadata", None) or {}).get("tool_kind")
+            or fallback_kind
+        )
+        if not is_evidence_tool_kind(tool_kind, source_kind):
+            return
+        metadata = getattr(tool_definition, "metadata", None) or {}
+        endpoint = str(
+            metadata.get("source_url")
+            or metadata.get("index_name")
+            or metadata.get("space_id")
+            or metadata.get("endpoint_name")
+            or ""
+        )
+        catalog.append(
+            AvailableSourceDescriptor(
+                source_name=name,
+                tool_kind=tool_kind,
+                source_kind=source_kind,
+                description=str(getattr(tool_definition, "description", "") or ""),
+                endpoint=endpoint,
+            )
+        )
+        seen.add(name)
+
+    for mcp_tool in mcp_tools:
+        add_tool_descriptor(mcp_tool, fallback_kind="mcp")
+
     for ref in refs:
         name = tool_ref_name(ref)
         if not name or name in seen:

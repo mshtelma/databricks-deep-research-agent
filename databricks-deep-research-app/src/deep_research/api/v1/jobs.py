@@ -413,6 +413,25 @@ async def submit_job(
     # agent_server CLI) where HITL gating is disabled by design.
     approval_broker = getattr(request.app.state, "approval_broker", None)
 
+    logger.info(
+        "JOB_SUBMIT_REQUEST_SHAPE",
+        chat_id=str(body.chat_id),
+        query_mode=body.query_mode,
+        research_depth=body.research_depth,
+        source_scope=body.source_scope.value if body.source_scope else None,
+        enabled_sources=body.enabled_sources,
+        enabled_sources_count=(
+            len(body.enabled_sources) if body.enabled_sources is not None else None
+        ),
+        disabled_sources_count=len(body.disabled_sources),
+        enabled_mcp_servers=body.enabled_mcp_servers,
+        enabled_skills_count=(
+            len(body.enabled_skills) if body.enabled_skills is not None else None
+        ),
+        file_count=len(body.file_ids) if body.file_ids else 0,
+        agent_id=body.agent_id,
+    )
+
     # Submit job
     session = await job_manager.submit_job(
         user_id=user.user_id,

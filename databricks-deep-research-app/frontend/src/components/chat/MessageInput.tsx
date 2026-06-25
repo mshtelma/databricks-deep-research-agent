@@ -23,12 +23,19 @@ import { useDiscoveredSources, useRefreshDiscovery } from '@/hooks/useDiscovered
 import { useFileUpload } from '@/hooks/useFileUpload';
 import { useAgentsV2List } from '@/hooks/useAgentsV2';
 import { ComponentRegistry } from '@/core/plugins';
-import type { AvailableSource, SourceScope } from '@/types/dataSources';
+import type { AvailableSource } from '@/types/dataSources';
 import type { CustomAgentSummary } from '@/types/customAgents';
 import type { AgentV2Summary } from '@/types/agentDesigner';
 import type { InputConfig } from '@/core/plugins/types';
 import type { QuerySubmission } from '@/types/querySubmission';
 import type { QueryMode } from '@/types';
+import {
+  deriveEnabledSourceIdsForSubmit,
+  deriveQueryModeFromComposerState,
+  deriveSourceScopeFromComposerSources,
+  type ComposerMode,
+  type ComposerSources,
+} from './sourceRouting';
 
 interface MessageInputProps {
   onSubmit: (submission: QuerySubmission) => void;
@@ -52,16 +59,6 @@ const SELECTED_AGENT_KEY = 'deep-research-selected-agent';
 // so the backend contract is unchanged.
 const COMPOSER_MODE_KEY = 'deep-research-composer-mode';
 const COMPOSER_SOURCES_KEY = 'deep-research-composer-sources';
-
-/** VariantA primary mode: Answer (quick) vs Deep Research. */
-type ComposerMode = 'answer' | 'deep';
-/** VariantA retrieval channels — all on by default; clearing web+ent in Answer
- *  mode reproduces the legacy "Simple" (model-only) run. */
-interface ComposerSources {
-  web: boolean;
-  ent: boolean;
-  mcp: boolean;
-}
 
 function readSelectedAgentId(): string | null {
   if (typeof window === 'undefined') return null;
@@ -206,29 +203,18 @@ export function MessageInput({
 
   // Derive the legacy queryMode from (mode, sources):
   //   deep                    -> deep_research
-  //   answer + any web/ent on -> web_search   (lightweight retrieval)
-  //   answer + no web/ent     -> simple       (model only)
+  //   answer + any web/ent/mcp on -> web_search   (lightweight retrieval)
+  //   answer + no sources    -> simple       (model only)
   // When the plugin hides the selector, honor its configured default instead.
   const derivedQueryMode: QueryMode = !effectiveShowModeSelector
     ? (inputConfig?.defaultQueryMode ?? 'deep_research')
-    : composerMode === 'deep'
-      ? 'deep_research'
-      : composerSources.web || composerSources.ent
-        ? 'web_search'
-        : 'simple';
+    : deriveQueryModeFromComposerState(composerMode, composerSources);
   const queryMode = derivedQueryMode;
 
   // Derive the legacy SourceScope from the web/ent checkboxes (used only for
   // web_search/deep_research). MCP is a separate channel handled via
   // enabledMcpServers (gated by composerSources.mcp at submit time).
-  const derivedSourceScope: SourceScope =
-    composerSources.web && composerSources.ent
-      ? 'all'
-      : composerSources.web
-        ? 'web_only'
-        : composerSources.ent
-          ? 'enterprise_only'
-          : 'all'; // neither: only reachable in Deep mode; scope is moot for Simple
+  const derivedSourceScope = deriveSourceScopeFromComposerSources(composerSources);
 
   // Keep the persisted queryMode preference in sync with the derived value.
   React.useEffect(() => {
@@ -505,14 +491,79 @@ export function MessageInput({
     }
   }, [queryMode, effectiveShowVerifySources]);
 
+  // T053-T054: Validation - Check if submission should be blocked due to source scope issues
+  const enterpriseSources = React.useMemo(() => {
+    return availableSources.filter(
+      (s) => s.type !== 'web_search' && s.type !== 'uploaded_file'
+    );
+  }, [availableSources]);
+
+  const enabledEnterpriseSources = React.useMemo(() => {
+    return enterpriseSources.filter((s) => s.isEnabled);
+  }, [enterpriseSources]);
+
+  const hasEnabledMcpServer = composerSources.mcp && enabledMcpServers.length > 0;
+
+  // Determine if we should block submission due to source configuration
+  const sourceValidation = React.useMemo(() => {
+    if (!shouldShowSourceScope) {
+      return { isValid: true, message: null };
+    }
+
+    if (derivedSourceScope === 'enterprise_only') {
+      if (composerSources.mcp && !hasEnabledMcpServer && !composerSources.ent) {
+        return {
+          isValid: false,
+          message: 'Select an MCP server or turn on Web.',
+        };
+      }
+
+      if (!hasEnabledMcpServer) {
+        // T053: Block when Enterprise Only but no enterprise sources discovered
+        if (enterpriseSources.length === 0) {
+          return {
+            isValid: false,
+            message: 'No enterprise data sources available. Select an MCP server or enable Web.',
+          };
+        }
+        // T054: Block when Enterprise Only but all enterprise sources are disabled
+        if (enabledEnterpriseSources.length === 0) {
+          return {
+            isValid: false,
+            message: 'All enterprise sources are disabled. Enable Enterprise, select an MCP server, or turn on Web.',
+          };
+        }
+      }
+    }
+
+    return { isValid: true, message: null };
+  }, [
+    shouldShowSourceScope,
+    derivedSourceScope,
+    composerSources.mcp,
+    composerSources.ent,
+    hasEnabledMcpServer,
+    enterpriseSources.length,
+    enabledEnterpriseSources.length,
+  ]);
+
+  // Check if any files are still processing (not ready yet)
+  const hasProcessingFiles = React.useMemo(() => {
+    return sessionFiles.some(
+      f => f.processingStatus === 'pending' || f.processingStatus === 'processing'
+    );
+  }, [sessionFiles]);
+
+  // Combined disabled state for submit button and keyboard submit.
+  const isSubmitDisabled =
+    !message.trim() || isLoading || disabled || !sourceValidation.isValid || hasProcessingFiles;
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (message.trim() && !isLoading && !disabled) {
+    if (!isSubmitDisabled) {
       // Compute enabledSources from availableSources minus disabledSources
       const enabledSourceIds = shouldShowSourceScope && availableSources.length > 0
-        ? availableSources
-            .filter((s) => s.isEnabled)
-            .map((s) => s.id)
+        ? deriveEnabledSourceIdsForSubmit(availableSources, composerSources)
         : undefined;
 
       // Only pass disabledSources if there are any disabled
@@ -566,54 +617,6 @@ export function MessageInput({
       textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
     }
   }, [message]);
-
-  // T053-T054: Validation - Check if submission should be blocked due to source scope issues
-  const enterpriseSources = React.useMemo(() => {
-    return availableSources.filter(
-      (s) => s.type !== 'web_search' && s.type !== 'uploaded_file'
-    );
-  }, [availableSources]);
-
-  const enabledEnterpriseSources = React.useMemo(() => {
-    return enterpriseSources.filter((s) => s.isEnabled);
-  }, [enterpriseSources]);
-
-  // Determine if we should block submission due to source configuration
-  const sourceValidation = React.useMemo(() => {
-    if (!shouldShowSourceScope) {
-      return { isValid: true, message: null };
-    }
-
-    if (derivedSourceScope === 'enterprise_only') {
-      // T053: Block when Enterprise Only but no enterprise sources discovered
-      if (enterpriseSources.length === 0) {
-        return {
-          isValid: false,
-          message: 'No enterprise data sources available. Enable the Web source.',
-        };
-      }
-      // T054: Block when Enterprise Only but all enterprise sources are disabled
-      if (enabledEnterpriseSources.length === 0) {
-        return {
-          isValid: false,
-          message: 'All enterprise sources are disabled. Enable at least one source or turn on Web.',
-        };
-      }
-    }
-
-    return { isValid: true, message: null };
-  }, [shouldShowSourceScope, derivedSourceScope, enterpriseSources.length, enabledEnterpriseSources.length]);
-
-  // Check if any files are still processing (not ready yet)
-  const hasProcessingFiles = React.useMemo(() => {
-    return sessionFiles.some(
-      f => f.processingStatus === 'pending' || f.processingStatus === 'processing'
-    );
-  }, [sessionFiles]);
-
-  // Combined disabled state for submit button
-  const isSubmitDisabled =
-    !message.trim() || isLoading || disabled || !sourceValidation.isValid || hasProcessingFiles;
 
   return (
     <form onSubmit={handleSubmit} className="db-root border-t border-db-gray-lines bg-white">

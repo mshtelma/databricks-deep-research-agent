@@ -228,11 +228,23 @@ class _MCPTool:
         call = getattr(self._client, "call_tool", None)
         if call is None:
             raise RuntimeError("MCP client missing call_tool()")
-        # Support sync + async call_tool implementations.
-        try:
-            response = call(tool_name, arguments)
-        except TypeError:
-            response = call(name=tool_name, arguments=arguments)
+        # Support sync + async call_tool implementations. Databricks' MCP
+        # client exposes a synchronous wrapper that internally drives async
+        # code with asyncio.run(); invoke sync clients in a worker thread so
+        # that internal loop never nests inside the ReAct loop.
+        def _call_sync() -> Any:
+            try:
+                return call(tool_name, arguments)
+            except TypeError:
+                return call(name=tool_name, arguments=arguments)
+
+        if inspect.iscoroutinefunction(call):
+            try:
+                response = call(tool_name, arguments)
+            except TypeError:
+                response = call(name=tool_name, arguments=arguments)
+        else:
+            response = await asyncio.to_thread(_call_sync)
         if hasattr(response, "__await__"):
             response = await response
         return response

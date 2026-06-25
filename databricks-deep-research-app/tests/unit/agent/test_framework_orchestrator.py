@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from databricks_deep_research.tools.factory import ToolFactoryContext
+from databricks_deep_research.tools.resolver import ToolResolver
 
 from deep_research.agent.framework_orchestrator import (
     _apply_runtime_overlays_to_workflow,
@@ -26,6 +27,7 @@ from deep_research.agent.framework_orchestrator import (
     _load_file_search_tool,
     _resolve_agent_v2_workflow,
     _safe_uuid,
+    _stash_mcp_tools_by_server,
     _to_sse_event,
     _to_uuid,
     _tool_names_with_explicit_provider,
@@ -208,6 +210,25 @@ def test_tool_names_with_explicit_provider_empty_when_none_declared() -> None:
     definition = load_workflow_from_dict(workflow)
 
     assert _tool_names_with_explicit_provider(definition) == set()
+
+
+def test_mcp_tools_stashed_in_resolver_copied_context() -> None:
+    """Regression: ToolResolver copies extras before app-level MCP discovery."""
+    from databricks_deep_research.agents.mcp_attach import maybe_attach_mcp
+
+    base_context = ToolFactoryContext(extras={})
+    resolver = ToolResolver(factory_context=base_context)
+    runner = SimpleNamespace(factory_context=base_context)
+    mcp_tool = SimpleNamespace(definition=SimpleNamespace(name="tavily_search"))
+    tools_by_server = {"tavily_mcp": [mcp_tool]}
+
+    _stash_mcp_tools_by_server(runner, resolver, tools_by_server)
+
+    assert runner.factory_context.extras["_mcp_tools_by_server"] is tools_by_server
+    assert resolver.factory_context.extras["_mcp_tools_by_server"] is tools_by_server
+    attached: list[Any] = []
+    assert maybe_attach_mcp(attached, ["tavily_mcp"], resolver.factory_context) == 1
+    assert attached == [mcp_tool]
 
 
 def test_fill_databricks_tool_defaults_fills_per_tool_databricks() -> None:
@@ -998,6 +1019,30 @@ class TestEnterpriseToolLoading:
 
         assert result == [mock_tool]
         mock_get_tools.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_empty_enabled_sources_do_not_expand_to_all_enterprise_tools(self) -> None:
+        """Explicit empty source selection means no enterprise tools are selected."""
+        config = _mock_config(
+            source_scope="enterprise_only",
+            enabled_sources=[],
+            disabled_sources=[],
+        )
+
+        with patch(
+            "deep_research.agent.tools.factory.get_enabled_tools_for_user",
+            new_callable=AsyncMock,
+            return_value=[MagicMock()],
+        ) as mock_get_tools:
+            result = await _load_enterprise_tools(
+                config,
+                db=MagicMock(),
+                user_id="user-123",
+                chat_id=None,
+            )
+
+        assert result == []
+        mock_get_tools.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_loads_selected_sources_from_discovery_cache(self) -> None:

@@ -325,6 +325,16 @@ class JobManager:
             query_mode=query_mode,
             research_depth=research_depth,
             output_type=output_type,
+            source_scope=source_scope,
+            enabled_sources=enabled_sources,
+            enabled_sources_count=(
+                len(enabled_sources) if enabled_sources is not None else None
+            ),
+            disabled_sources_count=len(disabled_sources) if disabled_sources else 0,
+            enabled_mcp_servers=enabled_mcp_servers,
+            enabled_skills_count=(
+                len(enabled_skills) if enabled_skills is not None else None
+            ),
             file_count=len(file_ids) if file_ids else 0,
         )
 
