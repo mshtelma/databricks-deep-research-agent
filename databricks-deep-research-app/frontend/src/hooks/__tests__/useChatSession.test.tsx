@@ -666,6 +666,44 @@ describe('useChatSession', () => {
     expect(assistant?.content).toBe('partial')
   })
 
+  it('does not auto-apply an empty-canvas mutation when the turn ends with error', async () => {
+    const draft = createDraftWorkflow()
+    act(() => {
+      useAgentEditorStore.setState({ ast: draft, isDirty: false })
+    })
+    const setAstSpy = vi.spyOn(useAgentEditorStore.getState(), 'setAst')
+
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        {
+          type: 'mutation_proposed',
+          tool_name: 'propose_workflow',
+          tool_call_id: 'tc-rejected',
+          old_ast: draft,
+          new_ast: makeAst('rejected'),
+          validation_errors: [],
+          summary: null,
+        },
+        {
+          type: 'error',
+          message: 'The generated workflow did not pass review.',
+          tool_call_id: null,
+        },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+
+    await act(async () => {
+      await result.current.sendMessage('Build an agent')
+    })
+
+    expect(result.current.error).toBe('The generated workflow did not pass review.')
+    expect(setAstSpy).not.toHaveBeenCalled()
+    expect(useAgentEditorStore.getState().ast).toBe(draft)
+  })
+
   // -------------------------------------------------------------------------
   // W14: chat-driven mutation race detection
   // -------------------------------------------------------------------------

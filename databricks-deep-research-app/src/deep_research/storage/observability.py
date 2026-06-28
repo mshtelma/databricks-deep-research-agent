@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
+from collections.abc import Generator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
@@ -132,7 +133,7 @@ def get_sink() -> MetricsSink:
 
 
 @contextmanager
-def use_sink(sink: MetricsSink):
+def use_sink(sink: MetricsSink) -> Generator[MetricsSink]:
     """Context manager for tests — restore previous sink on exit."""
     previous = _sink
     set_sink(sink)

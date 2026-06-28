@@ -863,6 +863,17 @@ export function ChatPanel({ sessionId, assets, embedded = false }: ChatPanelProp
   const bottomRef = React.useRef<HTMLDivElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
 
+  // Consume the pending chat seed written by AgentDesignerPage's validation
+  // banner "Ask designer to fix" action. Pre-fills the composer and clears
+  // the store field so subsequent renders don't re-apply it.
+  const pendingChatSeed = useAgentEditorStore((s) => s.pendingChatSeed);
+  React.useEffect(() => {
+    if (pendingChatSeed) {
+      setInputText(pendingChatSeed);
+      useAgentEditorStore.getState().setPendingChatSeed(null);
+    }
+  }, [pendingChatSeed]);
+
   // Fix #3 — surface the result of an apply instead of silently no-op-ing.
   const [conflict, setConflict] = React.useState<{
     mutationId: string;

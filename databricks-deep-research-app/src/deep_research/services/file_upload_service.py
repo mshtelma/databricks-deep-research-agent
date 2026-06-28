@@ -479,9 +479,9 @@ class FileUploadService(BaseRepository[UploadedFile]):
         Uses python-docx if available.
         """
         try:
-            from docx import Document  # type: ignore[import-not-found]
+            from docx import Document
 
-            doc = Document(path)
+            doc = Document(str(path))
             paragraphs = [p.text for p in doc.paragraphs if p.text.strip()]
             return "\n\n".join(paragraphs)
 

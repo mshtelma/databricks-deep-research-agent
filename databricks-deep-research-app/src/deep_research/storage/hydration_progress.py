@@ -21,7 +21,7 @@ import contextlib
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from deep_research.storage.observability import get_sink
@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 # Signature: `(event_name, data_dict_or_none) -> None`. Intentionally generic
 # so the route can plumb any SSE framework (FastAPI-sse, sse-starlette, raw).
-SseEmit = Callable[[str, dict | None], None]
+SseEmit = Callable[[str, dict[str, Any] | None], None]
 
 Deadline = tuple[float, str | None]
 

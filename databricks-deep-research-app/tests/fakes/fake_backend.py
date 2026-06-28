@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -261,7 +261,7 @@ class FakeBackend(StorageBackend):
     async def list_rows(
         self,
         table: str,
-        where: dict[str, Any],
+        where: Mapping[str, Any],
         *,
         order_by: str | None = None,
         limit: int | None = None,
@@ -287,7 +287,7 @@ class FakeBackend(StorageBackend):
         if order_by is not None:
             key = order_by.lstrip("-")
             reverse = order_by.startswith("-")
-            matched.sort(key=lambda r: r.get(key), reverse=reverse)
+            matched.sort(key=lambda r: str(r.get(key) or ""), reverse=reverse)
         if limit is not None:
             matched = matched[:limit]
         return matched
@@ -295,7 +295,7 @@ class FakeBackend(StorageBackend):
     async def upsert_row(
         self,
         table: str,
-        row: dict[str, Any],
+        row: Mapping[str, Any],
         *,
         pk: str,
     ) -> None:
@@ -303,7 +303,7 @@ class FakeBackend(StorageBackend):
         await self._tick()
         self._assert_open()
         pk_value = row[pk]
-        self._list_rows[(table, pk_value)] = copy.deepcopy(row)
+        self._list_rows[(table, pk_value)] = copy.deepcopy(dict(row))
 
     async def delete_row(
         self,
@@ -322,14 +322,14 @@ class FakeBackend(StorageBackend):
     async def append_events(
         self,
         table: str,
-        rows: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+        rows: Sequence[Mapping[str, Any]],
     ) -> None:
         self._log("append_events", (table, len(rows)))
         await self._tick()
         self._assert_open()
         buf = self._events.setdefault(table, [])
         for row in rows:
-            buf.append(copy.deepcopy(row))
+            buf.append(copy.deepcopy(dict(row)))
 
     async def read_chunk(
         self,

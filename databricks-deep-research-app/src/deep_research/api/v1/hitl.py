@@ -39,6 +39,7 @@ Tested at
 from __future__ import annotations
 
 import logging
+from typing import cast
 
 from databricks_deep_research.api.approval import (
     ApprovalDecision,
@@ -89,7 +90,7 @@ def _resolve_broker(request: Request) -> InProcessApprovalBroker:
             status_code=503,
             detail="Configured approval_broker does not implement resolve().",
         )
-    return broker  # type: ignore[return-value]
+    return cast(InProcessApprovalBroker, broker)
 
 
 @router.post(

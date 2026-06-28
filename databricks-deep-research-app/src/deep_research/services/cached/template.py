@@ -30,7 +30,7 @@ import json
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
 from deep_research.services._cached_base import _CachedServiceBase
@@ -100,12 +100,13 @@ def _decode_metadata(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
     if isinstance(raw, dict):
-        return raw
+        return cast(dict[str, Any], raw)
     if isinstance(raw, str):
         try:
-            return json.loads(raw)
+            decoded = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             return {}
+        return cast(dict[str, Any], decoded) if isinstance(decoded, dict) else {}
     return {}
 
 
@@ -457,7 +458,9 @@ class CachedTemplateService(_CachedServiceBase, ITemplateService):
         template: Any,
         variables: dict[str, Any],
     ) -> list[str]:
-        required = getattr(template, "get_required_variables", lambda: [])()
+        required: list[str] = [
+            str(name) for name in getattr(template, "get_required_variables", lambda: [])()
+        ]
         return [name for name in required if name not in variables]
 
     # -- Internal ------------------------------------------------------------

@@ -32,7 +32,7 @@ The pattern for extracting a new Protocol:
 from __future__ import annotations
 
 from builtins import list as builtin_list
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
@@ -112,8 +112,9 @@ class IResearchEventService(Protocol):
         self,
         research_session_id: UUID,
         *,
+        event_types: list[str] | None = None,
         limit: int | None = None,
-    ) -> list[dict[str, Any]]: ...
+    ) -> list[Any]: ...
     async def get_events_since_sequence(
         self,
         research_session_id: UUID,
@@ -121,6 +122,7 @@ class IResearchEventService(Protocol):
         limit: int = 100,
     ) -> list[Any]: ...
     def event_to_dict(self, event: Any) -> dict[str, Any]: ...
+    def events_to_list(self, events: list[Any]) -> list[dict[str, Any]]: ...
 
 
 # --- Cold-path list-table Protocols ----------------------------------------
@@ -524,10 +526,43 @@ class IChatMemoryService(Protocol):
     must preserve that contract byte-for-byte.
 
     TODO: extract full signatures from `services/chat_memory_service.py`:
-    `hydrate`, `snapshot`, `preprocess_new_files`, `upsert_plugin_ext`,
-    `enrich_scope`, `render`, `render_appendix_block`, `account_candidates`,
+    `upsert_plugin_ext`, `enrich_scope`, `render`, `account_candidates`,
     `search_findings`.
     """
+
+    async def hydrate(
+        self,
+        chat_id: UUID,
+        *,
+        user_id: str | None = None,
+    ) -> Any:
+        """Load chat-scoped memory rows and return the current projection."""
+        ...
+
+    def snapshot(self) -> Any:
+        """Return the current in-memory projection."""
+        ...
+
+    async def preprocess_new_files(
+        self,
+        chat_id: UUID,
+        file_ids: Iterable[UUID],
+        *,
+        file_service: Any = None,
+        head_chars: int = 4000,
+        research_session_id: UUID | None = None,
+    ) -> Any:
+        """Extract entities/facts/summaries for newly attached files."""
+        ...
+
+    def render_appendix_block(
+        self,
+        agent_type: str = "coordinator",
+        max_chars: int = 3500,
+        mode: Any = None,
+    ) -> str:
+        """Render chat memory for prompt appendix injection."""
+        ...
 
     async def consolidate_from_pool(
         self,

@@ -376,6 +376,8 @@ def _contract_specialized_system_prompt(
     lane_focus: str,
     contract: ResolvedToolContract | None,
 ) -> str:
+    if contract is None:
+        return _placeholder_system_prompt(lane_focus)
     block = _contract_evidence_block(contract)
     if not block:
         return _placeholder_system_prompt(lane_focus)

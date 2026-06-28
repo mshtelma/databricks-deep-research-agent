@@ -462,6 +462,27 @@ def _terminal_feedback_message(state: Any) -> str:
     return _GENERIC_NO_CHANGE_MESSAGE
 
 
+def _terminal_error_message(state: Any) -> str | None:
+    """Return a terminal error message when the designer finished unapproved."""
+
+    signature_loop = _coerce_jsonish(_safe_state_get(state, "signature_loop_done"))
+    if not signature_loop:
+        return None
+    if signature_loop.get("critic_approved") is not False:
+        return None
+
+    feedback = _terminal_feedback_message(state)
+    if signature_loop.get("exhausted") is True:
+        return (
+            "I couldn't create the agent because the workflow did not pass "
+            f"designer review after the available revision attempts. {feedback}"
+        )
+    return (
+        "I couldn't create the agent because the workflow did not pass "
+        f"designer review. {feedback}"
+    )
+
+
 def _normalize_model_tiers(ast: dict[str, Any]) -> dict[str, Any]:
     """Walk the AST and replace any unknown ``model_tier`` value with a valid
     fallback. Lane researchers / coordinator default to analytical;
@@ -1085,12 +1106,12 @@ class DesignerChatOrchestrator:
                 }
             )
         resource_semantics_payload = (
-            resource_semantics.model_dump(mode="json")
+            resource_semantics.model_dump(mode="json", by_alias=True)
             if resource_semantics is not None
             else None
         )
         resolved_tool_contract_payload = (
-            resolved_tool_contract.model_dump(mode="json")
+            resolved_tool_contract.model_dump(mode="json", by_alias=True)
             if resolved_tool_contract is not None
             else None
         )
@@ -1563,6 +1584,15 @@ class DesignerChatOrchestrator:
                             emitted_mutation = True
 
                 elif evt_type == "workflow_completed":
+                    terminal_error = _terminal_error_message(state)
+                    if terminal_error:
+                        logger.info(
+                            "DESIGNER_TURN_REVIEW_FAILED reason=critic_not_approved"
+                        )
+                        yield ErrorEvent(message=terminal_error)
+                        yield DoneEvent()
+                        yielded_done = True
+                        continue
                     if lane == "edit":
                         # Emit the single net delta (+ guard) for the whole turn.
                         async for _fin in self._finalize_edit(

@@ -1198,9 +1198,7 @@ class JobManager:
                 "JobManager._count_user_active_jobs requires a StorageStack; "
                 "call set_storage_stack() in app lifespan."
             )
-        return await self._storage_stack.backend.count_active_research_sessions(
-            user_id
-        )
+        return int(await self._storage_stack.backend.count_active_research_sessions(user_id))
 
 
 def _parse_research_status(value: str) -> ResearchStatus:

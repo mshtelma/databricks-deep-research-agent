@@ -28,11 +28,15 @@ import {
 
 import {
   getAgentV2WithEtag,
+  getAgentV2,
   createAgentV2,
   updateAgentV2,
   listRevisions,
   getRevision,
   EtagConflictError,
+  parseAgentCriticError,
+  type WorkflowValidationResult,
+  type AgentV2Response,
 } from '@/api/agentsV2';
 import { getRegistry, validateWorkflow, exportYamlFromDefinition } from '@/api/agentDesigner';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
@@ -109,7 +113,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   const etag = useAgentEditorStore((s) => s.etag);
   const isDirty = useAgentEditorStore((s) => s.isDirty);
   const validationErrors = useAgentEditorStore((s) => s.validationErrors);
-  const { load, markClean, markValidationErrors } = useAgentEditorStore.getState();
+  const pendingValidationAgentId = useAgentEditorStore((s) => s.pendingValidationAgentId);
+  const { load, markClean, markValidationErrors, setPendingValidationAgentId } =
+    useAgentEditorStore.getState();
 
   // Local state for new-agent name/description
   const [localName, setLocalName] = React.useState('');
@@ -133,7 +139,89 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   // Save-flash state for the top bar status pill
   const [savedFlash, setSavedFlash] = React.useState(false);
   const [deploySyncError, setDeploySyncError] = React.useState<string | null>(null);
+  // Non-blocking save notice: shown after a successful save with advisory
+  // critic verdict, or after a save failure (non-conflict errors).
+  const [saveNotice, setSaveNotice] = React.useState<{
+    kind: 'warning' | 'error';
+    message: string;
+    /** Full validation result — present for advisory/warning saves. */
+    validation?: WorkflowValidationResult | null;
+  } | null>(null);
   const queryClient = useQueryClient();
+
+  // Surface a (possibly background) save-time validation verdict in the save
+  // banner. Reused for the inline (cache-hit) verdict and the polled result.
+  const applyValidationNotice = React.useCallback(
+    (validation: WorkflowValidationResult | null): void => {
+      if (
+        validation &&
+        validation.verdict !== 'pass' &&
+        validation.verdict !== 'skipped'
+      ) {
+        const summary =
+          typeof validation.summary === 'string' ? validation.summary : '';
+        setSaveNotice({
+          kind: 'warning',
+          message: `Saved with advisory notice (${validation.verdict})${summary ? `: ${summary}` : ''}`,
+          validation,
+        });
+      } else {
+        setSaveNotice(null);
+        setSavedFlash(true);
+        window.setTimeout(() => setSavedFlash(false), 1000);
+      }
+    },
+    [],
+  );
+
+  // The advisory validator runs in the BACKGROUND on a cache miss so the save
+  // never blocks on the slow critic (the cause of "Request timed out after
+  // 30000ms"). Poll GET /agents-v2/{id} until the verdict lands, then surface
+  // it. Bounded + never silent: on exhaustion we say validation is still
+  // running. Fire-and-forget (guarded by a ref) so it is not cancelled by the
+  // store-flag clear that re-runs the effect below.
+  const validationPollRef = React.useRef<string | null>(null);
+  const startValidationPoll = React.useCallback(
+    (agentId: string): void => {
+      if (validationPollRef.current === agentId) return;
+      validationPollRef.current = agentId;
+      setSaveNotice({ kind: 'warning', message: 'Saved ✓ · validating workflow…' });
+      void (async () => {
+        try {
+          for (let i = 0; i < 40; i++) {
+            await new Promise((resolve) => window.setTimeout(resolve, 3000));
+            let agent: AgentV2Response | null = null;
+            try {
+              agent = await getAgentV2(agentId);
+            } catch {
+              continue; // transient error — keep polling
+            }
+            if (!agent.validation_pending) {
+              applyValidationNotice(agent.validation ?? null);
+              return;
+            }
+          }
+          setSaveNotice({
+            kind: 'warning',
+            message:
+              'Saved ✓ — validation is still running. Ask the designer chat to re-check it.',
+          });
+        } finally {
+          if (validationPollRef.current === agentId) validationPollRef.current = null;
+        }
+      })();
+    },
+    [applyValidationNotice],
+  );
+
+  // New-agent saves navigate to /designer/{id}; the pending-validation signal
+  // is carried across that remount via the editor store and consumed here.
+  React.useEffect(() => {
+    if (pendingValidationAgentId && pendingValidationAgentId === id) {
+      setPendingValidationAgentId(null);
+      startValidationPoll(pendingValidationAgentId);
+    }
+  }, [pendingValidationAgentId, id, setPendingValidationAgentId, startValidationPoll]);
 
   React.useEffect(() => {
     if (activeTab === 'revisions') {
@@ -267,17 +355,42 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     onSuccess: (data) => {
       if (!data) return;
       void queryClient.invalidateQueries({ queryKey: ['agents-v2'] });
-      setSavedFlash(true);
-      window.setTimeout(() => setSavedFlash(false), 1000);
       if (data.isNew) {
+        // The save navigates to /designer/{id}; carry any pending-validation
+        // signal across the remount so the new page polls for the verdict.
+        if (data.agent.validation_pending) {
+          setPendingValidationAgentId(data.agent.id);
+        }
         void navigate(`/designer/${data.agent.id}`);
+        return;
+      }
+      if (data.agent.validation_pending) {
+        // Advisory validation is running in the background — poll for the
+        // verdict (the save itself returned instantly, never timing out).
+        startValidationPoll(data.agent.id);
+      } else {
+        // Verdict already known (cache hit) or not applicable.
+        applyValidationNotice(data.agent.validation ?? null);
       }
     },
     onError: (error) => {
       if (error instanceof EtagConflictError) {
         setConflictEtag(error.current_etag);
         setConflictModalOpen(true);
+        return;
       }
+      const criticError = parseAgentCriticError(error);
+      if (criticError) {
+        const summary =
+          typeof criticError.critique?.summary === 'string'
+            ? criticError.critique.summary
+            : criticError.message;
+        setSaveNotice({ kind: 'error', message: `Save blocked by critic: ${summary}` });
+        return;
+      }
+      const message =
+        error instanceof Error ? error.message : 'Save failed. Please try again.';
+      setSaveNotice({ kind: 'error', message });
     },
   });
 
@@ -708,6 +821,84 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             className="border-b border-db-lava-300 bg-db-lava-100 px-5 py-2 text-[12px] text-db-lava-700"
           >
             {deploySyncError}
+          </div>
+        )}
+
+        {saveNotice && (
+          <div
+            role="alert"
+            className={`border-b px-5 py-2 text-[12px] ${
+              saveNotice.kind === 'error'
+                ? 'border-db-lava-300 bg-db-lava-100 text-db-lava-700'
+                : 'border-db-yellow-300 bg-db-yellow-100 text-db-yellow-700'
+            }`}
+          >
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0 flex-1">
+                <span>{saveNotice.message}</span>
+                {saveNotice.validation && Array.isArray(saveNotice.validation.directives) && saveNotice.validation.directives.length > 0 && (
+                  <ul className="mt-1.5 space-y-0.5">
+                    {saveNotice.validation.directives.map((d, idx) => (
+                      <li
+                        key={`${d.node_path}-${idx}`}
+                        className={`flex items-baseline gap-1 leading-[1.4] ${
+                          d.severity === 'blocking'
+                            ? 'font-medium'
+                            : 'opacity-85'
+                        }`}
+                      >
+                        <span aria-hidden="true">•</span>
+                        <span>
+                          <span className="font-db-mono">{d.node_path}</span>
+                          {': '}
+                          {d.issue}
+                          {' → '}
+                          {d.suggested_action}
+                          {d.severity === 'blocking' && (
+                            <span className="ml-1 rounded-sm bg-current/20 px-1 py-px text-[10px] font-semibold uppercase tracking-[0.04em]">
+                              blocking
+                            </span>
+                          )}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+              <div className="flex shrink-0 items-center gap-2">
+                {saveNotice.validation && saveNotice.validation.verdict !== 'pass' && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const v = saveNotice.validation!;
+                      const lines = [
+                        `Please fix these validation issues from the last save (verdict=${v.verdict}): ${v.summary}`,
+                        ...(v.directives ?? []).map(
+                          (d) => `- [${d.node_path}] ${d.issue} — ${d.suggested_action}`,
+                        ),
+                      ];
+                      useAgentEditorStore.getState().setPendingChatSeed(lines.join('\n'));
+                      setSaveNotice(null);
+                    }}
+                    className={`rounded-db-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                      saveNotice.kind === 'error'
+                        ? 'border-db-lava-400 bg-white text-db-lava-700 hover:bg-db-lava-100'
+                        : 'border-db-yellow-500 bg-white text-db-yellow-800 hover:bg-db-yellow-100'
+                    }`}
+                  >
+                    Ask designer to fix
+                  </button>
+                )}
+                <button
+                  type="button"
+                  aria-label="Dismiss save notice"
+                  onClick={() => setSaveNotice(null)}
+                  className="rounded p-0.5 opacity-70 hover:opacity-100"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

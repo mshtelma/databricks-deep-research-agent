@@ -58,6 +58,7 @@ from deep_research.agent_designer.assets import (
 from deep_research.agent_designer.ast_introspection import (
     config_of,
     iter_all_nodes,
+    topology_of_ast,
 )
 from deep_research.agent_designer.ast_normalizer import (
     _escape_literal_braces,
@@ -717,7 +718,12 @@ class AddBlockTool:
                     },
                     "label": {
                         "type": "string",
-                        "description": "Human-readable node label.",
+                        "description": (
+                            "Human-readable, purpose-specific node label. "
+                            "Use the workstream or responsibility, never "
+                            "generic placeholders like 'Researcher 1' or "
+                            "'Agent 2'."
+                        ),
                     },
                 },
                 "required": ["parent_path", "node_type", "config", "label"],
@@ -2396,6 +2402,7 @@ def _ast_summary_payload(ast: Any) -> dict[str, Any]:
     errors, _ = _validate_ast(ast)
     return {
         "ast_id": ast.get("id"),
+        "topology": topology_of_ast(ast),
         "node_count": node_count,
         "tool_count": len(tools),
         "tool_names": [t.get("name") for t in tools if isinstance(t, dict)],
@@ -2416,6 +2423,10 @@ def _count_nodes_total(node: Any) -> int:
     for child in node.get("children") or []:
         total += _count_nodes_total(child)
     config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    for nested_key in ("planner", "evaluator"):
+        nested = config.get(nested_key) if isinstance(config, dict) else None
+        if isinstance(nested, dict):
+            total += 1
     body = config.get("body") if isinstance(config, dict) else None
     if isinstance(body, dict):
         total += _count_nodes_total(body)
@@ -2432,6 +2443,13 @@ def _collect_agent_role_ids(node: Any) -> list[str]:
     for child in node.get("children") or []:
         out.extend(_collect_agent_role_ids(child))
     config = node.get("config") if isinstance(node.get("config"), dict) else {}
+    for nested_key in ("planner", "evaluator"):
+        nested = config.get(nested_key) if isinstance(config, dict) else None
+        if not isinstance(nested, dict):
+            continue
+        nested_id = nested.get("id") or nested.get("label") or nested_key
+        subtype = nested.get("subtype") or nested_key
+        out.append(f"{nested_id}:{subtype}")
     body = config.get("body") if isinstance(config, dict) else None
     if isinstance(body, dict):
         out.extend(_collect_agent_role_ids(body))

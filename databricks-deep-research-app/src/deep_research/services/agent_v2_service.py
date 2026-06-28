@@ -25,6 +25,7 @@ from deep_research.agent_designer.ast_normalizer import (
     apply_web_search_provider_defaults,
 )
 from deep_research.agent_designer.catalog_service import CatalogService
+from deep_research.agent_designer.workflow_validation import WorkflowValidationResult
 from deep_research.models.agent_deployment import (
     MAX_CLEANUP_ATTEMPTS,
     AgentDeployment,
@@ -112,11 +113,15 @@ class AgentV2Service:
         agent: AgentV2,
         etag: str,
         created_by: str,
+        *,
+        validation: WorkflowValidationResult | None = None,
     ) -> None:
         """Write an AgentRevision snapshot after a successful primary write.
 
         Best-effort: any SQLAlchemyError is caught, logged, and metered but
-        NOT propagated — the primary create/update has already committed.
+        NOT propagated — the primary create/update has already committed. The
+        ``validation`` snapshot (if any) is stored so each revision retains the
+        verdict it had when saved.
         """
         try:
             rev = AgentRevision(
@@ -125,6 +130,11 @@ class AgentV2Service:
                 etag=etag,
                 definition=agent.definition,
                 created_by=created_by,
+                validation=(
+                    validation.model_dump(mode="json")
+                    if validation is not None
+                    else None
+                ),
             )
             self._session.add(rev)
             await self._session.commit()

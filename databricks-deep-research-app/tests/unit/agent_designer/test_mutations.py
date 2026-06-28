@@ -108,6 +108,21 @@ def test_add_block_to_root_children() -> None:
     assert path == "root.children.0"
 
 
+def test_add_block_replaces_generic_researcher_label() -> None:
+    """Generic role ordinals are replaced with semantic generated-object names."""
+    ast = _minimal_ast("sequence")
+    new_ast, path = add_block(
+        ast,
+        "root",
+        "agent",
+        {"subtype": "researcher", "output_key": "market_risk_findings"},
+        "Researcher 1",
+    )
+    new_node = new_ast["root"]["children"][0]
+    assert path == "root.children.0"
+    assert new_node["label"] == "Market Risk Findings Researcher"
+
+
 def test_add_block_to_nested_composite() -> None:
     """Add a node to an inner sequence (sequence > sequence > add)."""
     ast = _nested_seq_ast()

@@ -83,7 +83,8 @@ class CachedPreferencesService(_CachedServiceBase, IPreferencesService):
 
     async def get_system_instructions(self, user_id: str) -> str | None:
         p = await self.get_preferences(user_id)
-        return p.system_instructions
+        value = p.system_instructions
+        return value if isinstance(value, str) or value is None else str(value)
 
     async def get_default_research_depth(self, user_id: str) -> Any:
         p = await self.get_preferences(user_id)
@@ -91,7 +92,7 @@ class CachedPreferencesService(_CachedServiceBase, IPreferencesService):
 
     async def get_default_query_mode(self, user_id: str) -> str:
         p = await self.get_preferences(user_id)
-        return p.default_query_mode
+        return str(p.default_query_mode)
 
     def to_dict(self, preferences: Any) -> dict[str, Any]:
         depth = getattr(preferences, "default_research_depth", None)

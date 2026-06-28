@@ -44,6 +44,13 @@ class AgentV2(BaseModel):
     definition: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
     schema_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     etag: Mapped[str] = mapped_column(String(40), nullable=False)
+    # Latest save-time validation verdict (advisory) + the content hash it was
+    # computed against, so the authoritative state lives in the DB (not in
+    # spoofable AST metadata). Nullable: pre-034 agents + skipped validations
+    # (migration 034).
+    last_validation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    last_validation_verdict: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    last_validation_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
     created_at: Mapped[datetime]
     updated_at: Mapped[datetime]
 
@@ -115,9 +122,36 @@ class AgentRevision(Base):
     )
     etag: Mapped[str] = mapped_column(String(40), nullable=False)
     definition: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    # Per-revision validation snapshot — each revision retains the verdict it
+    # had when saved (migration 034). Nullable for pre-034 revisions.
+    validation: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=datetime.utcnow,
         nullable=False,
     )
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+
+
+class WorkflowValidationCache(Base):
+    """Content-addressed cache of Designer workflow validation verdicts
+    (migration 034).
+
+    Keyed by ``(validator_version, intent_hash, semantic_hash)`` so a workflow
+    that is unchanged since it was validated (e.g. during the chat build loop)
+    reuses its verdict at save time with ZERO LLM calls. Bumping
+    ``workflow_validation.VALIDATOR_VERSION`` transparently invalidates stale
+    rows because it is part of the primary key.
+    """
+
+    __tablename__ = "workflow_validation_cache"
+
+    validator_version: Mapped[str] = mapped_column(String(40), primary_key=True)
+    intent_hash: Mapped[str] = mapped_column(String(40), primary_key=True)
+    semantic_hash: Mapped[str] = mapped_column(String(40), primary_key=True)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        nullable=False,
+    )

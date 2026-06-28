@@ -15,6 +15,7 @@ the per-run event-stream layer and stay unchanged.
 """
 
 from collections.abc import Sequence
+from typing import Any
 
 import sqlalchemy as sa
 from alembic import op
@@ -27,7 +28,7 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
-def _timestamp_columns() -> list[sa.Column]:
+def _timestamp_columns() -> list[sa.Column[Any]]:
     return [
         sa.Column(
             "created_at",

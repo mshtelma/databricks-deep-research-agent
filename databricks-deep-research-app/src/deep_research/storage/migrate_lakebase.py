@@ -65,7 +65,7 @@ async def migrate(
     _require_migration_mode()
     _assert_safe_schema(target_schema)
 
-    summary = {
+    summary: dict[str, Any] = {
         "target_schema": target_schema,
         "chunk_size": chunk_size,
         "chats_migrated": 0,

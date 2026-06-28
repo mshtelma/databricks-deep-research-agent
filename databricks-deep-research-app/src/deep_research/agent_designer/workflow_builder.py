@@ -22,6 +22,7 @@ from deep_research.agent_designer.designer_architect import (
     format_workflow_design_brief,
 )
 from deep_research.agent_designer.designer_types import ToolPlan, WorkflowDesignBrief
+from deep_research.agent_designer.naming import semantic_lane_label
 
 logger = logging.getLogger(__name__)
 
@@ -1454,10 +1455,7 @@ def _lane_id(index: int) -> str:
 
 
 def _lane_label(lane: str, index: int) -> str:
-    cleaned = lane.rstrip(".")
-    if len(cleaned) > 56:
-        cleaned = cleaned[:53].rstrip() + "..."
-    return f"Lane {index}: {cleaned}"
+    return semantic_lane_label(lane, index)
 
 
 _SPECIALIZED_LANE_PREAMBLE = (
@@ -2327,7 +2325,7 @@ def _grounded_synthesizer_output_schema(
             "quality_gates": list(compiled_brief.quality_gates),
             "constraints": list(compiled_brief.constraints),
             "resolved_tool_contract": (
-                compiled_brief.tool_contract.model_dump(mode="json")
+                compiled_brief.tool_contract.model_dump(mode="json", by_alias=True)
                 if compiled_brief.tool_contract is not None
                 else None
             ),

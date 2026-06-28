@@ -497,7 +497,7 @@ export function useChatSession(opts?: {
         }
         // Empty-canvas auto-apply happens once, after the turn's final AST is
         // known — never mid-stream (Codex #3).
-        if (autoApplyInitialWorkflow && initialApplyAst) {
+        if (!sawError && autoApplyInitialWorkflow && initialApplyAst) {
           useAgentEditorStore.getState().setAst(initialApplyAst)
         }
       } finally {

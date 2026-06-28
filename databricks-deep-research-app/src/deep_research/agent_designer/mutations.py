@@ -15,6 +15,7 @@ import copy
 import uuid
 from typing import Any
 
+from deep_research.agent_designer.naming import semantic_node_label
 from deep_research.agent_designer.registry import model_tiers_payload
 
 # ---------------------------------------------------------------------------
@@ -473,10 +474,15 @@ def add_block(
         # children key doesn't exist yet — we'll create it
         children = []
 
+    node_label = semantic_node_label(
+        node_type=node_type,
+        config=config,
+        requested_label=label,
+    )
     new_node: dict[str, Any] = {
         "id": _new_id(),
         "type": node_type,
-        "label": label,
+        "label": node_label,
         "config": copy.deepcopy(config),
         "children": [],
     }
@@ -503,10 +509,15 @@ def _add_to_plan_body(
     label: str,
 ) -> tuple[dict[str, Any], str]:
     """Handle add_block for plan_and_execute body paths."""
+    node_label = semantic_node_label(
+        node_type=node_type,
+        config=config,
+        requested_label=label,
+    )
     new_node: dict[str, Any] = {
         "id": _new_id(),
         "type": node_type,
-        "label": label,
+        "label": node_label,
         "config": copy.deepcopy(config),
         "children": [],
     }

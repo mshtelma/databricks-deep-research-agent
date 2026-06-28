@@ -15,6 +15,7 @@ from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent_designer.orchestrator import (
     _GENERIC_NO_CHANGE_MESSAGE,
+    _terminal_error_message,
     _terminal_feedback_message,
 )
 
@@ -51,6 +52,27 @@ def test_revision_request_dict_takes_priority() -> None:
 def test_revision_request_accepts_json_string() -> None:
     state = _state(revision_request=json.dumps({"reason": "structure mismatch"}))
     assert "structure mismatch" in _terminal_feedback_message(state)
+
+
+def test_terminal_error_when_signature_loop_exhausts_unapproved() -> None:
+    state = _state(
+        signature_loop_done={
+            "signature_loop_done": True,
+            "critic_approved": False,
+            "has_revision_request": True,
+            "revision_count": 2,
+            "exhausted": True,
+        },
+        revision_request={
+            "reason": "the classifier kept selecting a topology without coverage review",
+            "fields_to_reconsider": ["independent_workstreams_count"],
+        },
+    )
+    msg = _terminal_error_message(state)
+    assert msg is not None
+    assert "couldn't create the agent" in msg
+    assert "did not pass designer review" in msg
+    assert "coverage review" in msg
 
 
 def test_critic_verdict_directives_when_no_revision() -> None:

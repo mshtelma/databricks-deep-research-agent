@@ -162,6 +162,19 @@ export interface AgentV2Response {
   etag: string
   created_at: string
   updated_at: string
+  /**
+   * Workflow validation result returned after a save. Present when the
+   * backend validator ran; absent when skipped or not configured.
+   * The shape matches {@link import('@/api/agentsV2').WorkflowValidationResult}.
+   */
+  validation?: import('@/api/agentsV2').WorkflowValidationResult | null
+  /**
+   * True when an advisory validation for the CURRENT definition is still
+   * running in the background (cache miss on save). The verdict is delivered
+   * asynchronously: poll GET /agents-v2/{id} until this is false, then read
+   * `validation`. Distinguishes "pending" from "not applicable" (both null).
+   */
+  validation_pending?: boolean
 }
 
 /** Lightweight summary item returned in list responses. */

@@ -16,6 +16,7 @@ per-chat lock inside `_mutate_chat`. Different chat IDs are fully concurrent.
 
 from __future__ import annotations
 
+import builtins
 import logging
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -485,7 +486,7 @@ class CachedChatService(_CachedServiceBase, IChatService):
         )
         return 0
 
-    async def list_incognito_for_session(self, session_id: UUID) -> list[ChatView]:
+    async def list_incognito_for_session(self, session_id: UUID) -> builtins.list[ChatView]:
         """Return incognito chats for a session. N+1 via list_rows + load_chat.
 
         N+1 note: incognito session listing is a rare, low-traffic path
@@ -610,9 +611,9 @@ def _state_msg_to_view(msg: Any) -> Any:
     role = msg.role
     # Normalize role string to enum if needed
     try:
-        role_enum = MessageRole(role)
+        role_enum: MessageRole | str = MessageRole(role)
     except (ValueError, TypeError):
-        role_enum = role  # type: ignore[assignment]
+        role_enum = role
 
     return SimpleNamespace(
         id=msg.id,

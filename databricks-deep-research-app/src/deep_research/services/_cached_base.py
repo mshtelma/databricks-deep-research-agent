@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, cast
 from uuid import UUID
 
 if TYPE_CHECKING:
@@ -62,7 +62,7 @@ class _CachedServiceBase:
         chat_id: UUID,
         fn: Callable[[ChatDocument], None],
         *,
-        dirty: str = "both",
+        dirty: Literal["state", "meta", "both"] = "both",
     ) -> None:
         """Apply `fn` to the live document under the per-chat lock, then mark
         the chat dirty so the `WriteQueue` flushes on its next tick.
@@ -91,7 +91,7 @@ class _CachedServiceBase:
             table, where=where_d, order_by=order_by, limit=limit
         )
         if cached is not None:
-            return cached
+            return cast(list[dict[str, Any]], cached)
         rows = await self._stack.backend.list_rows(
             table, where_d or {}, order_by=order_by, limit=limit
         )

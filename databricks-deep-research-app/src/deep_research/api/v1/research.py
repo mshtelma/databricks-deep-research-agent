@@ -136,12 +136,12 @@ async def get_active_research(
         return ActiveResearchResponse(has_active_research=False)
 
     # Get last sequence number from events
-    events = await event_service.get_events_since_sequence(  # type: ignore[attr-defined]
+    events = await event_service.get_events_since_sequence(
         research_session_id=rs.id,
         since_sequence=0,
         limit=100000,
     )
-    events_data = event_service.events_to_list(events)  # type: ignore[attr-defined]
+    events_data = event_service.events_to_list(events)
     last_seq = 0
     for ev in events_data:
         seq = ev.get("sequenceNumber") or ev.get("sequence_number")
@@ -200,14 +200,14 @@ async def get_research_events(
         raise NotFoundError("Chat", str(chat_id))
 
     # Fetch events since sequence number
-    events = await event_service.get_events_since_sequence(  # type: ignore[attr-defined]
+    events = await event_service.get_events_since_sequence(
         research_session_id=session_id,
         since_sequence=since_sequence,
         limit=limit,
     )
 
     # Convert to frontend format
-    events_data = event_service.events_to_list(events)  # type: ignore[attr-defined]
+    events_data = event_service.events_to_list(events)
 
     status_val = status_str(rs.status)
 

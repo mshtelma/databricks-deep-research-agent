@@ -1003,6 +1003,7 @@ async def stream_workflow_via_framework(
                 # become step-0 KnowledgeFindings.
                 chat_memory: IChatMemoryService | None = None
                 if chat_id is not None and (db is not None or storage_stack is not None):
+                    chat_uuid = UUID(str(chat_id))
                     from deep_research.core.config import get_settings
 
                     _settings = get_settings()
@@ -1012,16 +1013,16 @@ async def stream_workflow_via_framework(
                         session=db,
                         llm=framework_llm,
                     )
-                    await chat_memory.hydrate(chat_id, user_id=user_id)  # type: ignore[arg-type]
+                    await chat_memory.hydrate(chat_uuid, user_id=user_id)
                     uploaded_file_ids = await _resolve_uploaded_file_ids(
-                        config, db, user_id, chat_id, storage_stack=storage_stack,
+                        config, db, user_id, chat_uuid, storage_stack=storage_stack,
                     )
                     if uploaded_file_ids:
                         from deep_research.core.config import get_settings as _gs
                         _fus = make_file_upload_service(_gs(), storage_stack, session=db)
                         file_service = _fus
                         await chat_memory.preprocess_new_files(
-                            chat_id,
+                            chat_uuid,
                             uploaded_file_ids,
                             file_service=file_service,
                             research_session_id=(
@@ -1037,7 +1038,7 @@ async def stream_workflow_via_framework(
                         )
 
                         enricher_ctx = _EnricherCtx(
-                            chat_id=chat_id,
+                            chat_id=chat_uuid,
                             user_id=user_id or "system",
                             research_type=config.research_depth or "medium",
                         )
@@ -1885,7 +1886,7 @@ async def stream_workflow_via_framework(
                 )
 
                 _esc_max_results = 5
-                _esc_timeout = 20
+                _esc_timeout: float = 20.0
                 try:
                     from deep_research.core.config import (
                         get_settings as _get_settings_esc,

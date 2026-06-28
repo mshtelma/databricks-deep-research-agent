@@ -151,7 +151,8 @@ def assets_from_ast(current_ast: Any) -> list[DesignerAsset]:
         if mapping is None:
             continue
         asset_kind, identity_keys = mapping
-        config = tool.get("config") if isinstance(tool.get("config"), dict) else {}
+        raw_config = tool.get("config")
+        config: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
         identity = ""
         for key in identity_keys:
             value = config.get(key)

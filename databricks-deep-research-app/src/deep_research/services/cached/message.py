@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 def _role_value(role: Any) -> str:
-    return getattr(role, "value", role)
+    return str(getattr(role, "value", role))
 
 
 def _msg_to_namespace(m: DocMessage, chat_id: UUID) -> SimpleNamespace:
