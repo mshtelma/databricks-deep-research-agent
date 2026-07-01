@@ -111,6 +111,143 @@ def _sources_from_tools(tools: list[ToolDeclaration]) -> list[dict[str, Any]]:
     return sources
 
 
+# Provider-inheriting builtin web tools. A node may bind one of these by name
+# while the workflow-level ``tools`` list omits the declaration — e.g. a
+# designer scaffold whose architect returned an empty tool-plan, hand-written
+# YAML, or an API import. Such kinds resolve via ``ctx.search_client`` /
+# ``ctx.crawler`` like any default web tool, so a synthesized declaration is
+# safe (no index name / endpoint to invent). Mirrored — NOT imported — by the
+# two app-side copies (``framework_orchestrator._ensure_node_tools_declared``,
+# ``ast_normalizer._reconcile_referenced_tools``) so the framework stays
+# application-agnostic; ``framework_orchestrator`` now delegates here.
+_AUTO_DECLARABLE_WEB_KINDS = frozenset({"web_search", "web_research", "web_crawl"})
+
+# Sensible provider-inheriting defaults for a synthesized web-tool declaration.
+# These mirror the app-side heals so a healed tool behaves like a designer
+# default (web_research auto-fetches the top results in one call).
+_HEAL_SYNTH_CONFIG: dict[str, dict[str, Any]] = {
+    "web_research": {"total_results": 10, "auto_fetch_top_k": 5},
+    "web_search": {"max_results": 10},
+    "web_crawl": {},
+}
+
+
+def _collect_node_bound_tool_refs(root: WorkflowNode) -> list[str]:
+    """Return ordered-unique STRING tool refs bound by any agent config.
+
+    Traverses the whole node tree — parallel lanes, loop/conditional branches,
+    and ``plan_and_execute`` planner/evaluator/body (which live in ``config``,
+    not ``children``) — so callers are topology-agnostic. Inline tool dicts are
+    skipped (they are self-contained and do not need a workflow-level
+    declaration); only ``str`` refs are returned.
+    """
+    referenced: list[str] = []
+    seen: set[str] = set()
+
+    def _collect(agent_config: dict[str, Any]) -> None:
+        for ref in agent_config.get("tools") or []:
+            if isinstance(ref, str) and ref and ref not in seen:
+                seen.add(ref)
+                referenced.append(ref)
+
+    def _visit_raw(raw_node: dict[str, Any]) -> None:
+        config_dict = raw_node.get("config")
+        if isinstance(config_dict, dict):
+            if raw_node.get("type") == NodeType.agent.value:
+                _collect(config_dict)
+            elif raw_node.get("type") == NodeType.plan_and_execute.value:
+                for nested_key in ("planner", "evaluator"):
+                    nested = config_dict.get(nested_key)
+                    if isinstance(nested, dict):
+                        _collect(nested)
+                body = config_dict.get("body")
+                if isinstance(body, dict):
+                    _visit_raw(body)
+        for child in raw_node.get("children") or []:
+            if isinstance(child, dict):
+                _visit_raw(child)
+
+    def _visit_node(node: WorkflowNode) -> None:
+        if node.type == NodeType.agent:
+            _collect(node.config)
+        elif node.type == NodeType.plan_and_execute:
+            for nested_key in ("planner", "evaluator"):
+                nested = node.config.get(nested_key)
+                if isinstance(nested, dict):
+                    _collect(nested)
+            body = node.config.get("body")
+            if isinstance(body, dict):
+                _visit_raw(body)
+        for child in node.children:
+            _visit_node(child)
+
+    _visit_node(root)
+    return referenced
+
+
+def _synthesize_missing_web_declarations(
+    refs: list[str], declared: set[str]
+) -> list[ToolDeclaration]:
+    """Build ``ToolDeclaration``s for builtin web refs missing from ``declared``.
+
+    * a provider-inheriting builtin web kind gets a synthesized declaration
+      (logged at WARNING) so it resolves via ``ctx.search_client`` /
+      ``ctx.crawler`` like a default;
+    * any other undeclared ref (a custom corpus / index tool that genuinely
+      went missing) is logged at ERROR and skipped — we never invent config
+      (index name, endpoint) we cannot know.
+    """
+    additions: list[ToolDeclaration] = []
+    known = set(declared)
+    for name in refs:
+        if name in known:
+            continue
+        if name in _AUTO_DECLARABLE_WEB_KINDS:
+            additions.append(
+                ToolDeclaration(name=name, kind=name, config=dict(_HEAL_SYNTH_CONFIG[name]))
+            )
+            known.add(name)
+            logger.warning(
+                "WORKFLOW_HEAL_AUTO_DECLARED kind=%s reason=node_bound_undeclared "
+                "(AST bypassed normalize_ast or builder binding/declaration mismatch)",
+                name,
+            )
+        else:
+            logger.error(
+                "WORKFLOW_HEAL_UNDECLARED_NONWEB kind=%s — bound by an agent node but "
+                "not declared at the workflow level and not an auto-declarable builtin "
+                "web tool; execution will fail under strict tool resolution. Re-save the "
+                "agent in the Designer or add the tool declaration.",
+                name,
+            )
+    return additions
+
+
+def heal_node_bound_web_tools(definition: WorkflowDefinition) -> None:
+    """Auto-declare builtin web tools an agent node binds but the workflow omits.
+
+    Runtime net for ASTs that bypass the designer normalizer — designer-chat
+    scaffolds, pure UI saves, hand-written YAML, API imports, and verbatim
+    shell-app exports. A researcher whose ``config.tools`` references e.g.
+    ``web_research`` while the workflow-level ``tools`` declares only the
+    architect's tool-plan tools otherwise fails at execution under strict tool
+    resolution with ``WorkflowError "Node '<lane>-researcher' is missing
+    declared tools: ['web_research']"``.
+
+    In-place and idempotent (a workflow whose declarations already cover its
+    bindings is unchanged). Mutates the *built* ``definition`` only — never a
+    caller's input dict — so :func:`load_workflow_from_dict`'s no-mutation
+    contract holds. ``load_workflow_from_dict`` already heals on every load (see
+    :func:`_definition_from_raw`); this public entry point is for callers that
+    hold a ``WorkflowDefinition`` built by other means.
+    """
+    additions = _synthesize_missing_web_declarations(
+        _collect_node_bound_tool_refs(definition.root),
+        {t.name for t in (definition.tools or [])},
+    )
+    definition.tools.extend(additions)
+
+
 def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
     """Build a validated :class:`WorkflowDefinition` from a parsed YAML dict.
 
@@ -131,6 +268,19 @@ def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
     # Parse tool declarations
     tool_dicts = raw.get("tools", [])
     tool_declarations = [ToolDeclaration(**td) for td in tool_dicts]
+
+    # Heal node-bound-but-undeclared builtin web tools (designer scaffold /
+    # shell-app export / API import) BEFORE deriving sources, so that a first
+    # load equals a reload of the saved output (round-trip idempotent): the
+    # synthesized web declarations participate in source auto-population exactly
+    # like authored ones. Operates on the local ``tool_declarations`` list — the
+    # input ``raw`` dict is untouched (no-mutation contract).
+    tool_declarations.extend(
+        _synthesize_missing_web_declarations(
+            _collect_node_bound_tool_refs(root),
+            {t.name for t in tool_declarations},
+        )
+    )
 
     # Parse sources; auto-populate from tool declarations when empty
     sources_raw = raw.get("sources", [])
@@ -166,6 +316,7 @@ def _definition_from_raw(raw: dict[str, Any]) -> WorkflowDefinition:
         runtime_injected_keys=raw.get("runtime_injected_keys", []),
         token_budget=raw.get("token_budget", 0),
         timeout_seconds=raw.get("timeout_seconds", 1800),
+        research_effort=raw.get("research_effort"),
     )
 
     validate_workflow(definition)

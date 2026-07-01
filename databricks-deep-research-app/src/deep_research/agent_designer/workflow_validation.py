@@ -43,7 +43,7 @@ from deep_research.agent_designer.workflow_critic import (
 
 # Bump on ANY change to: the critic prompt, the semantic projection below, or
 # the structural rules. Part of the cache key — bumping invalidates stale rows.
-VALIDATOR_VERSION = "v1"
+VALIDATOR_VERSION = "v2"
 
 
 class ValidationSource(StrEnum):
@@ -124,6 +124,7 @@ def semantic_projection(
             "label": a["label"],
             "subtype": a["subtype"],
             "system_prompt": a["system_prompt_excerpt"],
+            "user_prompt_template": a.get("user_prompt_template_excerpt", ""),
             "model_tier": a["model_tier"],
             "tools_bound": sorted(str(t) for t in a.get("tools_bound", [])),
         }

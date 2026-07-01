@@ -17,6 +17,8 @@ OBO, the service principal otherwise. Hosts no longer hand-roll this wiring.
 
 from __future__ import annotations
 
+import logging
+import os
 from typing import Any
 
 from databricks_deep_research.core.databricks_auth import resolve_workspace_client
@@ -28,6 +30,16 @@ from databricks_deep_research.tools.builtins.text_table import (
 from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.protocol import DATABRICKS_BOUND_TOOL_KINDS
 from databricks_deep_research.workflow.definition import WorkflowDefinition
+
+logger = logging.getLogger(__name__)
+
+# Default Databricks built-in web-search serving endpoint for provider-inheriting
+# web tools when the host wires no explicit one. Overridable via the
+# ``DATABRICKS_WEB_SEARCH_ENDPOINT`` env var (the shell-app exporter sets it from
+# the app's ``search.databricks.endpoint``). Gemini-flash-lite is the documented
+# default (native generateContent grounding, single fast call) and is family-safe
+# for ``model_family=None`` auto-detection.
+_DEFAULT_DATABRICKS_WEB_SEARCH_ENDPOINT = "databricks-gemini-3-1-flash-lite"
 
 
 def build_databricks_workflow_runner(
@@ -70,6 +82,49 @@ def build_databricks_workflow_runner(
         brave_api_key=brave_api_key,
         extras=extras,
     )
+
+    # Default web-search backend for provider-inheriting web tools (web_search /
+    # web_research / web_crawl declared with no explicit ``config.provider``).
+    # Mirrors the main app's workflow_runner_factory._apply_default_search_client +
+    # _apply_serving_client_provider so a framework-only host that builds its
+    # context HERE (the shell app — NOT via build_app_workflow_runner) gets the
+    # SAME databricks built-in search the main app uses, with NO Brave key
+    # required. Without this, an inheriting web tool fails at factory build with
+    # "search_client required …", which surfaces as a confusing "missing declared
+    # tools" WorkflowError.
+    #
+    # Built-in web search is a public-web model-serving call, so it authenticates
+    # as the app service principal (``llm_client.openai_client``) — never the OBO
+    # user, whose token need not carry the model-serving passthrough scope.
+    ctx.serving_client_provider = lambda: llm_client.openai_client
+    # Only seed a default when the host wired none (``from_defaults`` sets it from
+    # a Brave key) and we have an SP to call as — so Brave-pinned agents and
+    # explicit per-tool providers (which resolve via ``_resolve_search_provider``)
+    # are untouched.
+    if ctx.search_client is None and ctx.workspace_client is not None:
+        endpoint = (
+            os.environ.get("DATABRICKS_WEB_SEARCH_ENDPOINT")
+            or _DEFAULT_DATABRICKS_WEB_SEARCH_ENDPOINT
+        )
+        try:
+            from databricks_deep_research.tools.builtins.databricks_web_search import (
+                build_databricks_web_search_adapter,
+            )
+
+            ctx.search_client = build_databricks_web_search_adapter(
+                client_provider=ctx.serving_client_provider,
+                model=endpoint,
+                max_results=10,
+            )
+            logger.info("FWK_DBX_DEFAULT_SEARCH endpoint=%s", endpoint)
+        except Exception as exc:  # noqa: BLE001 — degrade gracefully, never crash build
+            logger.warning(
+                "FWK_DBX_DEFAULT_SEARCH_FAILED endpoint=%s exc=%s — provider-inheriting "
+                "web tools will fail at factory build with a clear error",
+                endpoint,
+                str(exc)[:200],
+            )
+
     wire_statement_execution_text_table_context(
         ctx,
         warehouse_id=warehouse_id,

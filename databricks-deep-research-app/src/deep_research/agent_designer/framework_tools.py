@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import ast as py_ast
 import json
+import logging
 import re
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
@@ -57,6 +58,7 @@ from deep_research.agent_designer.assets import (
 )
 from deep_research.agent_designer.ast_introspection import (
     config_of,
+    iter_agent_nodes,
     iter_all_nodes,
     topology_of_ast,
 )
@@ -481,6 +483,22 @@ def _coerce_critic_approved(raw: Any) -> bool:
 
     # explicit approve=False (or missing) but every directive is advisory.
     return _all_directives_advisory(raw)
+
+
+def _coerce_critic_verdict_dict(raw: Any) -> dict[str, Any]:
+    """Normalize a critic verdict into a plain dict across the same shapes
+    :func:`_coerce_critic_approved` handles (``CriticVerdict`` model, dict, JSON
+    string, or Pydantic repr-string), so the user-facing message path is NOT blind
+    to the model form that agent nodes actually store in state. Falls back to an
+    empty-but-valid verdict so callers can always ``.get("directives")``."""
+    if raw is None:
+        return {"approve": False, "directives": []}
+    if hasattr(raw, "model_dump"):  # serialization boundary (mirrors _coerce_critic_approved)
+        with suppress(Exception):
+            dumped = raw.model_dump()
+            if isinstance(dumped, dict):
+                return dumped
+    return _coerce_dict(raw) or {"approve": False, "directives": []}
 
 
 # ---------------------------------------------------------------------------
@@ -1541,12 +1559,14 @@ class ParseArchitectAstTool:
         fingerprint_getter: StateGetter | None = None,
         current_ast_summary_setter: StateSetter | None = None,
         normalization_fixes_setter: StateSetter | None = None,
+        current_ast_prompts_setter: StateSetter | None = None,
     ) -> None:
         self._state_getter = state_getter
         self._blueprint_getter = blueprint_getter
         self._fingerprint_getter = fingerprint_getter
         self._current_ast_summary_setter = current_ast_summary_setter
         self._normalization_fixes_setter = normalization_fixes_setter
+        self._current_ast_prompts_setter = current_ast_prompts_setter
 
     def _publish_summary(self, ast: Any, payload: dict[str, Any]) -> None:
         summary = _ast_summary_payload(ast)
@@ -1554,6 +1574,10 @@ class ParseArchitectAstTool:
         if self._current_ast_summary_setter is not None:
             with suppress(Exception):
                 self._current_ast_summary_setter(summary)
+        # Prompt-AWARE projection for the critic (so it can verify prompt content).
+        if self._current_ast_prompts_setter is not None:
+            with suppress(Exception):
+                self._current_ast_prompts_setter(_ast_prompts_payload(ast))
         # Publish the REAL normalization fixes this parse produced so the
         # orchestrator can surface them directly on the SSE mutation event
         # instead of re-deriving them by re-parsing ``architect_message``
@@ -2414,6 +2438,87 @@ def _ast_summary_payload(ast: Any) -> dict[str, Any]:
         "resolved_tool_contract_summary": ast.get("resolved_tool_contract_summary"),
         "validation_errors": errors,
     }
+
+
+# Token budget for the prompt-aware critic projection. Per-field cap keeps any
+# single huge prompt bounded; the total cap shrinks the per-field budget evenly
+# so a large agent fleet still fits the critic tier's context/rate budget.
+_CRITIC_PROMPT_FIELD_CAP = 3000
+_CRITIC_PROMPT_TOTAL_CAP = 48000
+
+
+def _ast_prompts_payload(ast: Any) -> list[dict[str, Any]]:
+    """Prompt-AWARE per-agent projection for the Designer critic ONLY.
+
+    One row per agent node — id/subtype/label + system_prompt + user_prompt_template
+    + bound tool names — so the critic can actually verify its prompt-content
+    checklist items (#1/#2/#3). Distinct from :func:`_ast_summary_payload`, which is
+    prompt-SAFE (no prompt text) and relied on by the edit lane to stay small.
+
+    Token-budgeted: each field is capped at ``_CRITIC_PROMPT_FIELD_CAP``; if the full
+    payload (2 prompt fields per agent) would exceed ``_CRITIC_PROMPT_TOTAL_CAP`` the
+    per-field budget is shrunk evenly. Pure, topology- and domain-agnostic. Returns
+    ``[]`` for an empty/invalid AST.
+    """
+    if isinstance(ast, str):
+        with suppress(TypeError, ValueError):
+            ast = json.loads(ast)
+    if not isinstance(ast, dict):
+        return []
+    root = ast.get("root")
+
+    # Every agent node (children + plan_and_execute body) PLUS the
+    # plan_and_execute planner/evaluator nested agents (mirror
+    # _collect_agent_role_ids so PAE prompts are judged too).
+    agents: list[dict[str, Any]] = list(iter_agent_nodes(root))
+    for node in iter_all_nodes(root):
+        cfg = config_of(node)
+        for nested_key in ("planner", "evaluator"):
+            nested = cfg.get(nested_key)
+            if isinstance(nested, dict):
+                agents.append(nested)
+    if not agents:
+        return []
+
+    field_cap = min(
+        _CRITIC_PROMPT_FIELD_CAP,
+        max(1, _CRITIC_PROMPT_TOTAL_CAP // (len(agents) * 2)),
+    )
+    truncated = 0
+
+    def _field(text: Any) -> tuple[str, bool]:
+        value = str(text or "")
+        if len(value) <= field_cap:
+            return value, False
+        return value[:field_cap] + "\n…(truncated)", True
+
+    rows: list[dict[str, Any]] = []
+    for node in agents:
+        cfg = config_of(node)
+        system_prompt, sp_trunc = _field(cfg.get("system_prompt"))
+        user_prompt, up_trunc = _field(cfg.get("user_prompt_template"))
+        tools = cfg.get("tools")
+        row: dict[str, Any] = {
+            "id": node.get("id"),
+            "subtype": cfg.get("subtype"),
+            "label": node.get("label"),
+            "system_prompt": system_prompt,
+            "user_prompt_template": user_prompt,
+            "tools": tools if isinstance(tools, list) else [],
+        }
+        if sp_trunc or up_trunc:
+            row["_truncated"] = True
+            truncated += 1
+        rows.append(row)
+
+    if truncated:
+        logging.getLogger(__name__).info(
+            "DESIGNER_CRITIC_PROMPTS_TRUNCATED agents=%d truncated=%d field_cap=%d",
+            len(rows),
+            truncated,
+            field_cap,
+        )
+    return rows
 
 
 def _count_nodes_total(node: Any) -> int:
@@ -3526,6 +3631,7 @@ def builtin_designer_tools(
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
     current_ast_summary_setter: StateSetter | None = None,
+    current_ast_prompts_setter: StateSetter | None = None,
     normalization_fixes_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
@@ -3589,6 +3695,7 @@ def builtin_designer_tools(
             blueprint_getter=blueprint_getter,
             fingerprint_getter=fingerprint_getter,
             current_ast_summary_setter=current_ast_summary_setter,
+            current_ast_prompts_setter=current_ast_prompts_setter,
             normalization_fixes_setter=normalization_fixes_setter,
         ),
         ExtractCriticApprovedTool(),
@@ -3677,6 +3784,7 @@ def register_designer_tools(
     blueprint_getter: StateGetter | None = None,
     fingerprint_getter: StateGetter | None = None,
     current_ast_summary_setter: StateSetter | None = None,
+    current_ast_prompts_setter: StateSetter | None = None,
     normalization_fixes_setter: StateSetter | None = None,
     signature_setter: StateSetter | None = None,
     lane_keys_setter: StateSetter | None = None,
@@ -3714,6 +3822,7 @@ def register_designer_tools(
         blueprint_getter=blueprint_getter,
         fingerprint_getter=fingerprint_getter,
         current_ast_summary_setter=current_ast_summary_setter,
+        current_ast_prompts_setter=current_ast_prompts_setter,
         normalization_fixes_setter=normalization_fixes_setter,
         signature_setter=signature_setter,
         lane_keys_setter=lane_keys_setter,

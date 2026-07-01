@@ -14,6 +14,9 @@ import json
 import logging
 import os
 import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -34,7 +37,7 @@ from databricks_deep_research.tools.builtins.text_table import (
 )
 from databricks_deep_research.tracing import setup_mlflow_tracing
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -430,6 +433,307 @@ logger.info(
 )
 
 
+# ── In-flight run registry (async dispatch + resume) ─────────────────────
+# A deep-research run streams for minutes, but the Databricks Apps gateway
+# imposes an *absolute* wall-clock cap (~4 min, observed on AIS) on a single
+# streamed HTTP response that the SSE heartbeat CANNOT defeat. If the run is
+# consumed *by* the request, the gateway cut kills the whole run (the symptom:
+# the browser shows "Client error: network error" mid-run).
+#
+# This registry decouples the run from the request: a registry-owned
+# ``asyncio.Task`` drains the producer into an append-only in-memory buffer, and
+# HTTP readers (the initial POST and any resume GET) stream *from* the buffer. A
+# reader disconnect cancels only the reader; the producer keeps running and stays
+# resumable. The frontend reconnects across connections
+# (``GET /api/chat/{run_id}/events?since=N``) and resumes from the last delivered
+# event id. Mirrors the main app's designer turn registry
+# (``deep_research/agent_designer/turn_registry.py``).
+#
+# Per-process, in-memory — correct because Apps runs a single uvicorn worker
+# (``entrypoint.sh`` has no ``--workers``) and a run is ephemeral. If Apps ever
+# runs >1 replica or needs restart-durability, migrate to a DB-backed event log.
+
+_RUN_TTL_SECONDS = _env_int("SHELL_APP_RUN_TTL_SECONDS", default=900, minimum=1)
+_RUN_MAX_ACTIVE = _env_int("SHELL_APP_RUN_MAX_ACTIVE", default=32, minimum=1)
+_RUN_PER_USER_MAX = _env_int("SHELL_APP_RUN_PER_USER_MAX", default=4, minimum=1)
+_RUN_IDLE_GRACE_SECONDS = _env_int(
+    "SHELL_APP_RUN_IDLE_GRACE_SECONDS", default=60, minimum=0
+)
+
+# A buffered wire frame is the same dict the SSE response yields:
+# ``{"event": <type>, "data": <json-string>}``. Its sequence number is its index
+# in ``events`` and is emitted as the SSE ``id:`` line so a reconnect can resume.
+_WireFrame = dict[str, str]
+
+
+def _utcnow() -> datetime:
+    return datetime.now(UTC)
+
+
+@dataclass
+class _BufferedRun:
+    """A single in-flight (or finished) run and its append-only event buffer.
+
+    Created on the running event loop (never at import) so the ``asyncio``
+    primitives bind to the correct loop. ``_cond`` broadcasts to waiting readers
+    whenever ``events`` grows or ``status`` changes.
+    """
+
+    run_id: str
+    owner: str
+    events: list[_WireFrame] = field(default_factory=list)
+    status: str = "running"  # running | done | error | cancelled
+    created_at: datetime = field(default_factory=_utcnow)
+    last_access: datetime = field(default_factory=_utcnow)
+    _cond: asyncio.Condition = field(default_factory=asyncio.Condition)
+    _task: asyncio.Task[None] | None = None
+    _readers: int = 0
+    _grace: asyncio.TimerHandle | None = None
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status != "running"
+
+    async def append(self, frame: _WireFrame) -> None:
+        async with self._cond:
+            self.events.append(frame)
+            self._cond.notify_all()
+
+    async def set_status(self, status: str) -> None:
+        async with self._cond:
+            self.status = status
+            self._cond.notify_all()
+
+
+class _RunRegistry:
+    """Owns the producer tasks + buffers for all in-flight runs.
+
+    ``__init__`` creates no ``asyncio`` primitives (those bind to the loop only
+    when a run starts), so the module-level singleton is import-safe.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl_seconds: float = _RUN_TTL_SECONDS,
+        max_active: int = _RUN_MAX_ACTIVE,
+        per_user_max: int = _RUN_PER_USER_MAX,
+        idle_grace_seconds: float = _RUN_IDLE_GRACE_SECONDS,
+    ) -> None:
+        self._runs: dict[str, _BufferedRun] = {}
+        self._ttl_seconds = ttl_seconds
+        self._max_active = max_active
+        self._per_user_max = per_user_max
+        self._idle_grace_seconds = idle_grace_seconds
+
+    @property
+    def per_user_max(self) -> int:
+        return self._per_user_max
+
+    def active_count_for_owner(self, owner: str) -> int:
+        return sum(
+            1 for r in self._runs.values() if r.owner == owner and not r.is_terminal
+        )
+
+    def start(
+        self, *, owner: str, run_id: str, producer: AsyncIterator[_WireFrame]
+    ) -> _BufferedRun:
+        """Register a run and drain ``producer`` in a registry-owned task.
+
+        The task is owned here (not by any HTTP request), so a reader disconnect
+        never cancels it. Opportunistically sweeps terminal runs first.
+        """
+        self.sweep()
+        run = _BufferedRun(run_id=run_id, owner=owner)
+        self._runs[run.run_id] = run
+        run._task = asyncio.create_task(self._drain(run, producer))
+        logger.info(
+            "SHELL_APP_RUN_STARTED run_id=%s owner=%s active=%d",
+            run.run_id,
+            owner,
+            len(self._runs),
+        )
+        return run
+
+    def get(self, run_id: str, *, owner: str) -> _BufferedRun | None:
+        """Return the run iff it exists AND is owned by ``owner`` (else None, so
+        the caller answers 404 without leaking existence)."""
+        run = self._runs.get(run_id)
+        if run is None or run.owner != owner:
+            return None
+        return run
+
+    async def _drain(
+        self, run: _BufferedRun, producer: AsyncIterator[_WireFrame]
+    ) -> None:
+        """Pump every frame from ``producer`` into the buffer until terminal.
+
+        The producer already converts its own failures into an ``error`` wire
+        frame + ``complete``; the ``except`` here is a safety net for an uncaught
+        escape, appending a sanitized ``error`` so a reconnecting client always
+        sees a clean terminal.
+        """
+        try:
+            async for frame in producer:
+                await run.append(frame)
+            await run.set_status("done")
+            logger.info(
+                "SHELL_APP_RUN_COMPLETED run_id=%s events=%d status=done",
+                run.run_id,
+                len(run.events),
+            )
+        except asyncio.CancelledError:
+            run.status = "cancelled"
+            logger.info(
+                "SHELL_APP_RUN_RECLAIMED run_id=%s events=%d (no active reader)",
+                run.run_id,
+                len(run.events),
+            )
+            raise
+        except Exception:  # noqa: BLE001 — surfaced as a sanitized terminal frame
+            logger.exception("SHELL_APP_RUN_PRODUCER_FAILED run_id=%s", run.run_id)
+            await run.append(
+                {
+                    "event": "error",
+                    "data": json.dumps(
+                        {
+                            "type": "error",
+                            "error_kind": "runtime_error",
+                            "message": "The run failed. See server logs for details.",
+                        }
+                    ),
+                }
+            )
+            await run.set_status("error")
+
+    async def stream(
+        self, run: _BufferedRun, *, start_seq: int
+    ) -> AsyncIterator[_WireFrame]:
+        """Yield buffered frames from ``start_seq`` (resumable), each tagged with
+        its sequence as the SSE ``id``.
+
+        The producer is NEVER cancelled here — a reader detach only decrements
+        the refcount (which may schedule an idle-grace reclaim of a reader-less
+        run). Termination is **status-based**: the shell app has no explicit
+        ``done`` frame (terminals are the synthetic ``complete``/``error``), and a
+        mid-stream framework ``error`` event must not end the reader early.
+        Idle keepalive is handled by ``EventSourceResponse(ping=...)`` while this
+        generator awaits, so no manual keepalive is emitted.
+        """
+        self._attach(run)
+        seq = max(start_seq, 0)
+        try:
+            while True:
+                async with run._cond:
+                    # Bind ``seq`` by value — the predicate is evaluated within
+                    # this iteration only, before ``seq`` advances below.
+                    await run._cond.wait_for(
+                        lambda current=seq: len(run.events) > current
+                        or run.is_terminal
+                    )
+                while seq < len(run.events):
+                    frame = run.events[seq]
+                    yield {**frame, "id": str(seq)}
+                    seq += 1
+                run.last_access = _utcnow()
+                if run.is_terminal and seq >= len(run.events):
+                    return
+        finally:
+            self._detach(run)
+
+    def _attach(self, run: _BufferedRun) -> None:
+        run._readers += 1
+        if run._grace is not None:
+            run._grace.cancel()
+            run._grace = None
+
+    def _detach(self, run: _BufferedRun) -> None:
+        run._readers = max(run._readers - 1, 0)
+        if run._readers == 0 and not run.is_terminal and self._idle_grace_seconds >= 0:
+            loop = asyncio.get_running_loop()
+            run._grace = loop.call_later(self._idle_grace_seconds, self._reclaim, run)
+
+    def _reclaim(self, run: _BufferedRun) -> None:
+        """Cancel a still-running, reader-less run to stop orphaned token burn."""
+        run._grace = None
+        if run._readers == 0 and not run.is_terminal and run._task is not None:
+            logger.info("SHELL_APP_RUN_RECLAIM run_id=%s (idle, no readers)", run.run_id)
+            run._task.cancel()
+
+    def sweep(self) -> int:
+        """Evict terminal, reader-less runs older than the TTL; cap total runs."""
+        now = _utcnow()
+        evicted = 0
+        for run_id in list(self._runs):
+            run = self._runs[run_id]
+            if (
+                run.is_terminal
+                and run._readers == 0
+                and (now - run.last_access).total_seconds() > self._ttl_seconds
+            ):
+                del self._runs[run_id]
+                evicted += 1
+        if len(self._runs) > self._max_active:
+            evictable = sorted(
+                (r for r in self._runs.values() if r.is_terminal and r._readers == 0),
+                key=lambda r: r.last_access,
+            )
+            overflow = len(self._runs) - self._max_active
+            for run in evictable[:overflow]:
+                del self._runs[run.run_id]
+                evicted += 1
+        if evicted:
+            logger.info(
+                "SHELL_APP_RUN_EVICTED count=%d remaining=%d",
+                evicted,
+                len(self._runs),
+            )
+        return evicted
+
+
+# Module-level singleton — one per process (single uvicorn worker on Apps).
+_run_registry = _RunRegistry()
+
+
+def _single_error_stream(
+    code: str, message: str, *, error_kind: str = "client_error"
+) -> AsyncIterator[_WireFrame]:
+    """A one-frame producer that emits a single ``error`` wire frame.
+
+    Used for the pre-run rejections (missing OBO, over-cap, expired resume) that
+    must surface as an SSE ``error`` event the UI already understands.
+    """
+
+    async def _gen() -> AsyncIterator[_WireFrame]:
+        yield {
+            "event": "error",
+            "data": json.dumps(
+                {
+                    "type": "error",
+                    "error_kind": error_kind,
+                    "code": code,
+                    "message": message,
+                }
+            ),
+        }
+
+    return _gen()
+
+
+def _request_owner(request: Request) -> str:
+    """Best-effort owner key for run authorization + per-user caps.
+
+    Databricks Apps injects the caller identity; fall back to ``_anon`` in local
+    dev. The unguessable ``run_id`` capability is the primary boundary; this owner
+    check is defense-in-depth so one signed-in user can't resume another's run.
+    """
+    return (
+        request.headers.get("x-forwarded-user")
+        or request.headers.get("x-forwarded-email")
+        or "_anon"
+    )
+
+
 # ── Routes ──────────────────────────────────────────────────────────────
 
 
@@ -462,7 +766,11 @@ async def chat(request: Request) -> EventSourceResponse:
     """
     body: dict[str, Any] = await request.json()
     query = body.get("query", "")
-    request_id = uuid4().hex[:12]
+    # The run_id doubles as the SSE ``X-Shell-App-Request-Id`` and the resume
+    # key (GET /api/chat/{run_id}/events). Full hex — an unguessable capability
+    # the client uses to reconnect after a gateway connection cut.
+    request_id = uuid4().hex
+    owner = _request_owner(request)
     # Databricks Apps injects the caller's OAuth token here for OBO. Without
     # this, vector_search / Genie / endpoint queries run as the shell-app SP
     # and any UC-gated resource (e.g. private vector indexes) silently
@@ -489,33 +797,43 @@ async def chat(request: Request) -> EventSourceResponse:
             _WORKFLOW_REQUIRES_DATABRICKS,
         )
 
-        async def _missing_obo_stream():
-            yield {
-                "event": "error",
-                "data": json.dumps(
-                    {
-                        "type": "error",
-                        "code": "missing_obo_token",
-                        "message": (
-                            "This workflow requires Databricks user "
-                            "identity (x-forwarded-access-token) to "
-                            "query its data sources, but the request "
-                            "did not include one. If you are running "
-                            "the deployed app from a browser, sign in "
-                            "via the Databricks Apps landing page; if "
-                            "you are calling the API directly, forward "
-                            "your OBO token."
-                        ),
-                    }
-                ),
-            }
-
         return EventSourceResponse(
-            _missing_obo_stream(),
+            _single_error_stream(
+                "missing_obo_token",
+                (
+                    "This workflow requires Databricks user identity "
+                    "(x-forwarded-access-token) to query its data sources, but "
+                    "the request did not include one. If you are running the "
+                    "deployed app from a browser, sign in via the Databricks "
+                    "Apps landing page; if you are calling the API directly, "
+                    "forward your OBO token."
+                ),
+                error_kind="missing_obo",
+            ),
             headers={
                 **_NO_STORE_HEADERS,
                 "X-Shell-App-Request-Id": request_id,
             },
+        )
+
+    # Per-owner concurrency cap: bounds buffered runs in memory and double
+    # submits. Reconnects are GETs (no new run) so they don't count here.
+    if _run_registry.active_count_for_owner(owner) >= _run_registry.per_user_max:
+        logger.warning(
+            "SHELL_APP_RUN_OVER_CAP owner=%s per_user_max=%s",
+            owner,
+            _run_registry.per_user_max,
+        )
+        return EventSourceResponse(
+            _single_error_stream(
+                "run_in_progress",
+                (
+                    "A research run is already in progress. Wait for it to "
+                    "finish (or reload the page) before starting another."
+                ),
+                error_kind="over_capacity",
+            ),
+            headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": request_id},
         )
 
     runner = _build_per_request_runner(user_token)
@@ -537,7 +855,7 @@ async def chat(request: Request) -> EventSourceResponse:
         _short_header(request, "user-agent"),
     )
 
-    async def event_generator():
+    async def _produce() -> AsyncIterator[_WireFrame]:
         event_count = 0
         # If enabled, wrap the run in a root MLflow span so framework spans
         # nest beneath one trace with ``dr.*`` provenance tags.
@@ -690,8 +1008,47 @@ async def chat(request: Request) -> EventSourceResponse:
                 _MLFLOW_ENABLED,
             )
 
+    # Decouple the run from this request: a registry-owned task drains _produce
+    # into an append-only buffer that survives the gateway's absolute connection
+    # cap, so the client can reconnect (GET …/events?since=N) and resume.
+    run = _run_registry.start(owner=owner, run_id=request_id, producer=_produce())
     return EventSourceResponse(
-        event_generator(),
-        headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": request_id},
+        _run_registry.stream(run, start_seq=0),
+        headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": run.run_id},
+        ping=_SSE_HEARTBEAT_SECONDS,
+    )
+
+
+@app.get("/api/chat/{run_id}/events")
+async def chat_events(
+    run_id: str, request: Request, since: int = Query(0, ge=0)
+) -> EventSourceResponse:
+    """Resume an in-flight (or finished) run from sequence ``since``.
+
+    The frontend calls this when the streamed POST is severed by the gateway's
+    absolute connection cap. It replays ``events[since:]`` — including a terminal
+    ``complete``/``error`` produced while disconnected — and keeps the heartbeat
+    so this connection also survives idle gaps until the next cap. An unknown,
+    expired, or foreign-owned id returns a single ``expired`` error frame (no
+    existence leak), which the UI turns into a re-run prompt.
+    """
+    owner = _request_owner(request)
+    run = _run_registry.get(run_id, owner=owner)
+    if run is None:
+        logger.info("SHELL_APP_RUN_RESUME_MISS run_id=%s since=%s", run_id, since)
+        return EventSourceResponse(
+            _single_error_stream(
+                "run_expired",
+                "This run was not found or has expired. Please resend your query.",
+                error_kind="expired",
+            ),
+            headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": run_id},
+        )
+    logger.info(
+        "SHELL_APP_RUN_RESUME run_id=%s owner=%s since=%s", run_id, owner, since
+    )
+    return EventSourceResponse(
+        _run_registry.stream(run, start_seq=since),
+        headers={**_NO_STORE_HEADERS, "X-Shell-App-Request-Id": run_id},
         ping=_SSE_HEARTBEAT_SECONDS,
     )

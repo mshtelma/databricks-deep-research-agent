@@ -229,6 +229,20 @@
       let toolCount = 0;
       let warningCount = 0;
       let latestFinalReport = '';
+      // Reconnect/resume state (LAYER 2 — survives the Databricks Apps gateway's
+      // absolute connection cap). runId comes from the POST response header and
+      // keys the resume GET; lastSeq tracks the last delivered SSE id so a
+      // reconnect replays only newer events.
+      let runId = null;
+      let lastSeq = -1;
+      let terminal = false;     // a 'complete'/'error' frame was seen → done
+      let expired = false;      // resume target gone → offer a re-run
+      let streamBuffer = '';
+      let firstFrameSeen = false;
+      let streamFrameCount = 0;
+      let stalledTimer = null;
+      const RECONNECT_MAX_ATTEMPTS = 6;
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
       const nodeLabels = new Map();
 
       console.info('[shell-app] template loaded', { version: SHELL_APP_TEMPLATE_VERSION });
@@ -627,99 +641,213 @@
         updateActivitySummary(true);
       }
 
+      function drainFrames(force) {
+        // EventSourceResponse emits CRLF-delimited SSE frames; browsers may
+        // preserve those carriage returns when reading through fetch().
+        streamBuffer = streamBuffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+        const frames = streamBuffer.split(/\n\n+/);
+        if (!force) {
+          streamBuffer = frames.pop() || '';
+          return frames;
+        }
+        streamBuffer = '';
+        return frames.filter((frame) => frame.trim().length > 0);
+      }
+
+      function handleFrame(frame) {
+        const lines = frame.split('\n');
+        const eventLine = lines.find((line) => line.startsWith('event:'));
+        const idLine = lines.find((line) => line.startsWith('id:'));
+        const dataLines = lines
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trimStart());
+        if (idLine) {
+          const n = parseInt(idLine.slice(3).trim(), 10);
+          if (!Number.isNaN(n)) lastSeq = n;   // Last-Event-ID → resume cursor
+        }
+        if (!dataLines.length) return;         // keepalive / comment frame
+        firstFrameSeen = true;
+        streamFrameCount += 1;
+        window.clearTimeout(stalledTimer);
+        const eventName = eventLine ? eventLine.slice(6).trim() : 'data';
+        const dataText = dataLines.join('\n');
+        const payload = parsePayload(dataText);
+        console.debug('[shell-app] stream frame', {
+          event: eventName,
+          frame: streamFrameCount,
+          seq: lastSeq,
+          bytes: dataText.length,
+        });
+        if (eventName === 'complete') {
+          terminal = true;
+          renderFinalAnswer(payload.output);
+        } else if (eventName === 'error') {
+          terminal = true;
+          if (payload && (payload.error_kind === 'expired' || payload.code === 'run_expired')) {
+            // The resume target is gone — don't render a dead-end error; let the
+            // driver surface a re-run prompt instead.
+            expired = true;
+            activityStatusEl.textContent = 'Run expired';
+          } else {
+            appendActivity('error', payload);
+            activityStatusEl.textContent = 'Run failed';
+          }
+        } else {
+          appendActivity(eventName, payload);
+        }
+      }
+
+      // Read one SSE connection to completion. Returns 'done' if a terminal
+      // ('complete'/'error') frame arrived, else 'cut' (the stream ended or was
+      // severed by the gateway without a terminal — the trigger to reconnect).
+      async function pump(resp) {
+        streamBuffer = '';
+        const reader = resp.body.getReader();
+        const decoder = new TextDecoder();
+        try {
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) {
+              streamBuffer += decoder.decode();
+              for (const frame of drainFrames(true)) handleFrame(frame);
+              break;
+            }
+            streamBuffer += decoder.decode(value, { stream: true });
+            for (const frame of drainFrames(false)) handleFrame(frame);
+          }
+        } catch (e) {
+          console.debug('[shell-app] stream cut', e && e.message ? e.message : e);
+          return 'cut';
+        }
+        return terminal ? 'done' : 'cut';
+      }
+
+      // Reconnect across gateway connection cuts: GET the resume endpoint from
+      // the last delivered sequence until the run terminates or attempts run out.
+      async function driveReconnect() {
+        let attempts = 0;
+        while (!terminal && runId && attempts < RECONNECT_MAX_ATTEMPTS) {
+          attempts += 1;
+          await sleep(Math.min(500 * Math.pow(2, attempts - 1), 4000));
+          activityStatusEl.textContent = 'Reconnecting…';
+          try {
+            const resp = await fetch(
+              '/api/chat/' + encodeURIComponent(runId) + '/events?since=' + (lastSeq + 1),
+              {
+                method: 'GET',
+                cache: 'no-store',
+                headers: {
+                  'Accept': 'text/event-stream',
+                  'X-Shell-App-Template-Version': SHELL_APP_TEMPLATE_VERSION,
+                },
+              },
+            );
+            if (!resp.ok || !resp.body) { continue; }
+            await pump(resp);
+          } catch (e) {
+            console.debug('[shell-app] reconnect attempt failed', e && e.message ? e.message : e);
+          }
+        }
+        finishOrStopgap();
+      }
+
+      // Terminal disposition: completed/failed → nothing (already rendered);
+      // resume target gone → offer a re-run; still running but reconnect
+      // exhausted (or no run id) → offer reconnect/re-run. Never leaves the user
+      // staring at a raw "network error".
+      function finishOrStopgap() {
+        if (expired) { showStopgap('rerun'); return; }
+        if (!terminal) { showStopgap(runId ? 'reconnect' : 'rerun'); }
+      }
+
+      function showStopgap(mode) {
+        const prior = document.getElementById('stalledBanner');
+        if (prior) prior.remove();
+        const banner = document.createElement('div');
+        banner.id = 'stalledBanner';
+        banner.style.cssText =
+          'margin:12px 0;padding:12px 14px;border:1px solid #d9b34a;' +
+          'background:#fdf6e3;color:#5b4a16;border-radius:8px;display:flex;' +
+          'gap:12px;align-items:center;justify-content:space-between;';
+        const msg = document.createElement('span');
+        msg.textContent = mode === 'reconnect'
+          ? 'The connection timed out. Your research may still be running on the server — click Retry to reconnect.'
+          : 'The connection was lost. Click Retry to run your query again.';
+        const btn = document.createElement('button');
+        btn.textContent = 'Retry';
+        btn.style.cssText =
+          'flex:0 0 auto;padding:6px 14px;border:0;border-radius:6px;' +
+          'background:#1b3a57;color:#fff;cursor:pointer;';
+        btn.addEventListener('click', async () => {
+          banner.remove();
+          if (mode === 'reconnect' && runId) {
+            sendEl.disabled = true;
+            try { await driveReconnect(); } finally { sendEl.disabled = false; }
+          } else {
+            sendQuery();
+          }
+        });
+        banner.appendChild(msg);
+        banner.appendChild(btn);
+        document.getElementById('conversation').appendChild(banner);
+        activityStatusEl.textContent = 'Connection lost';
+      }
+
       async function sendQuery() {
         const query = qEl.value.trim();
         if (!query) return;
         sendEl.disabled = true;
         resetUi(query);
-        let firstFrameSeen = false;
-        let streamFrameCount = 0;
-        let buffer = '';
-        const stalledTimer = window.setTimeout(() => {
+        const prior = document.getElementById('stalledBanner');
+        if (prior) prior.remove();
+        runId = null;
+        lastSeq = -1;
+        terminal = false;
+        expired = false;
+        streamBuffer = '';
+        firstFrameSeen = false;
+        streamFrameCount = 0;
+        stalledTimer = window.setTimeout(() => {
           if (!firstFrameSeen) appendActivity('client_waiting', { message: 'No stream frames received yet.' });
         }, 3000);
-
-        function drainFrames(force) {
-          // EventSourceResponse emits CRLF-delimited SSE frames; browsers may
-          // preserve those carriage returns when reading through fetch().
-          buffer = buffer.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-          const frames = buffer.split(/\n\n+/);
-          if (!force) {
-            buffer = frames.pop() || '';
-            return frames;
-          }
-          buffer = '';
-          return frames.filter((frame) => frame.trim().length > 0);
-        }
-
-        function handleFrame(frame) {
-          const lines = frame.split('\n');
-          const eventLine = lines.find((line) => line.startsWith('event:'));
-          const dataLines = lines
-            .filter((line) => line.startsWith('data:'))
-            .map((line) => line.slice(5).trimStart());
-          if (!dataLines.length) return;
-          firstFrameSeen = true;
-          streamFrameCount += 1;
-          window.clearTimeout(stalledTimer);
-          const eventName = eventLine ? eventLine.slice(6).trim() : 'data';
-          const dataText = dataLines.join('\n');
-          const payload = parsePayload(dataText);
-          console.debug('[shell-app] stream frame', {
-            event: eventName,
-            frame: streamFrameCount,
-            bytes: dataText.length,
-          });
-          if (eventName === 'complete') {
-            renderFinalAnswer(payload.output);
-          } else if (eventName === 'error') {
-            appendActivity('error', payload);
-            activityStatusEl.textContent = 'Run failed';
-          } else {
-            appendActivity(eventName, payload);
-          }
-        }
-
         try {
-          const resp = await fetch('/api/chat', {
-            method: 'POST',
-            cache: 'no-store',
-            headers: {
-              'Accept': 'text/event-stream',
-              'Content-Type': 'application/json',
-              'X-Shell-App-Template-Version': SHELL_APP_TEMPLATE_VERSION,
-            },
-            body: JSON.stringify({ query }),
-          });
-          console.debug('[shell-app] chat response', {
-            ok: resp.ok,
-            status: resp.status,
-            requestId: resp.headers.get('x-shell-app-request-id'),
-            templateVersion: resp.headers.get('x-shell-app-template-version'),
-          });
-          if (!resp.ok || !resp.body) {
-            appendActivity('error', { raw: 'HTTP ' + resp.status });
-            activityStatusEl.textContent = 'Request failed';
+          let outcome = 'cut';
+          try {
+            const resp = await fetch('/api/chat', {
+              method: 'POST',
+              cache: 'no-store',
+              headers: {
+                'Accept': 'text/event-stream',
+                'Content-Type': 'application/json',
+                'X-Shell-App-Template-Version': SHELL_APP_TEMPLATE_VERSION,
+              },
+              body: JSON.stringify({ query }),
+            });
+            runId = resp.headers.get('x-shell-app-request-id');
+            console.debug('[shell-app] chat response', {
+              ok: resp.ok,
+              status: resp.status,
+              requestId: runId,
+              templateVersion: resp.headers.get('x-shell-app-template-version'),
+            });
+            if (!resp.ok || !resp.body) {
+              appendActivity('error', { raw: 'HTTP ' + resp.status });
+              activityStatusEl.textContent = 'Request failed';
+              return;
+            }
+            outcome = await pump(resp);
+          } catch (e) {
+            console.debug('[shell-app] initial stream cut', e && e.message ? e.message : e);
+            outcome = 'cut';
+          }
+          if (outcome === 'cut' && !terminal && runId) {
+            await driveReconnect();   // owns its own finishOrStopgap
             return;
           }
-          const reader = resp.body.getReader();
-          const decoder = new TextDecoder();
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) {
-              buffer += decoder.decode();
-              for (const frame of drainFrames(true)) handleFrame(frame);
-              break;
-            }
-            buffer += decoder.decode(value, { stream: true });
-            for (const frame of drainFrames(false)) handleFrame(frame);
-          }
-        } catch (e) {
-          appendActivity('error', { raw: 'Client error: ' + (e && e.message ? e.message : e) });
-          activityStatusEl.textContent = 'Client error';
+          finishOrStopgap();
         } finally {
           window.clearTimeout(stalledTimer);
-          console.debug('[shell-app] chat stream finished', { frames: streamFrameCount });
+          console.debug('[shell-app] chat stream finished', { frames: streamFrameCount, terminal: terminal });
           sendEl.disabled = false;
         }
       }

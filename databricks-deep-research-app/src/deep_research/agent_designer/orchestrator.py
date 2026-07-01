@@ -104,6 +104,12 @@ from deep_research.observability.agent_designer_metrics import (
 )
 
 from .sse_events import (
+    ArchitectSynopsisEvent as ArchitectSynopsisEvent,
+)
+from .sse_events import (
+    CriticReviewEvent as CriticReviewEvent,
+)
+from .sse_events import (
     DesignerSSEEvent as DesignerSSEEvent,
 )
 from .sse_events import (
@@ -411,6 +417,10 @@ def _terminal_feedback_message(state: Any) -> str:
     (``suppress_planning_final_output``), so this is the only place a no-op turn
     can surface an explanation to the user.
     """
+    from deep_research.agent_designer.framework_tools import (
+        _coerce_critic_verdict_dict,
+    )
+
     revision = _coerce_jsonish(_safe_state_get(state, "revision_request"))
     if revision:
         reason = revision.get("reason") or revision.get("message")
@@ -426,24 +436,9 @@ def _terminal_feedback_message(state: Any) -> str:
                 f"to reconsider the workflow structure: {reason.strip()}{suffix}"
             )
 
-    verdict = _coerce_jsonish(_safe_state_get(state, "critic_verdict"))
-    if verdict:
-        directives = verdict.get("directives")
-        issues = (
-            [
-                str(d.get("issue")).strip()
-                for d in directives
-                if isinstance(d, dict) and str(d.get("issue") or "").strip()
-            ]
-            if isinstance(directives, list)
-            else []
-        )
-        if issues:
-            return (
-                "I reviewed the change but did not apply it — unresolved issues: "
-                f"{'; '.join(issues[:3])}."
-            )
-
+    # Structural-gate failure takes priority over a (possibly stale) critic verdict:
+    # if the LAST inner iteration failed the structural gate the critic did not run,
+    # so state.critic_verdict reflects an earlier iteration while gate_result is fresh.
     gate = _coerce_jsonish(_safe_state_get(state, "gate_result"))
     if gate and str(gate.get("status") or "").lower() == "fail":
         failures = gate.get("failures")
@@ -457,6 +452,30 @@ def _terminal_feedback_message(state: Any) -> str:
             return (
                 "The proposed workflow didn't pass structural checks, so no "
                 f"change was applied: {'; '.join(items[:3])}."
+            )
+
+    # Critic directives — read the verdict tolerantly: agent nodes store
+    # critic_verdict as a CriticVerdict MODEL object, which a JSON-only coercer
+    # drops (the cause of the generic-message bug).
+    verdict = _coerce_critic_verdict_dict(_safe_state_get(state, "critic_verdict"))
+    directives = verdict.get("directives")
+    if isinstance(directives, list) and directives:
+        issues: list[str] = []
+        for directive in directives:
+            if not isinstance(directive, dict):
+                continue
+            issue = str(directive.get("issue") or "").strip()
+            if not issue:
+                continue
+            node = str(directive.get("node_path") or "").strip()
+            node_label = node.split(".")[-1] if node else ""
+            action = str(directive.get("suggested_action") or "").strip()
+            head = f"[{node_label}] {issue}" if node_label else issue
+            issues.append(f"{head} — {action}" if action else head)
+        if issues:
+            return (
+                "I reviewed the workflow but it has unresolved issues: "
+                f"{'; '.join(issues[:3])}."
             )
 
     return _GENERIC_NO_CHANGE_MESSAGE
@@ -481,6 +500,103 @@ def _terminal_error_message(state: Any) -> str | None:
         "I couldn't create the agent because the workflow did not pass "
         f"designer review. {feedback}"
     )
+
+
+def _signature_review_failed(state: Any) -> bool:
+    """True when the inner architect/critic loop ended WITHOUT critic approval."""
+    loop = _coerce_jsonish(_safe_state_get(state, "signature_loop_done"))
+    return loop is not None and loop.get("critic_approved") is False
+
+
+def _build_critic_review_event(state: Any) -> CriticReviewEvent | None:
+    """Map the build-loop critic's verdict into the existing CriticReviewEvent card.
+
+    Reads ``state.critic_verdict`` tolerantly — it is written ONLY by the ``critic``
+    node (the gate/probe shims write ``critic_approved``), so no shim can pollute it.
+    Returns ``None`` when there are no actionable directives (so no empty card)."""
+    from deep_research.agent_designer.framework_tools import (
+        _coerce_critic_verdict_dict,
+    )
+
+    verdict = _coerce_critic_verdict_dict(_safe_state_get(state, "critic_verdict"))
+    directives = verdict.get("directives")
+    if not isinstance(directives, list) or not directives:
+        return None
+    findings: list[dict[str, Any]] = []
+    for directive in directives:
+        if not isinstance(directive, dict):
+            continue
+        issue = str(directive.get("issue") or "").strip()
+        if not issue:
+            continue
+        node = str(directive.get("node_path") or "").strip()
+        findings.append(
+            {
+                "label": node.split(".")[-1] if node else "",
+                "node_path": node,
+                "severity": str(directive.get("severity") or "blocking"),
+                "finding": issue,
+                "suggested_action": str(directive.get("suggested_action") or "").strip(),
+            }
+        )
+    if not findings:
+        return None
+    # "needs_revision" (not "fail"): the workflow WAS created and is runnable —
+    # the user refines it (chat or by hand); the hard gate is at save.
+    # Do NOT surface a revision COUNT here: the only counter in state
+    # (``signature_loop_done.revision_count``) tracks the OUTER architect-requested
+    # *signature* re-plans, which is 0 on the common path even though the inner
+    # architect/critic loop DID iterate — showing it reads as "the designer never
+    # tried", which is wrong.
+    return CriticReviewEvent(
+        verdict="needs_revision",
+        summary=(
+            f"The designer built and refined this workflow, but its automated "
+            f"reviewer still flags {len(findings)} issue(s). It was created so you "
+            "can refine it (in chat or by hand) — resolve these before saving."
+        ),
+        agent_findings=findings,
+        coverage_gaps=[],
+        output_gaps=[],
+    )
+
+
+def _critic_review_event(state: Any) -> CriticReviewEvent | None:
+    """Always-on critic card for the build lane.
+
+    The architect-critic loop ALWAYS produces a verdict on a build, so surface it
+    on EVERY build turn (pass OR needs_revision) instead of only on failure — the
+    "Designer Critic" should visibly report something each time, not stay silent
+    when it approves. Returns ``None`` only when the critic never produced a
+    verdict (e.g. the surgical-edit / topology lanes, which skip the loop), so
+    those lanes never render an empty review card.
+    """
+    from deep_research.agent_designer.framework_tools import (
+        _coerce_critic_approved,
+    )
+
+    raw = _safe_state_get(state, "critic_verdict")
+    # ``critic_verdict`` is initialized to "" at turn start; a blank/empty value
+    # means the critic node never produced a verdict this turn.
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    # Approved → a clean "pass" card. Reuses the loop's own approve semantics
+    # (incl. polish-only / all-advisory verdicts that still exit the loop).
+    if _coerce_critic_approved(raw):
+        return CriticReviewEvent(
+            verdict="pass",
+            summary=(
+                "The designer's automated reviewer approved this workflow — no "
+                "blocking issues found. Refine it further in chat or by hand."
+            ),
+            agent_findings=[],
+            coverage_gaps=[],
+            output_gaps=[],
+        )
+    # Not approved → the existing findings card (which itself returns ``None``
+    # when there are no actionable directives, e.g. a structural-gate failure —
+    # the terminal-feedback path explains that case instead).
+    return _build_critic_review_event(state)
 
 
 def _normalize_model_tiers(ast: dict[str, Any]) -> dict[str, Any]:
@@ -958,6 +1074,111 @@ def _compact_ast_summary(current_ast: dict[str, Any] | None) -> list[dict[str, A
     return out
 
 
+# Agent subtypes that represent pipeline/structural STAGES (not evidence lanes).
+# Used ONLY to split the synopsis into "lanes" vs "pipeline" for display — it
+# never gates behavior. Any agent whose subtype is NOT in this set counts as a
+# lane (researchers + custom/specialized agents), so the synopsis generalizes
+# across every topology and domain without enumerating either.
+_SYNOPSIS_PIPELINE_SUBTYPES = frozenset(
+    {
+        "coordinator",
+        "planner",
+        "synthesizer",
+        "reflector",
+        "evaluator",
+        "judge",
+        "critic",
+        "finalizer",
+        "classifier",
+    }
+)
+
+
+def _synopsis_agent_label(agent: dict[str, Any]) -> str:
+    """Prefer the AST's own label; fall back to a humanized subtype when the
+    label is missing or generic. No domain assumptions."""
+    label = str(agent.get("label") or "").strip()
+    subtype = str(agent.get("subtype") or "").strip()
+    generic = {"agent", subtype.casefold(), str(agent.get("node_path") or "").casefold()}
+    if label and label.casefold() not in generic:
+        return label
+    return subtype.replace("_", " ").title() if subtype else "Agent"
+
+
+def _build_architect_synopsis(
+    ast: dict[str, Any] | None,
+    *,
+    change_kind: str,
+) -> ArchitectSynopsisEvent:
+    """Derive a human-readable synopsis of the built/changed workflow.
+
+    Pure + deterministic — NO LLM call. Topology-agnostic: every string comes
+    from the AST itself (the topology classifier + per-node labels/subtypes), so
+    it generalizes across all topologies and domains. Reuses the existing
+    ``_ast_summary_payload`` (topology / tool names / placeholder lanes),
+    ``workflow_critic._extract_agents`` (per-agent label/subtype/bound-tools;
+    also recurses into plan_and_execute), and ``_extract_required_outputs``.
+    """
+    from deep_research.agent_designer.framework_tools import _ast_summary_payload
+    from deep_research.agent_designer.workflow_critic import _extract_agents
+
+    safe_ast = ast if isinstance(ast, dict) else {}
+    try:
+        summary = _ast_summary_payload(safe_ast)
+    except Exception:  # noqa: BLE001 — summary is best-effort display only
+        summary = {}
+    topology = str(summary.get("topology") or "unknown")
+    topo_display = topology.replace("_", " ")
+
+    lanes: list[dict[str, Any]] = []
+    pipeline: list[str] = []
+    for agent in _extract_agents(safe_ast):
+        subtype = str(agent.get("subtype") or "").strip().casefold()
+        label = _synopsis_agent_label(agent)
+        if subtype in _SYNOPSIS_PIPELINE_SUBTYPES:
+            pipeline.append(label)
+        else:
+            lanes.append(
+                {
+                    "label": label,
+                    "tools": [str(t) for t in (agent.get("tools_bound") or [])],
+                }
+            )
+
+    tool_names = [str(t) for t in (summary.get("tool_names") or []) if t]
+    outputs = _extract_required_outputs(safe_ast)
+
+    warnings: list[str] = []
+    pending = summary.get("placeholder_pending_nodes") or []
+    n_pending = len(pending) if isinstance(pending, list) else 0
+    if n_pending:
+        noun = "lane" if n_pending == 1 else "lanes"
+        verb = "uses" if n_pending == 1 else "use"
+        warnings.append(
+            f"{n_pending} {noun} still {verb} a default prompt — "
+            "consider customizing the research focus."
+        )
+
+    if change_kind == "edited":
+        headline = f"Updated the workflow ({topo_display})"
+    elif lanes:
+        lane_word = "lane" if len(lanes) == 1 else "lanes"
+        headline = f"Built a {topo_display} workflow · {len(lanes)} {lane_word}"
+    else:
+        headline = f"Built a {topo_display} workflow"
+
+    return ArchitectSynopsisEvent(
+        headline=headline,
+        topology=topology,
+        change_kind="edited" if change_kind == "edited" else "created",
+        lanes=lanes,
+        pipeline=pipeline,
+        tools=tool_names,
+        outputs=outputs,
+        warnings=warnings,
+    )
+
+
 class DesignerChatOrchestrator:
     """Dispatches LLM tool-calls to mutation primitives and yields SSE events.
 
@@ -1371,6 +1592,12 @@ class DesignerChatOrchestrator:
             current_ast_summary_setter=lambda value: state.append(
                 "parse_architect_ast", "current_ast_summary", value
             ),
+            # Prompt-AWARE per-agent projection consumed ONLY by the critic node
+            # (so it can verify prompt-content checklist items). Refreshed every
+            # inner iteration by parse_architect_ast, like current_ast_summary.
+            current_ast_prompts_setter=lambda value: state.append(
+                "parse_architect_ast", "current_ast_prompts", value
+            ),
             # Codex review #5 — surface the parse tool's REAL normalization
             # fixes (it computed them against the actual pre-normalized AST /
             # merged blueprint) instead of the orchestrator re-deriving them
@@ -1465,9 +1692,15 @@ class DesignerChatOrchestrator:
                 evt_type = getattr(event, "event_type", None)
 
                 if evt_type == "agent_stream_chunk":
-                    content = getattr(event, "content", None) or ""
-                    if content:
-                        yield MessageEvent(content=content)
+                    # NOTE: agent token-streaming is currently DISABLED framework-side
+                    # (execute_agent runs with stream=False), so this branch is
+                    # effectively dormant. Read the real field name (``chunk``, not
+                    # ``content``) so it is correct if streaming is ever enabled —
+                    # the old ``getattr(event, "content")`` always returned None and
+                    # silently dropped every chunk. See AgentStreamChunkEvent.
+                    chunk = getattr(event, "chunk", None) or ""
+                    if chunk:
+                        yield MessageEvent(content=chunk)
 
                 elif evt_type == "tool_call":
                     yield ToolCallEvent(
@@ -1584,15 +1817,6 @@ class DesignerChatOrchestrator:
                             emitted_mutation = True
 
                 elif evt_type == "workflow_completed":
-                    terminal_error = _terminal_error_message(state)
-                    if terminal_error:
-                        logger.info(
-                            "DESIGNER_TURN_REVIEW_FAILED reason=critic_not_approved"
-                        )
-                        yield ErrorEvent(message=terminal_error)
-                        yield DoneEvent()
-                        yielded_done = True
-                        continue
                     if lane == "edit":
                         # Emit the single net delta (+ guard) for the whole turn.
                         async for _fin in self._finalize_edit(
@@ -1602,13 +1826,42 @@ class DesignerChatOrchestrator:
                         ):
                             yield _fin
                     elif not emitted_mutation:
-                        # Never-silent invariant (build lane): a turn that
-                        # proposed no mutation must still tell the user why —
-                        # the mutation card is the only surface otherwise.
-                        logger.info(
-                            "DESIGNER_TURN_NO_MUTATION reason=completed_without_ast_change"
+                        # No workflow produced → never-silent. If the critic blocked,
+                        # surface the SPECIFIC reason (now fed real directives via the
+                        # model-tolerant read); else a generic capability message. The
+                        # terminal error is RESERVED for the genuine no-output case — a
+                        # built workflow is NEVER discarded (704921b regression fix).
+                        terminal_error = _terminal_error_message(state)
+                        if terminal_error is not None:
+                            logger.info(
+                                "DESIGNER_TURN_REVIEW_FAILED "
+                                "reason=critic_not_approved_no_mutation"
+                            )
+                            yield ErrorEvent(message=terminal_error)
+                        else:
+                            logger.info(
+                                "DESIGNER_TURN_NO_MUTATION "
+                                "reason=completed_without_ast_change"
+                            )
+                            yield MessageEvent(content=_terminal_feedback_message(state))
+                    else:
+                        # Build lane succeeded — surface a readable synopsis of WHAT
+                        # was built (no LLM). If the critic disapproved, ALSO surface
+                        # its specific findings as a review card, but KEEP the runnable
+                        # workflow (the user refines it; the quality gate is at save).
+                        yield ProgressEvent(label="Finalizing")
+                        synopsis = self._synopsis_event(
+                            last_ast_seen,
+                            change_kind="edited" if current_ast else "created",
                         )
-                        yield MessageEvent(content=_terminal_feedback_message(state))
+                        if synopsis is not None:
+                            yield synopsis
+                        # Always surface the critic's verdict (pass OR
+                        # needs_revision) — not only on failure — so the reviewer
+                        # visibly reports something every build turn.
+                        review = _critic_review_event(state)
+                        if review is not None:
+                            yield review
                     yield DoneEvent()
                     yielded_done = True
         except Exception as exc:
@@ -1634,7 +1887,43 @@ class DesignerChatOrchestrator:
                     "DESIGNER_TURN_NO_MUTATION reason=stream_ended_without_completion"
                 )
                 yield MessageEvent(content=_terminal_feedback_message(state))
+            elif emitted_mutation and not error_occurred:
+                # Build lane finished without an explicit workflow_completed but
+                # did mutate — still surface the synopsis of what was built, plus the
+                # critic review card if the reviewer disapproved (never discard).
+                yield ProgressEvent(label="Finalizing")
+                synopsis = self._synopsis_event(
+                    last_ast_seen,
+                    change_kind="edited" if current_ast else "created",
+                )
+                if synopsis is not None:
+                    yield synopsis
+                # Always surface the critic's verdict (see the workflow_completed
+                # branch above) — pass cards included, not only failures.
+                review = _critic_review_event(state)
+                if review is not None:
+                    yield review
             yield DoneEvent()
+
+    def _synopsis_event(
+        self,
+        ast: Any,
+        *,
+        change_kind: str,
+    ) -> ArchitectSynopsisEvent | None:
+        """Build the 'what was built/changed' synopsis from a final AST.
+
+        Defensive: returns ``None`` for an empty/invalid AST or if derivation
+        raises, so a synopsis can never break or block a turn (it is purely an
+        additive display event)."""
+        snapshot = _coerce_ast_snapshot(ast)
+        if snapshot is None:
+            return None
+        try:
+            return _build_architect_synopsis(snapshot, change_kind=change_kind)
+        except Exception:  # noqa: BLE001 — synopsis is best-effort display only
+            logger.warning("DESIGNER_SYNOPSIS_BUILD_FAILED", exc_info=True)
+            return None
 
     async def _finalize_edit(
         self,
@@ -1699,6 +1988,9 @@ class DesignerChatOrchestrator:
             )
         yield MessageEvent(content=summary)
         yield event
+        synopsis = self._synopsis_event(event.new_ast, change_kind="edited")
+        if synopsis is not None:
+            yield synopsis
 
     async def _run_topology_edit(
         self,
@@ -1780,6 +2072,9 @@ class DesignerChatOrchestrator:
         yield MessageEvent(content=summary)
         if event is not None:
             yield event
+            synopsis = self._synopsis_event(event.new_ast, change_kind="edited")
+            if synopsis is not None:
+                yield synopsis
         else:
             yield MessageEvent(
                 content="The requested change produced no net difference."
@@ -2000,6 +2295,13 @@ class DesignerChatOrchestrator:
                     "critique": critique,
                 },
             )
+            # Also surface the critic verdict as a first-class, STRUCTURED event
+            # so the chat renders a readable "Designer review" card instead of a
+            # raw JSON dump buried in the tool result. Same dict the validate
+            # tool already computed — no extra LLM call. ``critique`` is a
+            # CritiqueResult.model_dump(), whose keys match CriticReviewEvent.
+            if critique is not None:
+                yield CriticReviewEvent(**critique)
             return
 
         # Mutation tools

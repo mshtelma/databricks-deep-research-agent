@@ -44,7 +44,10 @@ from databricks_deep_research.workflow.definition import (
     WorkflowDefinition,
     WorkflowNode,
 )
-from databricks_deep_research.workflow.loader import load_workflow_from_dict
+from databricks_deep_research.workflow.loader import (
+    heal_node_bound_web_tools,
+    load_workflow_from_dict,
+)
 from databricks_deep_research.workflow.state import WorkflowState
 
 from deep_research.agent.adapters.config_translator import translate
@@ -62,6 +65,7 @@ from deep_research.agent.followup import (
     stream_chat_about_results,
     stream_live_search_answer,
 )
+from deep_research.agent.synthesis_grounding import apply_grounding_to_synth_config
 from deep_research.agent.tools.file_entities import GetFileEntitiesTool
 from deep_research.agent.tools.list_files import ListAttachedFilesTool
 from deep_research.agent.tools.read_file import ReadAttachedFileTool
@@ -530,32 +534,116 @@ def _apply_runtime_overlays_to_workflow(
     workflow_def: WorkflowDefinition,
     config: OrchestrationConfig,
 ) -> WorkflowDefinition:
-    """Apply per-run chat toggles that are orthogonal to saved workflow shape."""
-    if not config.verify_sources:
-        return workflow_def
+    """Apply per-run chat toggles that are orthogonal to saved workflow shape.
 
-    def maybe_enable_reclaim(agent_config: dict[str, Any]) -> None:
+    The chat "verify sources" toggle is a FULL OVERRIDE for custom agents: it
+    re-stamps every synthesizer node's grounding so the toggle — seeded in the UI
+    from the agent's saved setting — always wins. verify on -> reclaim (cite + NLI
+    verify); verify off -> classical_lite (cite-only, skip the expensive overlay).
+    A synthesizer explicitly authored as grounding_mode="none" (no citations at
+    all) is left untouched: that is orthogonal to the verify-vs-cite-only axis.
+    """
+    full_verify = bool(config.verify_sources)
+
+    def force_grounding(agent_config: dict[str, Any]) -> None:
         if agent_config.get("subtype") != "synthesizer":
             return
-        output_schema = agent_config.get("output_schema")
-        has_legacy_grounding = (
-            isinstance(output_schema, dict)
-            and output_schema.get("synthesis_mode") in {"reclaim", "interleaved"}
-        )
-        has_explicit_grounding = agent_config.get("grounding_mode") in {
-            "none",
-            "classical_lite",
-            "reclaim",
-        }
-        if has_explicit_grounding or has_legacy_grounding:
+        if agent_config.get("grounding_mode") == "none":
             return
-        schema = output_schema if isinstance(output_schema, dict) else {}
-        schema.setdefault("synthesis_mode", "reclaim")
-        schema.setdefault("enable_citation_verification", True)
-        agent_config["output_schema"] = schema
+        apply_grounding_to_synth_config(agent_config, full_verify=full_verify)
 
-    _visit_workflow_agent_configs(workflow_def, maybe_enable_reclaim)
+    _visit_workflow_agent_configs(workflow_def, force_grounding)
+    logger.info(
+        "VERIFY_OVERRIDE full_verify=%s grounding_mode=%s",
+        full_verify,
+        "reclaim" if full_verify else "classical_lite",
+    )
+    _apply_effort_overlay(workflow_def, config)
     return workflow_def
+
+
+# Map the chat ``research_depth`` enum -> the saved-workflow effort vocabulary.
+# 'medium' is the no-op midpoint (standard); 'light'/'extended' scale down/up.
+_RESEARCH_DEPTH_TO_EFFORT: dict[str, str] = {
+    "light": "light",
+    "medium": "standard",
+    "extended": "deep",
+}
+
+
+def _resolve_effort_level(
+    workflow_def: WorkflowDefinition, config: OrchestrationConfig
+) -> str | None:
+    """Resolve the effective effort level for a custom-agent run.
+
+    Precedence: an explicit per-turn ``research_depth`` (mapped to the effort
+    vocabulary) wins; otherwise the saved per-agent default
+    (``workflow_def.research_effort``); otherwise ``None`` (no scaling).
+    """
+    depth = getattr(config, "research_depth", None)
+    if isinstance(depth, str) and depth not in ("", "auto"):
+        mapped = _RESEARCH_DEPTH_TO_EFFORT.get(depth)
+        if mapped is not None:
+            return mapped
+    saved = getattr(workflow_def, "research_effort", None)
+    return saved if isinstance(saved, str) and saved else None
+
+
+def _apply_effort_overlay(
+    workflow_def: WorkflowDefinition, config: OrchestrationConfig
+) -> None:
+    """Scale a CUSTOM agent's research budgets by its effort level (proportional).
+
+    Multiplies every researcher's ``max_tool_calls`` and every
+    ``plan_and_execute`` / ``loop`` node's ``max_iterations`` by the configured
+    effort multiplier (clamped), preserving any per-node tuning the author did.
+    ``standard`` / unset is a strict no-op.
+
+    Gated to custom agents (``agent_id`` bound, or a saved ``research_effort``):
+    the built-in deep-research path already consumes ``research_depth`` via
+    ``config_translator.get_research_type_config`` (research_types budgets), so
+    applying the multiplier there too would double-count.
+    """
+    is_custom = (
+        getattr(config, "agent_id", None) is not None
+        or getattr(workflow_def, "research_effort", None) is not None
+    )
+    if not is_custom:
+        return
+    level = _resolve_effort_level(workflow_def, config)
+    if level is None:
+        return
+
+    from deep_research.agent.config import get_agent_effort_config
+
+    effort = get_agent_effort_config()
+    if effort.multiplier_for(level) == 1.0:
+        return  # standard / unknown level — nothing to scale
+
+    def scale_researcher(agent_config: dict[str, Any]) -> None:
+        base = agent_config.get("max_tool_calls")
+        if not isinstance(base, int) or base <= 0:
+            return
+        is_researcher = agent_config.get("subtype") == "researcher" or bool(
+            agent_config.get("tools")
+        )
+        if is_researcher:
+            agent_config["max_tool_calls"] = effort.scale_tool_calls(base, level)
+
+    _visit_workflow_agent_configs(workflow_def, scale_researcher)
+
+    def scale_iterations(node: WorkflowNode) -> None:
+        if node.type in (NodeType.plan_and_execute, NodeType.loop):
+            cfg = node.config
+            if isinstance(cfg, dict):
+                base = cfg.get("max_iterations")
+                if isinstance(base, int) and base > 0:
+                    cfg["max_iterations"] = effort.scale_iterations(base, level)
+        for child in node.children:
+            scale_iterations(child)
+
+    scale_iterations(workflow_def.root)
+    logger.info("FWK_EFFORT_OVERLAY level=%s applied to custom agent", level)
 
 
 def _tool_names_with_explicit_provider(workflow_def: WorkflowDefinition) -> set[str]:
@@ -648,6 +736,23 @@ def _fill_databricks_tool_defaults(
                 )
 
 
+def _ensure_node_tools_declared(workflow_def: WorkflowDefinition | None) -> None:
+    """Auto-declare builtin web tools a node binds but the workflow omits.
+
+    Thin app-side delegate to the framework's single source of truth
+    :func:`databricks_deep_research.workflow.loader.heal_node_bound_web_tools`.
+    The loader already heals on every load path the app uses
+    (``_resolve_agent_v2_workflow`` / ``_resolve_workflow`` both call
+    ``load_workflow_from_dict``), so this call is normally an idempotent no-op;
+    it stays here as defense for any ``workflow_def`` that reaches the
+    orchestrator without going through the loader. Kept as a named function so
+    the orchestrator's resolve/prepare sequence reads as one unit.
+    """
+    if workflow_def is None:
+        return
+    heal_node_bound_web_tools(workflow_def)
+
+
 async def _resolve_and_prepare_workflow_def(
     workflow_def: WorkflowDefinition | None,
     config: OrchestrationConfig,
@@ -674,6 +779,10 @@ async def _resolve_and_prepare_workflow_def(
         )
     workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
     workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
+    # Heal node-bound-but-undeclared builtin web tools BEFORE the databricks-fill
+    # so a freshly auto-declared (provider-inheriting) web tool also picks up the
+    # databricks endpoint/tuning when the workspace default provider is databricks.
+    _ensure_node_tools_declared(workflow_def)
     _fill_databricks_tool_defaults(workflow_def, search_cfg)
     return workflow_def
 

@@ -102,6 +102,51 @@ def _node_count(node: dict[str, Any]) -> int:
     return count
 
 
+def _find_synth_grounding_mode(node: dict[str, Any]) -> str | None:
+    """Return the grounding_mode of the first synthesizer node in the subtree.
+
+    Walks the same node shape as ``_node_count`` (children + ``config.body`` /
+    ``config.evaluator``). ``subtype`` and ``grounding_mode`` live inside
+    ``node["config"]``. Returns ``None`` if no synthesizer is present; returns
+    ``"reclaim"`` for a synthesizer that omits ``grounding_mode`` (the designer's
+    baked default / safe floor).
+    """
+    config = node.get("config", {})
+    if isinstance(config, dict):
+        if config.get("subtype") == "synthesizer":
+            grounding = config.get("grounding_mode")
+            return grounding if isinstance(grounding, str) else "reclaim"
+        body = config.get("body")
+        if isinstance(body, dict):
+            found = _find_synth_grounding_mode(body)
+            if found is not None:
+                return found
+        evaluator = config.get("evaluator")
+        if isinstance(evaluator, dict):
+            found = _find_synth_grounding_mode(evaluator)
+            if found is not None:
+                return found
+    for child in node.get("children", []) or []:
+        found = _find_synth_grounding_mode(child)
+        if found is not None:
+            return found
+    return None
+
+
+def _default_verify_sources(definition: dict[str, Any]) -> bool:
+    """Derive an agent's default 'verify sources' from its saved synthesizer.
+
+    ``reclaim`` -> ``True`` (cite + NLI verify); ``classical_lite``/``none`` ->
+    ``False`` (cite-only). No synthesizer found -> ``True`` (the reclaim safe
+    floor). The chat composer seeds the verify toggle from this; the toggle then
+    fully overrides per run (see ``framework_orchestrator``).
+    """
+    grounding = _find_synth_grounding_mode(definition.get("root", {}))
+    if grounding is None:
+        return True
+    return grounding == "reclaim"
+
+
 class AgentV2Service:
     """CRUD service for AgentV2 with optimistic-locking semantics."""
 
@@ -421,6 +466,7 @@ class AgentV2Service:
                 updated_at=agent.updated_at,
                 node_count=_node_count(agent.definition.get("root", {})),
                 in_app_active=bool(in_app_active),
+                default_verify_sources=_default_verify_sources(agent.definition),
             )
             for agent, in_app_active in rows
         ]

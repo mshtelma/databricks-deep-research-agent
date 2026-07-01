@@ -200,29 +200,14 @@ resources:
           - name: STORAGE_WAREHOUSE_ID
             value: ${var.storage_warehouse_id}
 
-          # Brave Search (references 'brave-api-key' resource binding)
-          - name: BRAVE_API_KEY
-            value_from: "brave-api-key"
+          # NOTE: the BRAVE_API_KEY env + the brave-api-key / tavily-mcp-connection
+          # resource bindings are target-gated, NOT defined here, so the `fevm`
+          # target can omit them (that workspace has no Brave secret scope and no
+          # tavily_mcp UC connection). The `dev` target defines the &brave_env /
+          # &brave_binding / &tavily_binding anchors; ais/e2e/local-dev alias them.
 
       # ---- Resource bindings ----
       resources:
-        # =================================================================
-        # Secrets
-        # =================================================================
-        - name: brave-api-key
-          description: "Brave Search API key for web search functionality"
-          secret:
-            scope: ${var.brave_secret_scope}
-            key: ${var.brave_secret_key}
-            permission: READ
-
-        - name: tavily-mcp-connection
-          description: "Unity Catalog connection for Tavily MCP"
-          uc_securable:
-            securable_full_name: tavily_mcp
-            securable_type: CONNECTION
-            permission: USE_CONNECTION
-
         # =================================================================
         # Model Serving Endpoints
         # All endpoints used by the app need CAN_QUERY permission
@@ -315,6 +300,31 @@ targets:
     variables:
       resource_suffix: "dev"
     resources:
+      # Brave + Tavily are target-gated (not in the shared app block) so `fevm`
+      # can omit them. `dev` DEFINES the anchors below; ais/e2e/local-dev alias
+      # them. Keep them in sync via the anchors — do not hand-duplicate.
+      apps:
+        deep_research_agent:
+          config:
+            env:
+              - &brave_env
+                name: BRAVE_API_KEY
+                value_from: "brave-api-key"
+          resources:
+            - &brave_binding
+              name: brave-api-key
+              description: "Brave Search API key for web search functionality"
+              secret:
+                scope: ${var.brave_secret_scope}
+                key: ${var.brave_secret_key}
+                permission: READ
+            - &tavily_binding
+              name: tavily-mcp-connection
+              description: "Unity Catalog connection for Tavily MCP"
+              uc_securable:
+                securable_full_name: tavily_mcp
+                securable_type: CONNECTION
+                permission: USE_CONNECTION
       postgres_projects:
         deep_research_project:
           project_id: deep-research-${var.resource_suffix}
@@ -334,6 +344,14 @@ targets:
       # auto-discovering a single STARTED warehouse.
       storage_warehouse_id: "d837825f69a03500"
     resources:
+      apps:
+        deep_research_agent:
+          config:
+            env:
+              - *brave_env
+          resources:
+            - *brave_binding
+            - *tavily_binding
       postgres_projects:
         deep_research_project:
           project_id: deep-research-${var.resource_suffix}
@@ -349,6 +367,14 @@ targets:
       resource_suffix: "e2e"
       storage_warehouse_id: "d837825f69a03500"
     resources:
+      apps:
+        deep_research_agent:
+          config:
+            env:
+              - *brave_env
+          resources:
+            - *brave_binding
+            - *tavily_binding
       postgres_projects:
         deep_research_project:
           project_id: deep-research-${var.resource_suffix}
@@ -364,6 +390,47 @@ targets:
       resource_suffix: "local"
       storage_warehouse_id: "d837825f69a03500"
     resources:
+      apps:
+        deep_research_agent:
+          config:
+            env:
+              - *brave_env
+          resources:
+            - *brave_binding
+            - *tavily_binding
+      postgres_projects:
+        deep_research_project:
+          project_id: deep-research-${var.resource_suffix}
+          display_name: deep-research-${var.resource_suffix}
+          pg_version: ${var.pg_version}
+
+  # FEVM serverless-stable workspace (added 2026-06-30). Deliberately OMITS the
+  # brave/tavily app-resource bindings: this workspace has no Brave secret scope
+  # and no tavily_mcp UC connection, so those bindings are target-gated on
+  # dev/ais/e2e/local-dev (via anchors) rather than living in the shared app
+  # block. Pins the workspace's only SQL warehouse (Serverless Starter) for the
+  # text-table tools — serverless auto-starts on first query, so STOPPED is fine.
+  fevm:
+    mode: development
+    default: false
+    workspace:
+      profile: fevm
+    variables:
+      resource_suffix: "fevm"
+      storage_warehouse_id: "12e89a7b6230b39e"
+    resources:
+      apps:
+        deep_research_agent:
+          config:
+            env:
+              # fevm has cross-region processing disabled, so the Databricks
+              # built-in web-search GEMINI grounding path returns HTTP 400. Layer
+              # a partial overlay onto config/app.yaml (deep-merged at load time
+              # via APP_CONFIG_OVERLAY) that repoints builtin web search at an
+              # OpenAI gpt-5 endpoint, which works on this workspace. fevm-only;
+              # appended to the shared config.env (which sets APP_CONFIG_PATH).
+              - name: APP_CONFIG_OVERLAY
+                value: "config/app.fevm.yaml"
       postgres_projects:
         deep_research_project:
           project_id: deep-research-${var.resource_suffix}

@@ -209,6 +209,36 @@ def _raise_if_validation_blocks(
         )
 
 
+def _raise_if_coverage_blocks(definition: dict[str, Any], *, force: bool) -> None:
+    """Deterministic save-gate: block the save when the report producer does not
+    cover every requested topic, UNLESS ``force`` (the frontend 'Save draft anyway').
+
+    Fast (no LLM call) so it never times out, and force-overridable so a deliberate
+    work-in-progress draft can still be persisted. Structural errors already hard-block
+    at request parse (``schemas.agent_v2``); the stochastic LLM critic stays advisory
+    (background) — this gate is the deterministic, specific, never-silent quality bar."""
+    if force:
+        return
+    from deep_research.agent_designer.semantic_validation import (
+        prompt_term_coverage_errors,
+    )
+
+    errors = prompt_term_coverage_errors(definition)
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": (
+                    "This workflow can't be saved yet — its report doesn't cover every "
+                    "requested topic. Resolve these (or pass ?force=true to save a draft):"
+                ),
+                "coverage_errors": [
+                    {"message": e.message, "path": e.path} for e in errors
+                ],
+            },
+        )
+
+
 def _validation_warning_header(result: WorkflowValidationResult) -> str | None:
     """Latin-1-safe ``X-Critic-Warning`` value for a non-pass verdict, else None."""
     if result.verdict in ("needs_revision", "fail"):
@@ -475,6 +505,9 @@ async def create_agent(
         validation, needs_bg = await _advisory_save_probe(agent, session)
         if validation is not None:
             _stamp_validation(agent, validation)
+    # Deterministic coverage gate (force-overridable). Structural errors already
+    # blocked at request parse; the LLM critic stays advisory/background.
+    _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
     if needs_bg:
         background_tasks.add_task(
@@ -568,6 +601,8 @@ async def update_agent(
             validation, needs_bg = await _advisory_save_probe(agent, session)
             if validation is not None:
                 _stamp_validation(agent, validation)
+        # Deterministic coverage gate (force-overridable) — only on a definition change.
+        _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
     if needs_bg:
         background_tasks.add_task(

@@ -297,8 +297,15 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   // Save mutation
   // -------------------------------------------------------------------------
 
+  // One-shot "Save as draft anyway" intent: the coverage gate is force-overridable
+  // (the heuristic can false-positive), structural errors are not. Threaded via a ref
+  // so the existing no-arg mutate()/mutateAsync() callers stay unchanged.
+  const forceSaveRef = React.useRef(false);
+
   const saveMutation = useMutation({
     mutationFn: async () => {
+      const force = forceSaveRef.current;
+      forceSaveRef.current = false; // consume
       if (!ast) throw new Error('No AST to save');
       if (isWorkflowEmpty(ast)) {
         markValidationErrors([
@@ -323,18 +330,28 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
 
       const result = await validateWorkflow(definition as unknown as Record<string, unknown>);
       if (!result.valid) {
-        markValidationErrors(result.errors as import('@/types/ast').ValidationError[]);
-        return null;
+        const errs = result.errors as import('@/types/ast').ValidationError[];
+        // Coverage-only failures are force-overridable ("Save as draft anyway");
+        // any structural error is a hard block regardless of force.
+        const onlyCoverage =
+          errs.length > 0 && errs.every((e) => e.kind === 'coverage');
+        if (!(onlyCoverage && force)) {
+          markValidationErrors(errs);
+          return null;
+        }
       }
 
       markValidationErrors([]);
 
       if (isNew) {
-        const { agent, etag: newEtag } = await createAgentV2({
-          name: payload.name,
-          description: payload.description,
-          definition: definition as unknown as Record<string, unknown>,
-        });
+        const { agent, etag: newEtag } = await createAgentV2(
+          {
+            name: payload.name,
+            description: payload.description,
+            definition: definition as unknown as Record<string, unknown>,
+          },
+          { force },
+        );
         markClean(newEtag);
         return { agent, etag: newEtag, isNew: true };
       } else {
@@ -347,6 +364,7 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             definition: definition as unknown as Record<string, unknown>,
           },
           currentEtag,
+          { force },
         );
         markClean(newEtag);
         return { agent, etag: newEtag, isNew: false };
@@ -750,6 +768,22 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             >
               <Save size={13} /> {saveMutation.isPending ? 'Saving…' : 'Save'}
             </button>
+            {validationErrors.length > 0 &&
+              validationErrors.every((e) => e.kind === 'coverage') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    forceSaveRef.current = true;
+                    saveMutation.mutate();
+                  }}
+                  disabled={saveMutation.isPending}
+                  aria-label="Save as draft anyway"
+                  title="The workflow doesn't yet cover every requested topic. Save it as a draft and keep refining."
+                  className="inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-3 py-1.5 text-[13px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  Save as draft anyway
+                </button>
+              )}
             <ExportYamlMenu
               getYaml={handleExportYaml}
               filename={exportFilename}
@@ -1002,8 +1036,38 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               )}
               {activeTab === 'settings' && (
                 <div className="rounded-db-md border border-db-gray-lines bg-white p-6 text-[13px] leading-[1.55] text-db-gray-text">
-                  Agent-level settings (visibility, run-as principal, output schema) live here.
-                  Coming soon.
+                  <p className="mb-1 font-db-mono text-[10px] font-medium uppercase tracking-[0.06em] text-db-gray-text">
+                    Research depth
+                  </p>
+                  <p className="mb-3 max-w-prose text-[12px] leading-[1.5] text-db-gray-text">
+                    Scales how deeply this agent's researchers dig — their tool-call
+                    budgets and any loop / plan-and-execute iteration counts.{' '}
+                    <strong>Standard</strong> keeps the saved budgets;{' '}
+                    <strong>Deep</strong> raises them for more thorough research;{' '}
+                    <strong>Light</strong> reduces them for faster, shallower runs.
+                    A per-chat selection overrides this saved default.
+                  </p>
+                  <select
+                    aria-label="Research depth"
+                    value={ast?.research_effort ?? 'standard'}
+                    onChange={(e) => {
+                      if (!ast) return;
+                      const value = e.target.value as 'light' | 'standard' | 'deep';
+                      useAgentEditorStore
+                        .getState()
+                        .setAst({ ...ast, research_effort: value });
+                    }}
+                    disabled={!ast}
+                    className="w-64 rounded-db-md border border-db-gray-lines bg-white px-2 py-1.5 text-[13px] text-db-gray-text disabled:opacity-50"
+                  >
+                    <option value="light">Light — faster, shallower</option>
+                    <option value="standard">Standard (default)</option>
+                    <option value="deep">Deep — slower, more thorough</option>
+                  </select>
+                  <p className="mt-4 text-[12px] text-db-gray-text">
+                    More agent-level settings (visibility, run-as principal, output
+                    schema) coming soon.
+                  </p>
                 </div>
               )}
               {activeTab === 'deployments' && !isNew && (

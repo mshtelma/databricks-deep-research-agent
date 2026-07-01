@@ -11,7 +11,9 @@
 #
 # Public outputs after a run:
 #   state.current_ast         JSON-string of the proposed WorkflowDefinition AST
-#   state.critic_verdict      JSON-string of the CriticVerdict
+#   state.critic_verdict      CriticVerdict MODEL object (NOT a JSON-string — agent
+#                             nodes store structured output as the model; the
+#                             orchestrator reads it via _coerce_critic_verdict_dict)
 #   state.critic_approved     bool — true when critic approved this turn
 
 id: designer_workflow
@@ -36,6 +38,7 @@ runtime_injected_keys:
   - revision_request
   - revision_count
   - current_ast_summary
+  - current_ast_prompts
   - initial_blueprint
 
 # ---------------------------------------------------------------------------
@@ -1057,7 +1060,9 @@ root:
 
                               ## Checklist before approving
                               For EACH item below, name the result in your verdict
-                              (PASS / FAIL — paired with a directive when FAIL):
+                              (PASS / FAIL — paired with a directive when FAIL).
+                              Base items #1-#3 on the ## Per-agent Prompts section
+                              below (the actual prompt text), NOT the summary:
 
                               1. Each required_output named in the user_intent is
                                  referenced by at least one agent's system_prompt OR
@@ -1095,6 +1100,27 @@ root:
                                   immutable from the deterministic blueprint, so
                                   the critic checking it is pure duplication.
 
+                              ## Out of scope — do NOT flag these
+                              - Topology is structurally fixed by the deterministic
+                                blueprint and was deliberately chosen from the task's
+                                WORK SHAPE: N independent concerns map to parallel
+                                STATIC lanes even when the user's words say
+                                "plan-and-execute", "adaptive", or "per-domain
+                                planning". Do NOT raise "should be plan_and_execute",
+                                "should be a different topology", "lanes should
+                                re-plan/adapt", or "static lanes are wrong" — the
+                                architect cannot change topology via a prompt patch
+                                and neither can a revision, so such a directive only
+                                produces an unwinnable loop. Judge prompt
+                                specialization, evidence paths, and coverage — never
+                                the structural shape.
+                              - Bound-tool set: do NOT instruct or expect the use of a
+                                tool that is not in a lane's bound tool list (e.g.
+                                ``web_crawl`` when only ``web_research`` is bound). If a
+                                prompt references an unbound tool, that is a real defect
+                                — but the fix is to remove the reference, never to
+                                demand a new tool be added.
+
                               For FAIL items, emit a CriticDirective with a clear
                               node_path, one-line issue, one-line suggested_action,
                               severity, and tool_hint. For PASS items, omit them.
@@ -1104,6 +1130,13 @@ root:
 
                               ## Current AST Summary
                               {current_ast_summary}
+
+                              ## Per-agent Prompts (full system_prompt + user_prompt_template)
+                              Judge checklist items #1, #2, #3 from THIS section — the
+                              actual prompt text. Prompts may be truncated for size; do
+                              NOT FAIL an item solely because a truncated prompt appears
+                              to omit a term — judge on what is present.
+                              {current_ast_prompts}
 
                               ## Structural Gate Result
                               {gate_result}

@@ -13,8 +13,12 @@ import json
 
 from databricks_deep_research.workflow.state import WorkflowState
 
+from deep_research.agent_designer.critic_types import CriticVerdict
 from deep_research.agent_designer.orchestrator import (
     _GENERIC_NO_CHANGE_MESSAGE,
+    _build_critic_review_event,
+    _critic_review_event,
+    _signature_review_failed,
     _terminal_error_message,
     _terminal_feedback_message,
 )
@@ -115,3 +119,121 @@ def test_malformed_values_fall_through_to_generic() -> None:
         gate_result=["unexpected", "shape"],
     )
     assert _terminal_feedback_message(state) == _GENERIC_NO_CHANGE_MESSAGE
+
+
+def test_terminal_feedback_reads_critic_verdict_model() -> None:
+    # REGRESSION (root cause B): critic_verdict is a CriticVerdict MODEL object in
+    # production state; the old JSON-only coercer dropped it → generic message.
+    state = _state(
+        critic_verdict=CriticVerdict(
+            approve=False,
+            directives=[
+                {
+                    "node_path": "agents.final-report-synthesizer",
+                    "issue": "synthesizer must enumerate all required outputs",
+                    "suggested_action": "list fundamentals, risk, earnings in the prompt",
+                    "severity": "blocking",
+                }
+            ],
+        ),
+    )
+    msg = _terminal_feedback_message(state)
+    assert msg != _GENERIC_NO_CHANGE_MESSAGE
+    assert "unresolved issues" in msg
+    assert "synthesizer must enumerate all required outputs" in msg
+    assert "final-report-synthesizer" in msg  # node label surfaced
+
+
+def test_gate_failure_takes_priority_over_stale_critic_verdict() -> None:
+    # If the LAST iteration failed the structural gate the critic didn't run, so
+    # critic_verdict is stale — the fresh gate failure must win (reorder).
+    state = _state(
+        gate_result={"status": "fail", "failures": [{"message": "placeholder not cleared"}]},
+        critic_verdict=CriticVerdict(
+            approve=False, directives=[{"issue": "stale critic note"}]
+        ),
+    )
+    msg = _terminal_feedback_message(state)
+    assert "structural checks" in msg
+    assert "placeholder not cleared" in msg
+    assert "stale critic note" not in msg
+
+
+def test_signature_review_failed() -> None:
+    assert _signature_review_failed(_state(signature_loop_done={"critic_approved": False})) is True
+    assert _signature_review_failed(_state(signature_loop_done={"critic_approved": True})) is False
+    assert _signature_review_failed(_state()) is False
+
+
+def test_build_critic_review_event_from_directives() -> None:
+    state = _state(
+        critic_verdict=CriticVerdict(
+            approve=False,
+            directives=[
+                {
+                    "node_path": "agents.synth",
+                    "issue": "missing earnings section",
+                    "suggested_action": "add it",
+                    "severity": "blocking",
+                }
+            ],
+        ),
+        signature_loop_done={"critic_approved": False, "revision_count": 2},
+    )
+    event = _build_critic_review_event(state)
+    assert event is not None
+    assert event.verdict == "needs_revision"
+    assert event.agent_findings[0]["finding"] == "missing earnings section"
+    assert event.agent_findings[0]["label"] == "synth"
+    assert event.agent_findings[0]["node_path"] == "agents.synth"
+
+
+def test_build_critic_review_event_none_when_no_directives() -> None:
+    assert _build_critic_review_event(_state(critic_verdict=CriticVerdict(approve=True))) is None
+    assert _build_critic_review_event(_state()) is None
+
+
+def test_critic_review_event_pass_when_approved() -> None:
+    # Always-on critic: an approved verdict now yields a "pass" card so the
+    # reviewer visibly reports something on a successful build (it used to be
+    # silent on success).
+    event = _critic_review_event(_state(critic_verdict=CriticVerdict(approve=True)))
+    assert event is not None
+    assert event.verdict == "pass"
+    assert event.agent_findings == []
+    assert "approved" in event.summary.lower()
+
+
+def test_critic_review_event_needs_revision_from_directives() -> None:
+    state = _state(
+        critic_verdict=CriticVerdict(
+            approve=False,
+            directives=[
+                {
+                    "node_path": "agents.synth",
+                    "issue": "missing earnings section",
+                    "suggested_action": "add it",
+                    "severity": "blocking",
+                }
+            ],
+        ),
+    )
+    event = _critic_review_event(state)
+    assert event is not None
+    assert event.verdict == "needs_revision"
+    assert event.agent_findings[0]["finding"] == "missing earnings section"
+
+
+def test_critic_review_event_none_when_critic_never_ran() -> None:
+    # No verdict at all, AND the real per-turn init value (""), both mean the
+    # critic never produced output (e.g. the surgical-edit / topology lanes,
+    # which skip the architect-critic loop) → no empty card.
+    assert _critic_review_event(_state()) is None
+    assert _critic_review_event(_state(critic_verdict="")) is None
+    assert _critic_review_event(_state(critic_verdict="   ")) is None
+
+
+def test_critic_review_event_none_when_unapproved_without_directives() -> None:
+    # e.g. a structural-gate failure: not approved but no actionable directives.
+    # The terminal-feedback path explains that case instead of an empty card.
+    assert _critic_review_event(_state(critic_verdict=CriticVerdict(approve=False))) is None

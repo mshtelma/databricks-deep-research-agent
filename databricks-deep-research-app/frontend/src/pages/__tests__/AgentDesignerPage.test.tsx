@@ -311,6 +311,50 @@ describe('AgentDesignerPage', () => {
     expect(await screen.findByText(/1 error/i)).toBeInTheDocument()
   })
 
+  // Test 4b: coverage-only validation is force-overridable via "Save as draft anyway"
+  it('coverage-only validation offers "Save as draft anyway" and forces the save', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: false,
+      errors: [
+        {
+          message: "Required topic 'earnings' is not referenced by any agent prompt.",
+          path: 'synth',
+          line: null,
+          kind: 'coverage',
+        },
+      ],
+      workflow_summary: null,
+    })
+    vi.mocked(updateAgentV2).mockResolvedValue({
+      agent: { ...FAKE_AGENT, validation_pending: false },
+      etag: '"etag-v2"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST)
+    })
+
+    fireEvent.click(await screen.findByRole('button', { name: /save agent/i }))
+
+    // Coverage block: no save yet, but a force affordance appears.
+    await waitFor(() => expect(validateWorkflow).toHaveBeenCalled())
+    expect(updateAgentV2).not.toHaveBeenCalled()
+    const forceBtn = await screen.findByRole('button', { name: /save as draft anyway/i })
+
+    fireEvent.click(forceBtn)
+
+    await waitFor(() => expect(updateAgentV2).toHaveBeenCalled())
+    // The options arg (4th) carries force: true so the backend coverage gate is bypassed.
+    const call = vi.mocked(updateAgentV2).mock.calls.at(-1)!
+    expect(call[3]).toEqual({ force: true })
+  })
+
   // Test 5: 409 from updateAgentV2 opens EtagConflictModal
   it('409 from save opens EtagConflictModal', async () => {
     vi.mocked(getAgentV2WithEtag).mockResolvedValue({

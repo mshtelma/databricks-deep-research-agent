@@ -194,8 +194,12 @@ class TestAppNameSelection:
         assert len(name) <= 30
 
     @pytest.mark.asyncio
-    async def test_web_search_apps_api_binds_brave_secret_resource_and_env(self) -> None:
-        """Inline deploy must pass secret resources/env vars to the Apps SDK."""
+    async def test_brave_pinned_web_search_apps_api_binds_brave_secret_resource_and_env(
+        self,
+    ) -> None:
+        """A web tool that pins provider: brave (``uses_brave`` true in metadata)
+        binds the Brave secret resource + env. Scope/key come from the artifact
+        metadata that ``translate`` recorded — NOT re-derived from settings."""
         from deep_research.services.deployment.shell_app_apps_api import (
             _deploy_via_apps_api,
         )
@@ -209,6 +213,9 @@ class TestAppNameSelection:
         artifact = _make_artifact(
             metadata={
                 "requires_web_search": "true",
+                "uses_brave": "true",
+                "brave_secret_scope": "deep-research-secrets",
+                "brave_secret_key": "BRAVE_API_KEY",
                 "brave_secret_resource_name": "brave-api-key",
             }
         )
@@ -247,6 +254,61 @@ class TestAppNameSelection:
         assert env_by_name["MLFLOW_TRACKING_URI"].value == "databricks"
         assert env_by_name["SHELL_APP_SSE_HEARTBEAT_SECONDS"].value == "15"
         assert env_by_name["BRAVE_API_KEY"].value_from == "brave-api-key"
+
+    @pytest.mark.asyncio
+    async def test_inherited_web_search_apps_api_does_not_bind_brave_secret(
+        self,
+    ) -> None:
+        """A web tool using the default (inherited) provider must NOT bind a Brave
+        secret resource/env — even though ``requires_web_search`` is true AND the
+        deploy-here settings carry a default Brave scope/key. Regression for the
+        ``NotFound: Invalid secret resource brave-api-key`` deploy failure on
+        workspaces (e.g. fevm) that have no Brave secret scope."""
+        from deep_research.services.deployment.shell_app_apps_api import (
+            _deploy_via_apps_api,
+        )
+
+        wc = _make_workspace_client()
+        config = {
+            "mode": "shell_app",
+            "app_name": "dr-shell-web-inherit",
+            "framework_git_tag": "v1.0.0",
+        }
+        artifact = _make_artifact(
+            metadata={
+                "requires_web_search": "true",
+                "uses_brave": "false",
+                "brave_secret_resource_name": "brave-api-key",
+            }
+        )
+
+        with (
+            patch(
+                "deep_research.services.deployment.shell_app_apps_api.probe_framework_tag",
+                new=AsyncMock(return_value=MagicMock(reachable=True)),
+            ),
+            patch(
+                "deep_research.services.deployment.shell_app_apps_api._probe_app_reachability_with_timeout",
+                new=AsyncMock(return_value=_reachability_result(reached=True, timed_out=False)),
+            ),
+            _patch_settings(),
+            _patch_source_client(wc),
+        ):
+            result = await _deploy_via_apps_api(
+                artifact,
+                config,
+                _make_deployment(config=config),
+                wc,
+            )
+
+        assert result.success is True
+        create_arg = wc.apps.create.call_args.args[0]
+        resource_names = [r.name for r in (create_arg.resources or [])]
+        assert "brave-api-key" not in resource_names
+
+        deployment_arg = wc.apps.deploy.call_args.kwargs["app_deployment"]
+        env_names = {env.name for env in deployment_arg.env_vars}
+        assert "BRAVE_API_KEY" not in env_names
 
 
 class TestPermissionDenied:

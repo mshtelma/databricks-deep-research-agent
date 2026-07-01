@@ -54,7 +54,12 @@ env:
   - name: ALLOWED_ORIGINS
     value: ""
 
-  # Brave Search API (external service)
-  # The "brave-api-key" resource provides the API key from secret scope
-  - name: BRAVE_API_KEY
-    value_from: "brave-api-key"
+  # NOTE: BRAVE_API_KEY is intentionally NOT declared here. Brave is an opt-in
+  # search provider (the default is Databricks built-in web search), so both the
+  # env var AND the `brave-api-key` secret-resource binding are target-gated in
+  # databricks.yml via the &brave_env / &brave_binding anchors (aliased by
+  # dev/ais/e2e/local-dev). Declaring it unconditionally here forces EVERY target
+  # — including fevm, which has no Brave secret scope — to resolve a
+  # `brave-api-key` resource at deploy and fails with
+  # "NotFound: Invalid secret resource brave-api-key". Local `make dev` reads
+  # BRAVE_API_KEY from .env, not from this value_from binding.

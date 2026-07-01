@@ -105,6 +105,12 @@ export interface CustomAgentSummary {
   hasSourceConfig?: boolean;
   /** True if this agent has an active in_app deployment (chat composer picks). */
   inAppActive?: boolean;
+  /**
+   * The agent's authored default for NLI "verify sources" (true if its
+   * synthesizer uses grounding_mode='reclaim'). The composer seeds the verify
+   * toggle from this on agent selection; the toggle then overrides per run.
+   */
+  defaultVerifySources?: boolean;
 }
 
 /** Agent capability for display */

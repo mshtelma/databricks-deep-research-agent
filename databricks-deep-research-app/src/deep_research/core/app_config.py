@@ -1753,6 +1753,70 @@ class SkillsConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class AgentEffortConfig(BaseModel):
+    """Proportional research-depth scaling for custom-agent workflows.
+
+    A single effort dial (light/standard/deep) multiplies a saved workflow's
+    researcher tool budgets (``max_tool_calls``) and loop / plan-and-execute
+    iteration counts at runtime. ``standard`` (multiplier 1.0) is a strict no-op,
+    so an unset / standard effort leaves the workflow byte-identical to today.
+    Multipliers scale the EXISTING per-node value (not a fixed preset), so any
+    tuning the author already did is preserved at relative scale. Generic numbers
+    only — no per-topology or per-domain values.
+    """
+
+    multipliers: dict[str, float] = Field(
+        default_factory=lambda: {"light": 0.5, "standard": 1.0, "deep": 2.5},
+        description="Effort level -> budget multiplier. 'standard' must be 1.0 (no-op).",
+    )
+    max_tool_calls_min: int = 3
+    max_tool_calls_max: int = 60
+    max_iterations_min: int = 1
+    max_iterations_max: int = 20
+
+    model_config = {"frozen": True}
+
+    def multiplier_for(self, level: str | None) -> float:
+        """Resolve a multiplier for an effort level; unknown / None -> 1.0 (no-op)."""
+        if not level:
+            return 1.0
+        return self.multipliers.get(level, 1.0)
+
+    def scale_tool_calls(self, base: int, level: str | None) -> int:
+        """Scale a ReAct tool-call budget by the effort level, clamped to sane bounds.
+
+        ``base <= 0`` (e.g. a non-researcher agent) and a 1.0 multiplier are
+        returned unchanged so the overlay never invents a budget where none exists.
+        """
+        mult = self.multiplier_for(level)
+        if mult == 1.0 or base <= 0:
+            return base
+        scaled = round(base * mult)
+        return max(self.max_tool_calls_min, min(self.max_tool_calls_max, scaled))
+
+    def scale_iterations(self, base: int, level: str | None) -> int:
+        """Scale a loop / plan-and-execute iteration count, clamped to sane bounds."""
+        mult = self.multiplier_for(level)
+        if mult == 1.0 or base <= 0:
+            return base
+        scaled = round(base * mult)
+        return max(self.max_iterations_min, min(self.max_iterations_max, scaled))
+
+
+class OrchestrationSettingsConfig(BaseModel):
+    """Runtime orchestration settings (research-session limits).
+
+    ``research_timeout_seconds`` is the hard wall-clock cap (H1 watchdog) on a
+    single research run, enforced via ``asyncio.wait_for``. Tunable per-target
+    via the app-config overlay (e.g. raised on slower-search workspaces where a
+    heavy multi-lane agent needs >30 min to finish).
+    """
+
+    research_timeout_seconds: int = Field(default=1800, ge=60, le=14400)
+
+    model_config = {"frozen": True}
+
+
 class AppConfig(BaseModel):
     """Central application configuration loaded from YAML."""
 
@@ -1818,6 +1882,16 @@ class AppConfig(BaseModel):
     skills: SkillsConfig = Field(
         default_factory=SkillsConfig,
         description="Skills subsystem configuration (skill-script execution gate).",
+    )
+    # Effort/depth dial for custom-agent workflows (proportional budget scaling).
+    agent_effort: AgentEffortConfig = Field(
+        default_factory=AgentEffortConfig,
+        description="Effort-level multipliers + clamps that scale custom-agent research depth.",
+    )
+    # Runtime orchestration settings (per-run research timeout watchdog).
+    orchestration: OrchestrationSettingsConfig = Field(
+        default_factory=OrchestrationSettingsConfig,
+        description="Runtime orchestration settings (research-session wall-clock timeout).",
     )
 
     @model_validator(mode="after")
@@ -1926,18 +2000,43 @@ def get_default_config() -> AppConfig:
     )
 
 
+def _deep_merge_dicts(
+    base: dict[str, Any], overlay: dict[str, Any]
+) -> dict[str, Any]:
+    """Recursively merge *overlay* onto *base* (new dict; inputs unmutated).
+
+    Nested dicts merge key-by-key; any non-dict value (scalar OR list) in
+    *overlay* REPLACES the base value. Used to layer a partial per-target config
+    (``config/app.<target>.yaml``) onto the base ``config/app.yaml`` — see
+    :func:`get_app_config` (``APP_CONFIG_OVERLAY``).
+    """
+    result: dict[str, Any] = dict(base)
+    for key, ov in overlay.items():
+        bv = result.get(key)
+        if isinstance(bv, dict) and isinstance(ov, dict):
+            result[key] = _deep_merge_dicts(bv, ov)
+        else:
+            result[key] = ov
+    return result
+
+
 @lru_cache(maxsize=1)
-def load_app_config(config_path: Path | None = None) -> AppConfig:
+def load_app_config(
+    config_path: Path | None = None, overlay_path: Path | None = None
+) -> AppConfig:
     """Load application configuration from YAML file.
 
     Args:
         config_path: Path to YAML config file. If None, searches default locations.
+        overlay_path: Optional partial config deep-merged onto the base (overrides
+            only). Enables per-target overrides (e.g. ``config/app.fevm.yaml``)
+            without forking the whole config. A missing file is ignored (warns).
 
     Returns:
         Validated AppConfig instance
 
     Note:
-        Falls back to default configuration if no config file is found.
+        Falls back to default configuration if no base config file is found.
         This allows running without explicit configuration in development.
     """
     # Determine config file path
@@ -1950,6 +2049,15 @@ def load_app_config(config_path: Path | None = None) -> AppConfig:
 
     try:
         raw_config = load_yaml_config(config_path)
+        if overlay_path is not None:
+            if overlay_path.exists():
+                raw_config = _deep_merge_dicts(raw_config, load_yaml_config(overlay_path))
+                logger.info(f"Applied config overlay from {overlay_path}")
+            else:
+                logger.warning(
+                    f"APP_CONFIG_OVERLAY set but not found at {overlay_path}; "
+                    "using base config only"
+                )
         config = AppConfig.model_validate(raw_config)
         logger.info(f"Loaded configuration from {config_path}")
         return config
@@ -1962,12 +2070,19 @@ def get_app_config() -> AppConfig:
     """Get the cached application configuration.
 
     This is the primary entry point for accessing configuration.
-    Supports APP_CONFIG_PATH environment variable to override default config path.
+
+    Environment overrides:
+        APP_CONFIG_PATH: override the base config file path.
+        APP_CONFIG_OVERLAY: optional partial config deep-merged onto the base
+            (overrides only) — per-target overrides without forking the whole
+            config (e.g. ``config/app.fevm.yaml`` on the fevm deployment).
     """
     config_path_str = os.getenv("APP_CONFIG_PATH")
-    if config_path_str:
-        return load_app_config(Path(config_path_str))
-    return load_app_config()
+    overlay_path_str = os.getenv("APP_CONFIG_OVERLAY")
+    return load_app_config(
+        Path(config_path_str) if config_path_str else None,
+        Path(overlay_path_str) if overlay_path_str else None,
+    )
 
 
 def clear_config_cache() -> None:

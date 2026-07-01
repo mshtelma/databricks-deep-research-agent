@@ -24,6 +24,7 @@ from deep_research.api.v1.agents_v2 import (
     _build_critic_llm,
     _critic_warning_header_value,
     _extract_intent_from_definition,
+    _raise_if_coverage_blocks,
     _raise_if_validation_blocks,
     _response_with_validation,
     _run_save_validation,
@@ -679,3 +680,45 @@ class TestCreateAdvisoryDecoupling:
         assert resp.validation is not None
         assert resp.validation.verdict == "needs_revision"
         assert len(bt.tasks) == 0
+
+
+class TestRaiseIfCoverageBlocks:
+    """Deterministic prompt-term coverage save gate — force-overridable, no LLM."""
+
+    _TERMS = ["fundamentals", "earnings", "competitors"]
+
+    def _definition(self, synth_system_prompt: str) -> dict:
+        return {
+            "required_prompt_terms": self._TERMS,
+            "root": {
+                "id": "root",
+                "type": "sequence",
+                "config": {},
+                "children": [
+                    {
+                        "id": "synth",
+                        "type": "agent",
+                        "label": "Synthesizer",
+                        "config": {
+                            "subtype": "synthesizer",
+                            "system_prompt": synth_system_prompt,
+                        },
+                        "children": [],
+                    }
+                ],
+            },
+        }
+
+    def test_blocks_uncovered_without_force(self) -> None:
+        with pytest.raises(HTTPException) as excinfo:
+            _raise_if_coverage_blocks(self._definition("Generic synthesis."), force=False)
+        assert excinfo.value.status_code == 422
+        assert "coverage_errors" in excinfo.value.detail
+
+    def test_force_bypasses(self) -> None:
+        # No raise even though the workflow is uncovered.
+        _raise_if_coverage_blocks(self._definition("Generic synthesis."), force=True)
+
+    def test_covered_passes(self) -> None:
+        sp = "Synthesize covering fundamentals, earnings, and competitors."
+        _raise_if_coverage_blocks(self._definition(sp), force=False)

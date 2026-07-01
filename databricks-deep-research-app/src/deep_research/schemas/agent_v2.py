@@ -147,6 +147,16 @@ class AgentV2Summary(BaseModel):
             "agent_deployments at list time."
         ),
     )
+    default_verify_sources: bool = Field(
+        default=True,
+        description=(
+            "The agent's authored default for expensive NLI 'verify sources': "
+            "True if its synthesizer uses grounding_mode='reclaim' (verify), False "
+            "for classical_lite/none (cite-only). The chat composer seeds the "
+            "'Verify sources' toggle from this so it reflects the agent's intent; "
+            "the toggle then fully overrides it per run."
+        ),
+    )
 
 
 class AgentV2ListResponse(BaseModel):

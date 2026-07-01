@@ -13,6 +13,7 @@ template version 2026-05-28.1 is what these tests guard.
 """
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import io
 import json
@@ -321,3 +322,347 @@ async def test_purely_web_workflow_bypasses_obo_gate(
 # helper directly; its integrated behavior is exercised by the
 # ``_WORKFLOW_REQUIRES_DATABRICKS`` assertions in the fail-closed / local-dev /
 # purely-web tests above.
+
+
+def _parallel_lanes_revision_binding_undeclared_web() -> tuple[MagicMock, MagicMock]:
+    """A parallel_lanes agent whose lanes bind ``web_research`` while the
+    workflow-level ``tools`` list is EMPTY — the exact production AST that
+    failed in the shell app with "missing declared tools: ['web_research']".
+    """
+    agent = MagicMock(id=uuid4(), name="Correlated Stocks Researcher")
+    revision = MagicMock(
+        rev_id=uuid4(),
+        definition={
+            "id": "shell-app-lanes",
+            "name": "correlated-stocks",
+            "version": 1,
+            "tools": [],  # the bug: nothing declared, yet lanes bind web_research
+            "root": {
+                "id": "root",
+                "type": "sequence",
+                "label": "Root",
+                "children": [
+                    {
+                        "id": "coordinator",
+                        "type": "agent",
+                        "label": "Coordinator",
+                        "config": {"subtype": "coordinator", "output_key": "plan"},
+                    },
+                    {
+                        "id": "research",
+                        "type": "parallel",
+                        "label": "Research",
+                        "children": [
+                            {
+                                "id": "lane_1-researcher",
+                                "type": "agent",
+                                "label": "Lane 1",
+                                "config": {
+                                    "subtype": "researcher",
+                                    "output_key": "findings_1",
+                                    "tools": ["web_research"],
+                                },
+                            },
+                            {
+                                "id": "lane_2-researcher",
+                                "type": "agent",
+                                "label": "Lane 2",
+                                "config": {
+                                    "subtype": "researcher",
+                                    "output_key": "findings_2",
+                                    "tools": ["web_research"],
+                                },
+                            },
+                        ],
+                    },
+                    {
+                        "id": "synth",
+                        "type": "agent",
+                        "label": "Synthesizer",
+                        "config": {"subtype": "synthesizer", "output_key": "output"},
+                    },
+                ],
+            },
+        },
+    )
+    return agent, revision
+
+
+@pytest.mark.asyncio
+async def test_exported_parallel_lanes_agent_yaml_heals_undeclared_web_research(
+    tmp_path: Path,
+) -> None:
+    """Regression: a parallel_lanes agent whose lanes bind an undeclared
+    ``web_research`` exports an agent.yaml that the REAL framework loader heals
+    on load (no WorkflowError), and the shell app's app.yaml pins the databricks
+    web-search endpoint so the inheriting tool gets a backend."""
+    import yaml
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    exporter = ShellAppExporter()
+    agent, revision = _parallel_lanes_revision_binding_undeclared_web()
+    artifact = await exporter.translate(agent, revision, _config())
+    dest = tmp_path / "lanes-app"
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+        zf.extractall(dest)
+
+    agent_yaml = yaml.safe_load((dest / "agent.yaml").read_text("utf-8"))
+    # The baked AST is the broken one (verbatim export) ...
+    assert agent_yaml.get("tools") in (None, [])
+    # ... but the real loader heals it: web_research is declared, so execution
+    # no longer raises "missing declared tools".
+    definition = load_workflow_from_dict(agent_yaml)
+    declared = {t.name for t in definition.tools}
+    assert "web_research" in declared
+
+    # Gap B: the shell app pins the databricks web-search endpoint (config-driven)
+    # so an inheriting web tool has a backend without a Brave key.
+    app_yaml_text = (dest / "app.yaml").read_text("utf-8")
+    assert "DATABRICKS_WEB_SEARCH_ENDPOINT" in app_yaml_text
+
+
+# ---------------------------------------------------------------------------
+# Async-dispatch run registry + resume (LAYER 2 — survives the Databricks Apps
+# gateway's absolute connection cap that severs a streamed response mid-run).
+# ---------------------------------------------------------------------------
+
+
+async def _load_registry_module(
+    tool_kinds: list[str], dest: Path, monkeypatch: pytest.MonkeyPatch
+) -> ModuleType:
+    """Render + import a shell-app ``app.py`` (with module side effects mocked)
+    so tests can drive its inline ``_RunRegistry``."""
+    monkeypatch.delenv("DATABRICKS_APP_NAME", raising=False)
+    app_dir = await _render_and_unpack(tool_kinds, dest)
+    return _load_app_module(app_dir)
+
+
+def _sse_events(body: str) -> list[dict[str, str]]:
+    """Parse an SSE response body into ``{event, id?, data}`` frames.
+
+    Pure keepalive / comment frames (no ``data:`` line) are skipped, mirroring
+    the shell-app frontend's ``handleFrame``.
+    """
+    body = body.replace("\r\n", "\n").replace("\r", "\n")
+    frames: list[dict[str, str]] = []
+    for block in body.split("\n\n"):
+        if not block.strip():
+            continue
+        frame: dict[str, str] = {}
+        data_lines: list[str] = []
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                frame["event"] = line[len("event:") :].strip()
+            elif line.startswith("id:"):
+                frame["id"] = line[len("id:") :].strip()
+            elif line.startswith("data:"):
+                data_lines.append(line[len("data:") :].lstrip())
+        if not data_lines:
+            continue
+        frame["data"] = "\n".join(data_lines)
+        frames.append(frame)
+    return frames
+
+
+@pytest.mark.asyncio
+async def test_run_registry_drain_resume_and_no_dupes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_app_module: None
+) -> None:
+    """A drained run buffers every frame with sequential ``id``s; a resume from
+    ``start_seq=k`` replays only ``events[k:]`` (no dupes, no loss, terminal
+    frame included), and a resume past the end yields nothing."""
+    app_module = await _load_registry_module(
+        ["web_search"], tmp_path / "reg1", monkeypatch
+    )
+    reg = app_module._RunRegistry(ttl_seconds=100, idle_grace_seconds=100)
+
+    async def _producer():
+        yield {"event": "node_started", "data": json.dumps({"node_id": "n"})}
+        yield {"event": "node_completed", "data": json.dumps({"node_id": "n"})}
+        yield {"event": "complete", "data": json.dumps({"output": "FINAL"})}
+
+    run = reg.start(owner="u", run_id="r1", producer=_producer())
+    first = [f async for f in reg.stream(run, start_seq=0)]
+    assert [f["event"] for f in first] == [
+        "node_started",
+        "node_completed",
+        "complete",
+    ]
+    assert [f["id"] for f in first] == ["0", "1", "2"]
+    assert run.status == "done"
+
+    resumed = [f async for f in reg.stream(run, start_seq=1)]
+    assert [f["event"] for f in resumed] == ["node_completed", "complete"]
+    assert [f["id"] for f in resumed] == ["1", "2"]
+
+    # since past the buffer end → nothing replayed, returns cleanly (terminal).
+    tail = [f async for f in reg.stream(run, start_seq=99)]
+    assert tail == []
+
+
+@pytest.mark.asyncio
+async def test_run_registry_reader_detach_does_not_cancel_producer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_app_module: None
+) -> None:
+    """A reader disconnect (the gateway cut) must NOT cancel the producer; a
+    later reader resumes and receives the frames produced while disconnected."""
+    app_module = await _load_registry_module(
+        ["web_search"], tmp_path / "reg2", monkeypatch
+    )
+    reg = app_module._RunRegistry(ttl_seconds=100, idle_grace_seconds=100)
+    gate = asyncio.Event()
+
+    async def _producer():
+        yield {"event": "a", "data": "{}"}
+        await gate.wait()
+        yield {"event": "b", "data": "{}"}
+        yield {"event": "complete", "data": "{}"}
+
+    run = reg.start(owner="u", run_id="r2", producer=_producer())
+    agen = reg.stream(run, start_seq=0)
+    first = await agen.__anext__()
+    assert first["event"] == "a"
+    await agen.aclose()  # reader detaches mid-run (simulated gateway cut)
+    assert run.status == "running"  # producer survives the detach
+
+    gate.set()
+    resumed = [f async for f in reg.stream(run, start_seq=1)]
+    assert [f["event"] for f in resumed] == ["b", "complete"]
+    assert run.status == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_registry_producer_error_and_owner_scope(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_app_module: None
+) -> None:
+    """A producer exception is surfaced as a sanitized ``error`` terminal frame
+    (status ``error``); ``get`` is owner-scoped; the per-owner cap counts
+    in-flight runs."""
+    app_module = await _load_registry_module(
+        ["web_search"], tmp_path / "reg3", monkeypatch
+    )
+
+    # Producer error → sanitized terminal.
+    reg = app_module._RunRegistry(ttl_seconds=100, idle_grace_seconds=100)
+
+    async def _boom():
+        yield {"event": "a", "data": "{}"}
+        raise ValueError("boom")
+
+    run = reg.start(owner="u", run_id="rb", producer=_boom())
+    frames = [f async for f in reg.stream(run, start_seq=0)]
+    assert frames[0]["event"] == "a"
+    assert frames[-1]["event"] == "error"
+    assert json.loads(frames[-1]["data"])["error_kind"] == "runtime_error"
+    assert run.status == "error"
+
+    # Owner-scoped get: foreign / unknown ids return None.
+    async def _finite():
+        yield {"event": "complete", "data": "{}"}
+
+    owned = reg.start(owner="alice", run_id="r5", producer=_finite())
+    await owned._task
+    assert reg.get("r5", owner="bob") is None
+    assert reg.get("ghost", owner="alice") is None
+    assert reg.get("r5", owner="alice") is owned
+
+    # Per-owner active count (in-flight runs only).
+    cap_reg = app_module._RunRegistry(
+        per_user_max=2, ttl_seconds=100, idle_grace_seconds=100
+    )
+    gate = asyncio.Event()
+
+    async def _gated():
+        yield {"event": "a", "data": "{}"}
+        await gate.wait()
+
+    gated_runs = [
+        cap_reg.start(owner="u", run_id=f"c{i}", producer=_gated()) for i in range(2)
+    ]
+    assert cap_reg.active_count_for_owner("u") == 2
+    assert cap_reg.active_count_for_owner("other") == 0
+    assert cap_reg.active_count_for_owner("u") >= cap_reg.per_user_max
+    gate.set()
+    for r in gated_runs:
+        if r._task is not None:
+            await r._task
+
+
+@pytest.mark.asyncio
+async def test_run_registry_sweep_evicts_terminal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_app_module: None
+) -> None:
+    """``sweep`` evicts terminal, reader-less runs past the TTL."""
+    app_module = await _load_registry_module(
+        ["web_search"], tmp_path / "reg4", monkeypatch
+    )
+    reg = app_module._RunRegistry(ttl_seconds=0, idle_grace_seconds=100)
+
+    async def _finite():
+        yield {"event": "complete", "data": "{}"}
+
+    run = reg.start(owner="u", run_id="rs", producer=_finite())
+    _ = [f async for f in reg.stream(run, start_seq=0)]
+    assert run.is_terminal
+    await asyncio.sleep(0.01)  # let last_access age past the zero TTL
+    assert reg.sweep() == 1
+    assert reg.get("rs", owner="u") is None
+
+
+@pytest.mark.asyncio
+async def test_resume_endpoint_replays_buffered_frames(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cleanup_app_module: None
+) -> None:
+    """End-to-end: POST buffers the run; GET …/events?since=N replays the slice
+    (including the terminal ``complete``); an unknown id → ``expired`` frame."""
+    app_module = await _load_registry_module(
+        ["web_search"], tmp_path / "reg5", monkeypatch
+    )
+
+    class _FakeEvent:
+        def __init__(self, event_type: str) -> None:
+            self.event_type = event_type
+            self.node_id = "n"
+
+        def model_dump_json(self) -> str:
+            return json.dumps({"node_id": "n"})
+
+    async def _fake_stream(**_kwargs: Any):
+        for et in ("workflow_started", "node_started", "node_completed"):
+            yield _FakeEvent(et)
+
+    fake_runner = MagicMock()
+    fake_runner.stream = _fake_stream
+    fake_runner.last_result = SimpleNamespace(output="FINAL", sources=[])
+    monkeypatch.setattr(
+        app_module, "_build_per_request_runner", lambda token: fake_runner
+    )
+
+    # A single persistent portal/event-loop so the run's asyncio.Condition
+    # created during POST is reusable by the resume GET.
+    with TestClient(app_module.app) as client:
+        resp = client.post("/api/chat", json={"query": "q"})
+        assert resp.status_code == 200
+        run_id = resp.headers["x-shell-app-request-id"]
+        post_events = _sse_events(resp.text)
+        assert [e["event"] for e in post_events] == [
+            "workflow_started",
+            "node_started",
+            "node_completed",
+            "complete",
+        ]
+        assert [e["id"] for e in post_events] == ["0", "1", "2", "3"]
+
+        resume = client.get(f"/api/chat/{run_id}/events?since=2")
+        assert resume.status_code == 200
+        resume_events = _sse_events(resume.text)
+        assert [e["event"] for e in resume_events] == ["node_completed", "complete"]
+        assert [e["id"] for e in resume_events] == ["2", "3"]
+        assert json.loads(resume_events[-1]["data"])["output"] == "FINAL"
+
+        miss = client.get("/api/chat/does-not-exist/events?since=0")
+        assert miss.status_code == 200
+        miss_events = _sse_events(miss.text)
+        assert miss_events[0]["event"] == "error"
+        assert json.loads(miss_events[0]["data"])["error_kind"] == "expired"

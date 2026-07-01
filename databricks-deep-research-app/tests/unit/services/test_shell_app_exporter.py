@@ -425,14 +425,21 @@ class TestTranslate:
             html = zf.read("static/index.html").decode("utf-8")
 
         assert "replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n')" in html
-        assert "buffer.split(/\\n\\n+/)" in html
+        assert "streamBuffer.split(/\\n\\n+/)" in html
         assert "const dataText = dataLines.join('\\n')" in html
         assert "drainFrames(true)" in html
         assert "X-Shell-App-Template-Version" in html
         assert "2026-05-28.1" in html
         assert "[shell-app] stream frame" in html
-        assert html.count("let buffer = '';") == 1
-        assert html.index("let buffer = '';") < html.index("function drainFrames")
+        assert html.count("let streamBuffer = '';") == 1
+        assert html.index("let streamBuffer = '';") < html.index("function drainFrames")
+        # LAYER-2 reconnect/resume wiring is present in the rendered UI: the
+        # frontend tracks the run id, resumes from the last sequence, and offers
+        # a stopgap Retry when the gateway severs the stream.
+        assert "function driveReconnect" in html
+        assert "function showStopgap" in html
+        assert "encodeURIComponent(runId)" in html
+        assert "/events?since=" in html
         assert "function renderMarkdown" in html
         assert "function appendActivity" in html
         assert "function renderFinalAnswer" in html
@@ -460,6 +467,7 @@ class TestTranslate:
         assert "BRAVE_API_KEY" in app_yaml
         assert "valueFrom: 'brave-api-key'" in app_yaml
         assert artifact.metadata["requires_web_search"] == "true"
+        assert artifact.metadata["uses_brave"] == "true"
 
     @pytest.mark.asyncio
     async def test_inherited_web_search_bundle_does_not_bind_brave_secret(self) -> None:
@@ -476,6 +484,7 @@ class TestTranslate:
         assert "BRAVE_API_KEY" not in databricks_yml
         assert "BRAVE_API_KEY" not in app_yaml
         assert artifact.metadata["requires_web_search"] == "true"
+        assert artifact.metadata["uses_brave"] == "false"
 
     @pytest.mark.asyncio
     async def test_non_web_search_bundle_does_not_bind_brave_secret(self) -> None:
@@ -489,6 +498,7 @@ class TestTranslate:
         assert "BRAVE_API_KEY" not in databricks_yml
         assert "BRAVE_API_KEY" not in app_yaml
         assert artifact.metadata["requires_web_search"] == "false"
+        assert artifact.metadata["uses_brave"] == "false"
 
     @pytest.mark.asyncio
     async def test_table_tool_bundle_binds_storage_warehouse(
@@ -563,6 +573,9 @@ class TestTranslate:
         assert wheel_filename.endswith("-py3-none-any.whl")
         assert artifact.metadata["framework_wheel_version"] != "unknown"
         assert len(artifact.metadata["sha256"]) == 64
+        # Brave is gated on an explicit provider: brave; a default agent has none.
+        assert artifact.metadata["uses_brave"] == "false"
+        assert artifact.metadata["requires_web_search"] == "false"
 
     @pytest.mark.asyncio
     async def test_entrypoint_sh_is_executable_in_zip(self) -> None:
@@ -767,3 +780,45 @@ class TestDeactivate:
         # Idempotency: second call against the same empty-state row is also noop
         result2 = await translator.deactivate(deployment)
         assert result2 is None
+
+
+# ---------------------------------------------------------------------------
+# _definition_uses_web_search — must detect ALL builtin web kinds, declared OR
+# bound by-name in a node's config.tools (the binding-vs-declaration case).
+# Regression: previously only matched a declared ``web_search`` dict, so a
+# parallel_lanes agent binding ``web_research`` by name reported no web usage
+# and the shell app never pinned the databricks search endpoint.
+# ---------------------------------------------------------------------------
+
+from deep_research.services.deployment.shell_app import (  # noqa: E402
+    _definition_uses_web_search,
+)
+
+
+@pytest.mark.parametrize("kind", ["web_search", "web_research", "web_crawl"])
+def test_uses_web_search_detects_declared_kind(kind: str) -> None:
+    defn = {"tools": [{"name": kind, "kind": kind, "config": {}}], "root": {}}
+    assert _definition_uses_web_search(defn) is True
+
+
+@pytest.mark.parametrize("kind", ["web_search", "web_research", "web_crawl"])
+def test_uses_web_search_detects_node_bound_string_ref(kind: str) -> None:
+    # No top-level declaration; the lane binds the kind by name (the bug shape).
+    defn = {
+        "tools": [],
+        "root": {
+            "type": "parallel",
+            "children": [
+                {"type": "agent", "config": {"tools": [kind]}},
+            ],
+        },
+    }
+    assert _definition_uses_web_search(defn) is True
+
+
+def test_uses_web_search_false_for_non_web() -> None:
+    defn = {
+        "tools": [{"name": "idx", "kind": "vector_search", "config": {}}],
+        "root": {"type": "agent", "config": {"tools": ["idx"]}},
+    }
+    assert _definition_uses_web_search(defn) is False

@@ -187,15 +187,22 @@ class TestFilterWorkflowTools:
     """Tests for the _filter_workflow_tools function."""
 
     def test_tool_filtering(self) -> None:
-        """Tools not in available_tools should be removed from agent nodes."""
+        """Unresolvable tools are removed from agent nodes; resolvable ones stay.
+
+        The loader heals node-bound builtin web tools (web_search/web_crawl) into
+        workflow declarations, so they are resolvable via the factory chain and
+        survive filtering even when not in ``available_tools``. Only the genuine
+        ``custom_tool`` (undeclared, non-builtin) is stripped.
+        """
         from databricks_deep_research import load_workflow_from_string
 
         defn = load_workflow_from_string(MINIMAL_YAML)
-        # Only web_search is available; web_crawl and custom_tool should be removed
         _filter_workflow_tools(defn, ["web_search"])
 
         researcher = defn.root.children[0]
-        assert researcher.config["tools"] == ["web_search"]
+        # web_crawl was auto-declared by the loader heal → resolvable → kept.
+        assert researcher.config["tools"] == ["web_search", "web_crawl"]
+        assert "custom_tool" not in researcher.config["tools"]
 
     def test_all_tools_available(self) -> None:
         """When all tools are available, nothing is removed."""

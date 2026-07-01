@@ -888,30 +888,121 @@ def test_default_web_tool_decls_excludes_web_crawl_by_default() -> None:
     assert kinds_with_crawl == {"web_research", "web_crawl"}
 
 
-def test_placeholder_system_prompt_mandates_web_research_first() -> None:
-    """Plan v2.1 generic-robustness F2 — placeholder system_prompt
-    explicitly sequences web_research BEFORE web_crawl so a runtime
-    agent that has web_crawl bound (rare; architect-customized) does
-    not speculatively call it with url_index=0 before any search."""
+def test_placeholder_system_prompt_is_tool_agnostic_no_web_crawl() -> None:
+    """Generic-robustness — the lane placeholder system_prompt is a
+    TOOL-AGNOSTIC functional default. It must NOT recommend ``web_crawl``
+    (not bound by default) or any other tool a given lane may lack; it
+    points the agent at whatever tools ARE bound and keeps the output
+    contract + citation discipline. (web_crawl in lane prompts produced an
+    unrealizable tool-call path the designer critic correctly flags.)"""
     from deep_research.agent_designer.blueprint import (
         _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE,
     )
 
-    text = _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE.lower()
-    # The web_research bullet must say "FIRST" before the web_crawl bullet.
-    research_idx = text.find("web_research")
-    crawl_idx = text.find("web_crawl")
-    assert research_idx != -1
-    assert crawl_idx != -1
-    assert research_idx < crawl_idx, (
-        "web_research must be mentioned BEFORE web_crawl in the placeholder"
+    text = _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE
+    assert "web_crawl" not in text, (
+        "placeholder system_prompt must not recommend the unbound web_crawl tool"
     )
-    assert "first" in text[: crawl_idx], (
-        "the web_research bullet must use the word 'first' as the sequencer"
+    # Still a functional, tool-agnostic default.
+    assert "{lane_focus}" in text
+    assert "tools bound to this lane" in text
+    assert "Data unavailable" in text
+    # Tool-blind placeholder must not assume a corpus is bound either.
+    assert "corpus" not in text.lower()
+    assert "chunk_id" not in text
+
+
+def test_blueprint_web_lanes_have_no_web_crawl_in_prompts() -> None:
+    """Regression (investment/web_only) — neither the placeholder
+    system_prompt nor the web-lane ``Search strategy`` user_prompt_template
+    may reference the unbound ``web_crawl`` tool. The critic flagged this as
+    an unrealizable tool-call path; only ``web_research`` is bound."""
+    sig = _investment_signature()
+    ast = build_blueprint(sig, "Build an investment research assistant", [])
+
+    offenders: list[tuple[str, str]] = []
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        cfg = node.get("config") or {}
+        if node.get("type") == "agent" and isinstance(cfg, dict):
+            for field in ("system_prompt", "user_prompt_template"):
+                txt = cfg.get(field) or ""
+                if isinstance(txt, str) and "web_crawl" in txt:
+                    offenders.append((str(node.get("id")), field))
+        if isinstance(cfg, dict) and isinstance(cfg.get("body"), dict):
+            _walk(cfg["body"])
+        for child in node.get("children") or []:
+            _walk(child)
+
+    _walk(ast.get("root") or {})
+    assert not offenders, f"web_crawl leaked into lane prompts: {offenders}"
+
+
+def test_citation_guidance_is_evidence_policy_aware() -> None:
+    """``_citation_guidance`` derives the citation format from the contract's
+    ``evidence_policy`` — never naming a modality the workflow does not use.
+    ``web_only`` (and a missing contract) must NOT mention a corpus, while
+    corpus/structured/mixed builds keep the (file_name, page_info, chunk_id)
+    guidance so corpus workflows do not regress."""
+    from deep_research.agent_designer.blueprint import _citation_guidance
+    from deep_research.agent_designer.designer_types import ResolvedToolContract
+
+    web = _citation_guidance(ResolvedToolContract(evidence_policy="web_only"))
+    assert "URL" in web
+    assert "corpus" not in web.lower() and "chunk_id" not in web
+    # No resolved contract → conservative web-only default (never corpus).
+    assert _citation_guidance(None) == web
+
+    for policy in ("corpus_only", "structured_only", "corpus_plus_web"):
+        guidance = _citation_guidance(ResolvedToolContract(evidence_policy=policy))
+        assert "chunk_id" in guidance, (
+            f"{policy} must retain corpus citation guidance, got: {guidance}"
+        )
+
+
+def test_blueprint_web_only_contract_has_no_corpus_refs_in_prompts() -> None:
+    """Regression (investment / web_only) — when prompt-grounding resolves a
+    ``web_only`` tool contract (no assets, only web_search ready), the
+    contract-specialized lane generators MUST NOT reference a Databricks/
+    corpus evidence source. Such a reference contradicts the contract's own
+    ``Evidence policy: web_only`` block; the now-sighted designer critic
+    correctly flags it on every lane, producing an unwinnable review loop
+    (4 inner iterations, ~8 min, no approval). Build through the CONTRACT
+    path (non-None web_only contract), which is what production uses — the
+    placeholder path is exercised separately above."""
+    from deep_research.agent_designer.designer_types import ResolvedToolContract
+
+    sig = _investment_signature()
+    contract = ResolvedToolContract(
+        evidence_policy="web_only", ready_tool_kinds=["web_search"]
     )
-    assert "url_index=0" in text, (
-        "placeholder must explicitly forbid web_crawl(url_index=0) before search"
+    ast = build_blueprint(
+        sig, "Build an investment research assistant", [], contract
     )
+
+    banned = ("databricks/corpus", "resource-grounded", "grounded resource")
+    offenders: list[tuple[str, str, str]] = []
+
+    def _walk(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        cfg = node.get("config") or {}
+        if node.get("type") == "agent" and isinstance(cfg, dict):
+            for field in ("system_prompt", "user_prompt_template"):
+                txt = cfg.get(field) or ""
+                low = txt.lower() if isinstance(txt, str) else ""
+                for term in banned:
+                    if term in low:
+                        offenders.append((str(node.get("id")), field, term))
+        if isinstance(cfg, dict) and isinstance(cfg.get("body"), dict):
+            _walk(cfg["body"])
+        for child in node.get("children") or []:
+            _walk(child)
+
+    _walk(ast.get("root") or {})
+    assert not offenders, f"corpus refs leaked into web_only lane prompts: {offenders}"
 
 
 def test_lane_user_prompt_search_strategy_mandates_web_research_first() -> None:

@@ -1225,6 +1225,31 @@ def detect_generic_reflector_prompt(
     return errors
 
 
+def prompt_term_coverage_errors(
+    definition: dict[str, Any],
+) -> list[SemanticValidationError]:
+    """Blocking save-gate coverage: the report-producing synthesizer must reference the
+    workflow's required-domain terms, so a saved agent actually covers every requested
+    topic. Reuses :func:`detect_generic_synthesizer_prompt`, which already strips the
+    appended ``## Designer Goal`` block before matching (so a generic synthesizer cannot
+    pass on the goal text alone). Terms are domain-derived (``required_prompt_terms`` /
+    description nouns), NEVER hardcoded. Returns ``[]`` when there is no synthesizer or
+    too few terms to judge, so it never false-blocks (e.g. legacy/single-agent ASTs)."""
+    # Re-tag as a distinct, force-overridable "coverage" kind (vs the always-blocking
+    # structural errors) so the UI can offer a "Save draft anyway" path.
+    # SemanticValidationError is frozen — build fresh instances rather than mutating.
+    return [
+        SemanticValidationError(
+            message=err.message,
+            path=err.path,
+            line=err.line,
+            kind="coverage",
+            severity=err.severity,
+        )
+        for err in detect_generic_synthesizer_prompt(definition)
+    ]
+
+
 _CONTRACT_REQUIRED_TOOL_KINDS = {
     "vector_search",
     "table_search",

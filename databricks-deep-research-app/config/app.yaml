@@ -349,6 +349,30 @@ research_types:
         max_atomic_facts_per_claim: 7  # More facts for deep research
         max_searches_per_fact: 2       # Full budget
 
+# Effort/depth dial for CUSTOM agents (Designer-built workflows). A single
+# effort level proportionally scales a saved workflow's researcher max_tool_calls
+# and loop / plan_and_execute max_iterations at runtime. 'standard' (1.0) is a
+# strict no-op. Multipliers scale the EXISTING per-node value, so author tuning is
+# preserved at relative scale. (Built-in deep research uses research_types above,
+# not this — the overlay is gated to custom agents to avoid double-counting.)
+agent_effort:
+  multipliers:
+    light: 0.5
+    standard: 1.0
+    deep: 2.5
+  max_tool_calls_min: 3
+  max_tool_calls_max: 60
+  max_iterations_min: 1
+  max_iterations_max: 20
+
+# Runtime orchestration settings
+orchestration:
+  # Hard wall-clock cap (seconds) on a single research run (H1 watchdog).
+  # When exceeded, the job is terminated and marked failed. Tunable per-target
+  # via the app-config overlay (e.g. raised on slower-search workspaces where a
+  # heavy multi-lane agent needs >30 min). Bounds: 60–14400.
+  research_timeout_seconds: 1800   # 30 minutes
+
 # Search configuration
 search:
   # Active web-search provider for the builtin web_search tool:

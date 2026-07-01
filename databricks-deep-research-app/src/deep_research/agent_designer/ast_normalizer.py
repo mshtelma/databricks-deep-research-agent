@@ -1578,6 +1578,91 @@ def _lift_config_error_handling(
 # ---------------------------------------------------------------------------
 
 
+# Builtin web tool kinds safe to auto-declare when a node references them but the
+# workflow-level ``tools`` omits the declaration (provider-inheriting, no required
+# config). Mirrors ``framework_orchestrator._AUTO_DECLARABLE_WEB_KINDS`` (the
+# runtime net) — this is the save-time half so the persisted AST is consistent.
+_AUTO_DECLARABLE_WEB_KINDS: frozenset[str] = frozenset(
+    {"web_search", "web_research", "web_crawl"}
+)
+
+
+def _reconcile_referenced_tools(ast: dict[str, Any], ctx: _NormalizerContext) -> None:
+    """Declare builtin web tools a node binds but the workflow ``tools`` omits.
+
+    Closes the binding-vs-declaration gap in
+    ``workflow_builder._tool_plan_bindings``: when a tool_plan is present but a
+    lane has no matching binding AND the plan declares no evidence tools, the lane
+    falls back to the hardcoded ``["web_research"]`` default while the workflow's
+    ``tools`` declares only the architect's tool-plan tools — so the lane binds a
+    tool that was never declared and the executor fail-closes under strict tool
+    resolution ("missing declared tools: ['web_research']"). Only provider-
+    inheriting builtin web kinds are synthesized; any other undeclared ref is left
+    for validation to surface (we never invent corpus / index config).
+    """
+    raw_tools = ast.get("tools")
+    existing: list[Any] = raw_tools if isinstance(raw_tools, list) else []
+    declared: set[str] = set()
+    for t in existing:
+        if isinstance(t, dict):
+            nm = t.get("name")
+            if isinstance(nm, str) and nm:
+                declared.add(nm)
+
+    referenced: list[str] = []
+    seen: set[str] = set()
+
+    def _collect(config: Any) -> None:
+        if not isinstance(config, dict):
+            return
+        for ref in config.get("tools") or []:
+            if isinstance(ref, str) and ref and ref not in seen:
+                seen.add(ref)
+                referenced.append(ref)
+
+    for node, _path in _walk_nodes(ast):
+        config = node.get("config")
+        _collect(config)
+        if isinstance(config, dict):
+            _collect(config.get("planner"))
+            _collect(config.get("evaluator"))
+
+    to_add = [
+        name
+        for name in referenced
+        if name not in declared and name in _AUTO_DECLARABLE_WEB_KINDS
+    ]
+    if not to_add:
+        return  # nothing missing — never touch ``ast["tools"]`` (keeps it absent)
+
+    # Materialise the tools list only now that we have something to declare.
+    if not isinstance(raw_tools, list):
+        existing = []
+        ast["tools"] = existing
+    tools = existing
+
+    for name in to_add:
+        if name == "web_research":
+            cfg: dict[str, Any] = {"total_results": 10, "auto_fetch_top_k": 5}
+        elif name == "web_search":
+            cfg = {"max_results": 10}
+        else:  # web_crawl
+            cfg = {}
+        tools.append({"name": name, "kind": name, "config": cfg, "description": ""})
+        declared.add(name)
+        ctx.record(
+            kind="declare_node_bound_tool",
+            path="tools",
+            before=None,
+            after=name,
+            rationale=(
+                f"Agent node binds builtin web tool {name!r} but it was not declared "
+                f"at the workflow level; added a provider-inheriting declaration so "
+                f"strict tool resolution can resolve it."
+            ),
+        )
+
+
 def normalize_ast(
     ast: dict[str, Any],
 ) -> tuple[dict[str, Any], list[NormalizationFix]]:
@@ -1606,6 +1691,7 @@ def normalize_ast(
     _normalize_synthesizer_grounding(new_ast, ctx)
     _set_minimum_max_tool_calls(new_ast, ctx)
     _normalize_static_parallel_researchers(new_ast, ctx)
+    _reconcile_referenced_tools(new_ast, ctx)
     _normalize_researcher_user_prompts(new_ast, ctx)
     _escape_literal_braces_in_prompts(new_ast, ctx)
     return new_ast, list(ctx.fixes)

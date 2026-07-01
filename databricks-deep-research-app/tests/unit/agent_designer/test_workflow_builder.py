@@ -330,7 +330,7 @@ def test_fallback_lane_prompt_corpus_only_uses_retrieval_strategy() -> None:
     assert "chunk_id" in text
     # Forbidden legacy tokens for corpus-only:
     assert "official documents" not in text
-    assert "Crawl or retrieve" not in text
+    assert "Read the fetched" not in text
 
 
 def test_fallback_lane_prompt_web_keeps_legacy_block() -> None:
@@ -344,7 +344,7 @@ def test_fallback_lane_prompt_web_keeps_legacy_block() -> None:
     )
     assert "Search strategy" in text
     assert "official documents" in text
-    assert "Crawl or retrieve" in text
+    assert "Read the fetched" in text
 
 
 # ---------------------------------------------------------------------------

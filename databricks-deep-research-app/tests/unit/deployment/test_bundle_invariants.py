@@ -66,27 +66,31 @@ def test_lakebase_postgres_resource_present_globally(databricks_yml: dict) -> No
 def test_target_inherits_lakebase_postgres_binding(
     databricks_yml: dict, target_name: str
 ) -> None:
-    # Sanity check: target is defined and doesn't override .resources.apps
-    # to drop lakebase-postgres. DAB merges target overrides over the
-    # global config; if a target redeclares .apps.<name>.resources, it
-    # REPLACES the global list. We refuse such an override unless this
-    # test is updated.
+    # Guard: lakebase-postgres must reach EVERY Lakebase target's deployed
+    # bundle. DAB merges target overrides over the global config by APPENDING
+    # sequence entries (verified against `databricks bundle summary`: a target
+    # that adds brave/tavily to .apps.<name>.resources still resolves WITH the
+    # global lakebase-postgres binding). So the effective resource set is the
+    # UNION of the global list and any target-level additions — assert the
+    # binding is present in that union.
     targets = databricks_yml.get("targets", {})
     assert target_name in targets, f"target {target_name!r} not declared"
 
+    global_names = {
+        r["name"]
+        for r in databricks_yml["resources"]["apps"]["deep_research_agent"]["resources"]
+    }
     override = (
         targets[target_name]
         .get("resources", {})
         .get("apps", {})
         .get("deep_research_agent", {})
         .get("resources")
-    )
-    if override is None:
-        return  # no override; inherits global config
+    ) or []
+    effective_names = global_names | {r["name"] for r in override}
 
-    overridden_names = {r["name"] for r in override}
-    assert "lakebase-postgres" in overridden_names, (
-        f"target {target_name!r} overrides apps.deep_research_agent.resources "
-        "but drops the 'lakebase-postgres' entry; the binding must be present "
-        "for every Lakebase target."
+    assert "lakebase-postgres" in effective_names, (
+        f"target {target_name!r} resolves apps.deep_research_agent.resources "
+        "without the 'lakebase-postgres' entry; the binding must be present for "
+        "every Lakebase target (global list + any target-level additions)."
     )

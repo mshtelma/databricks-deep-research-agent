@@ -126,6 +126,159 @@ describe('ChatPanel', () => {
     expect(assistantContainer).toHaveClass('justify-start');
   });
 
+  it('renders the "What I built" synopsis card from an assistant turn', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeUserMessage('build a market research agent'),
+          {
+            role: 'assistant',
+            content: '',
+            synopsis: {
+              headline: 'Built a parallel lanes workflow · 2 lanes',
+              topology: 'parallel_lanes',
+              change_kind: 'created',
+              lanes: [
+                { label: 'Market Sizing Researcher', tools: ['web_search'] },
+                { label: 'Competitor Researcher', tools: ['web_search', 'vector_search'] },
+              ],
+              pipeline: ['Coordinator', 'Report Synthesizer'],
+              tools: ['web_search', 'vector_search'],
+              outputs: [],
+              warnings: [
+                '1 lane still uses a default prompt — consider customizing the research focus.',
+              ],
+            },
+          },
+        ],
+      }),
+    );
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Built a parallel lanes workflow · 2 lanes')).toBeInTheDocument();
+    expect(screen.getByText('Market Sizing Researcher')).toBeInTheDocument();
+    expect(screen.getByText(/1 lane still uses a default prompt/)).toBeInTheDocument();
+  });
+
+  it('renders the "Designer review" critic card with verdict and findings', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeUserMessage('build it'),
+          {
+            role: 'assistant',
+            content: '',
+            review: {
+              verdict: 'needs_revision',
+              summary: 'The pricing lane is shallow.',
+              agent_findings: [
+                {
+                  node_path: 'root.children[1]',
+                  label: 'Pricing Researcher',
+                  severity: 'needs_revision',
+                  finding: 'Does not cover competitor pricing.',
+                  suggested_action: 'update_block',
+                },
+              ],
+              coverage_gaps: [],
+              output_gaps: [],
+            },
+          },
+        ],
+      }),
+    );
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Designer review')).toBeInTheDocument();
+    expect(screen.getByText('Needs revision')).toBeInTheDocument();
+    expect(screen.getByText('The pricing lane is shallow.')).toBeInTheDocument();
+    expect(screen.getByText('Pricing Researcher')).toBeInTheDocument();
+  });
+
+  it('renders a "pass" critic review card (verdict pass, no findings)', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeUserMessage('build it'),
+          {
+            role: 'assistant',
+            content: '',
+            review: {
+              verdict: 'pass',
+              summary: 'The reviewer approved this workflow — no blocking issues found.',
+              agent_findings: [],
+              coverage_gaps: [],
+              output_gaps: [],
+            },
+          },
+        ],
+      }),
+    );
+    render(<ChatPanel />);
+
+    expect(screen.getByText('Designer review')).toBeInTheDocument();
+    expect(screen.getByText('Pass')).toBeInTheDocument();
+    expect(screen.getByText(/approved this workflow/)).toBeInTheDocument();
+  });
+
+  it('renders the persistent "Designer activity" feed from accumulated progress steps', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeUserMessage('build it'),
+          {
+            role: 'assistant',
+            content: '',
+            activity: [
+              { label: 'Workflow Architect (Opus)', iteration: null, total: null },
+              { label: 'Refining', iteration: 2, total: 4 },
+              { label: 'Finalizing', iteration: null, total: null },
+            ],
+          },
+        ],
+      }),
+    );
+    render(<ChatPanel />);
+
+    expect(screen.getByTestId('designer-activity-feed')).toBeInTheDocument();
+    expect(screen.getByText('Workflow Architect (Opus)')).toBeInTheDocument();
+    expect(screen.getByText('Refining 2/4')).toBeInTheDocument();
+    expect(screen.getByText('Finalizing')).toBeInTheDocument();
+  });
+
+  it('collapses tool steps behind a closed-by-default "Designer activity" disclosure', () => {
+    mockUseChatSession.mockReturnValue(
+      fakeSession({
+        messages: [
+          makeUserMessage('build it'),
+          {
+            role: 'assistant',
+            content: 'Here is the workflow.',
+            tool_calls: [
+              {
+                id: 'c1',
+                type: 'function',
+                function: { name: 'propose_workflow', arguments: '{"intent":"x"}' },
+              },
+            ],
+          },
+          { role: 'tool', content: '{"valid":true}', tool_call_id: 'c1', tool_name: 'validate' },
+        ],
+      }),
+    );
+    render(<ChatPanel />);
+
+    const toggle = screen.getByText(/Designer activity \(2 steps\)/).closest('button');
+    expect(toggle).not.toBeNull();
+    // Closed by default — keeps the raw tool plumbing out of the transcript.
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    // The assistant's own text still shows outside the disclosure.
+    expect(screen.getByText('Here is the workflow.')).toBeInTheDocument();
+    // Expanding reveals the underlying tool steps.
+    fireEvent.click(toggle!);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('shows streaming indicator while isStreaming is true', () => {
     mockUseChatSession.mockReturnValue(fakeSession({ isStreaming: true }));
     render(<ChatPanel />);

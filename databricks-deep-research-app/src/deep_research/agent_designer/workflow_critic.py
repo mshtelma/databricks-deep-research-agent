@@ -161,6 +161,9 @@ def _extract_agents(
                     "system_prompt_excerpt": _excerpt(
                         str(config.get("system_prompt") or "")
                     ),
+                    "user_prompt_template_excerpt": _excerpt(
+                        str(config.get("user_prompt_template") or "")
+                    ),
                     "tools_bound": list(config.get("tools") or []),
                     "model_tier": str(config.get("model_tier") or ""),
                 }
@@ -179,6 +182,9 @@ def _extract_agents(
                             "subtype": str(nested.get("subtype") or nested_key),
                             "system_prompt_excerpt": _excerpt(
                                 str(nested.get("system_prompt") or "")
+                            ),
+                            "user_prompt_template_excerpt": _excerpt(
+                                str(nested.get("user_prompt_template") or "")
                             ),
                             "tools_bound": list(nested.get("tools") or []),
                             "model_tier": str(nested.get("model_tier") or ""),
@@ -246,7 +252,7 @@ You will be given:
   - The user's original intent (the request that triggered the Designer).
   - The brief's required_outputs (what the final report must contain).
   - The workflow's runtime tool declarations.
-  - A list of every agent in the generated workflow with its label, subtype, bound tools, model_tier, and the first ~1500 chars of its system_prompt.
+  - A list of every agent in the generated workflow with its label, subtype, bound tools, model_tier, and the first ~1500 chars of BOTH its system_prompt and user_prompt_template (judge prompt content using both).
 
 Your job is to emit ONE call to the `emit_critique` tool with a structured verdict:
   - verdict = "pass"           — every agent's system_prompt addresses some aspect of the intent; required_outputs covered; workflow as built will produce a useful answer to the user's request.

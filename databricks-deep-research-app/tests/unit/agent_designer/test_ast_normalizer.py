@@ -1381,3 +1381,52 @@ class TestApplyWebSearchProviderDefaults:
 
     def test_missing_tools_key_is_noop(self) -> None:
         assert apply_web_search_provider_defaults({}, search_cfg=self._cfg()) == []
+
+
+# ---------------------------------------------------------------------------
+# reconcile_referenced_tools — node binds a builtin web tool the workflow omits
+# (regression: parallel-lane researcher binds web_research via the
+#  _tool_plan_bindings default fallback while the workflow declares only the
+#  architect's tool_plan tools → executor "missing declared tools").
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileReferencedTools:
+    def test_declares_node_bound_web_research(self) -> None:
+        # Lane binds web_research; workflow declares only a corpus tool.
+        ast = _make_ast(
+            tools=["web_research"],
+            declared_tools=[
+                {"name": "earnings_index", "kind": "vector_search", "config": {}}
+            ],
+        )
+        new, fixes = normalize_ast(ast)
+        names = {t["name"] for t in new["tools"]}
+        assert "web_research" in names
+        assert "earnings_index" in names  # pre-existing decl preserved
+        decl = next(t for t in new["tools"] if t["name"] == "web_research")
+        assert decl["kind"] == "web_research"
+        assert "provider" not in decl["config"]  # inherits ctx.search_client
+        by_kind = _fixes_by_kind(fixes)
+        assert "declare_node_bound_tool" in by_kind
+
+    def test_idempotent_when_already_declared(self) -> None:
+        ast = _make_ast(
+            tools=["web_research"],
+            declared_tools=[
+                {"name": "web_research", "kind": "web_research", "config": {}}
+            ],
+        )
+        new, fixes = normalize_ast(ast)
+        names = [t["name"] for t in new["tools"]]
+        assert names.count("web_research") == 1
+        assert "declare_node_bound_tool" not in _fixes_by_kind(fixes)
+
+    def test_does_not_synthesize_unknown_custom_tool(self) -> None:
+        ast = _make_ast(
+            tools=["proprietary_corpus"],
+            declared_tools=[],
+        )
+        new, fixes = normalize_ast(ast)
+        assert "proprietary_corpus" not in {t["name"] for t in new["tools"]}
+        assert "declare_node_bound_tool" not in _fixes_by_kind(fixes)

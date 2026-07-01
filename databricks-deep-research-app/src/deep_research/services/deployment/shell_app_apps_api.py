@@ -20,7 +20,7 @@ import os
 import tempfile
 import time
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +33,9 @@ from deep_research.services.deployment.apps_collision import (
 )
 from deep_research.services.deployment.apps_logs import fetch_app_log_tail
 from deep_research.services.deployment.github_tag_probe import probe_framework_tag
+from deep_research.services.deployment.shell_app_runtime import (
+    ShellAppRuntimeBindings,
+)
 from deep_research.services.deployment.translator import Artifact, DeploymentResult
 
 logger = logging.getLogger(__name__)
@@ -50,8 +53,6 @@ _PROBE_POLL_INTERVAL_SEC: float = 5.0
 _PROBE_TIMEOUT_SEC: float = 300.0  # 5 minutes
 _APP_NAME_PREFIX = "dr-shell-"
 _APP_NAME_MAX_LENGTH = 30
-_BRAVE_SECRET_RESOURCE_NAME = "brave-api-key"
-_SQL_WAREHOUSE_RESOURCE_NAME = "text-table-sql-warehouse"
 # OBO scopes granted to deployed shell apps. Must include both vector-search
 # scopes — endpoints-only is insufficient because the SDK calls query_index
 # against the index path, not the endpoint. Keep in sync with the bundle
@@ -86,19 +87,6 @@ class ReachabilityProbeResult:
     last_message: str | None = None
 
 
-@dataclass(frozen=True)
-class ShellAppRuntimeBindings:
-    """Databricks Apps runtime bindings required by the generated shell app."""
-
-    requires_web_search: bool
-    brave_secret_scope: str | None
-    brave_secret_key: str | None
-    requires_sql_warehouse: bool = False
-    storage_warehouse_id: str | None = None
-    brave_secret_resource_name: str = _BRAVE_SECRET_RESOURCE_NAME
-    sql_warehouse_resource_name: str = _SQL_WAREHOUSE_RESOURCE_NAME
-
-
 def _fallback_app_name(deployment_id: str) -> str:
     """Build a Databricks Apps-compatible fallback name from a deployment id."""
     suffix = deployment_id.replace("-", "")[: _APP_NAME_MAX_LENGTH - len(_APP_NAME_PREFIX)]
@@ -118,53 +106,34 @@ def _resolve_app_name(config: dict[str, Any], deployment_id: str) -> str:
     return _fallback_app_name(deployment_id)
 
 
-def _metadata_bool(metadata: dict[str, Any] | None, key: str) -> bool:
-    value = (metadata or {}).get(key)
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "y"}
-    return bool(value)
-
-
 def _resolve_runtime_bindings(
     artifact: Artifact,
     config: dict[str, Any],
     settings: Any,
 ) -> ShellAppRuntimeBindings:
-    """Resolve runtime resource/env bindings from artifact metadata + config."""
-    metadata = artifact.metadata if isinstance(artifact.metadata, dict) else {}
-    requires_web_search = _metadata_bool(metadata, "requires_web_search")
-    requires_sql_warehouse = _metadata_bool(metadata, "requires_sql_warehouse")
-    scope = config.get("brave_secret_scope") or settings.deploy_here_brave_secret_scope
-    key = config.get("brave_secret_key") or settings.deploy_here_brave_secret_key
-    warehouse_id = (
-        config.get("storage_warehouse_id")
-        or getattr(settings, "storage_warehouse_id", None)
-        or os.environ.get("STORAGE_WAREHOUSE_ID")
-        or os.environ.get("TABLE_TOOLS_WAREHOUSE_ID")
-    )
-    raw_resource_name = metadata.get("brave_secret_resource_name")
-    resource_name = (
-        raw_resource_name
-        if isinstance(raw_resource_name, str)
-        else _BRAVE_SECRET_RESOURCE_NAME
-    )
-    raw_sql_resource_name = metadata.get("sql_warehouse_resource_name")
-    sql_resource_name = (
-        raw_sql_resource_name
-        if isinstance(raw_sql_resource_name, str)
-        else _SQL_WAREHOUSE_RESOURCE_NAME
-    )
-    return ShellAppRuntimeBindings(
-        requires_web_search=requires_web_search,
-        brave_secret_scope=str(scope).strip() if scope else None,
-        brave_secret_key=str(key).strip() if key else None,
-        requires_sql_warehouse=requires_sql_warehouse,
-        storage_warehouse_id=str(warehouse_id).strip() if warehouse_id else None,
-        brave_secret_resource_name=resource_name,
-        sql_warehouse_resource_name=sql_resource_name,
-    )
+    """Read the runtime requirements ``translate`` recorded in the artifact.
+
+    The Brave decision (``uses_brave`` + scope/key) and the web/SQL flags come
+    straight from ``Artifact.metadata`` — the single source of truth produced by
+    ``ShellAppExporter.translate`` — and are NOT re-derived here. (Re-deriving the
+    Brave secret from always-populated ``settings`` defaults is exactly what used
+    to bind a Brave resource to default-provider agents and break their deploys on
+    workspaces without a Brave secret scope.)
+
+    Warehouse id keeps a config/settings/env fallback for robustness: if a
+    SQL-using workflow's artifact didn't carry the id, resolve it at deploy time.
+    """
+    bindings = ShellAppRuntimeBindings.from_metadata(artifact.metadata)
+    if bindings.requires_sql_warehouse and not bindings.storage_warehouse_id:
+        warehouse_id = (
+            config.get("storage_warehouse_id")
+            or getattr(settings, "storage_warehouse_id", None)
+            or os.environ.get("STORAGE_WAREHOUSE_ID")
+            or os.environ.get("TABLE_TOOLS_WAREHOUSE_ID")
+        )
+        if warehouse_id:
+            bindings = replace(bindings, storage_warehouse_id=str(warehouse_id).strip())
+    return bindings
 
 
 async def _deploy_via_apps_api(
@@ -250,28 +219,21 @@ async def _deploy_via_apps_api(
         # ------------------------------------------------------------------
         settings = get_settings()
         runtime_bindings = _resolve_runtime_bindings(artifact, config, settings)
-        if (
-            runtime_bindings.requires_web_search
-            and (
-                not runtime_bindings.brave_secret_scope
-                or not runtime_bindings.brave_secret_key
-            )
+        if runtime_bindings.uses_brave and (
+            not runtime_bindings.brave_secret_scope or not runtime_bindings.brave_secret_key
         ):
             return DeploymentResult(
                 success=False,
                 error_message=(
-                    "Shell app workflow uses web_search but Brave secret "
-                    "scope/key is not configured."
+                    "Shell app workflow pins web_search provider: brave but the "
+                    "Brave secret scope/key is not configured."
                 ),
                 external_resource_ids={
                     "error_kind": "validation_failed",
-                    "requires_web_search": True,
+                    "uses_brave": True,
                 },
             )
-        if (
-            runtime_bindings.requires_sql_warehouse
-            and not runtime_bindings.storage_warehouse_id
-        ):
+        if runtime_bindings.requires_sql_warehouse and not runtime_bindings.storage_warehouse_id:
             return DeploymentResult(
                 success=False,
                 error_message=(
@@ -290,7 +252,7 @@ async def _deploy_via_apps_api(
             "SHELL_APP_SSE_HEARTBEAT_SECONDS",
         ]
         runtime_resource_names: list[str] = []
-        if runtime_bindings.requires_web_search:
+        if runtime_bindings.uses_brave:
             runtime_env_vars.append("BRAVE_API_KEY")
             runtime_resource_names.append(runtime_bindings.brave_secret_resource_name)
         if runtime_bindings.requires_sql_warehouse:
@@ -298,11 +260,12 @@ async def _deploy_via_apps_api(
             runtime_resource_names.append(runtime_bindings.sql_warehouse_resource_name)
         logger.info(
             "DEPLOY_HERE_RUNTIME_BINDINGS deployment=%s requires_web_search=%s "
-            "requires_sql_warehouse=%s env_vars=%s resource_names=%s "
+            "uses_brave=%s requires_sql_warehouse=%s env_vars=%s resource_names=%s "
             "brave_secret_scope_configured=%s brave_secret_key_configured=%s "
             "storage_warehouse_id_configured=%s",
             deployment.id,
             runtime_bindings.requires_web_search,
+            runtime_bindings.uses_brave,
             runtime_bindings.requires_sql_warehouse,
             runtime_env_vars,
             runtime_resource_names,
@@ -340,10 +303,7 @@ async def _deploy_via_apps_api(
             # M3 — reject branches when tag-only is required. Branches can be
             # force-pushed under deployed apps and silently change framework
             # code on the next pip install. Tags are immutable by convention.
-            if (
-                settings.deploy_here_require_tag_only
-                and tag_probe.ref_kind == "branch"
-            ):
+            if settings.deploy_here_require_tag_only and tag_probe.ref_kind == "branch":
                 logger.info(
                     "DEPLOYMENT_HERE_STAGE deployment=%s stage=tag_preflight outcome=err "
                     "git_tag=%s git_url=%s ref_kind=branch reason=tag_required",
@@ -666,7 +626,7 @@ async def _create_or_update_app(
 
     def _app_resources() -> list[Any] | None:
         resources: list[Any] = []
-        if runtime_bindings.requires_web_search:
+        if runtime_bindings.uses_brave:
             resources.append(
                 AppResource(
                     name=runtime_bindings.brave_secret_resource_name,
@@ -706,7 +666,7 @@ async def _create_or_update_app(
             EnvVar(name="MLFLOW_TRACKING_URI", value="databricks"),
             EnvVar(name="SHELL_APP_SSE_HEARTBEAT_SECONDS", value="15"),
         ]
-        if runtime_bindings.requires_web_search:
+        if runtime_bindings.uses_brave:
             env_vars.append(
                 EnvVar(
                     name="BRAVE_API_KEY",

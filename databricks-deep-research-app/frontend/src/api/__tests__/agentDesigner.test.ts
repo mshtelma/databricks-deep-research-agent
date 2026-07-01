@@ -381,6 +381,63 @@ describe('chatStream', () => {
     expect(body.messages[0]).not.toHaveProperty('tool_name')
   })
 
+  it('strips UI-only synopsis/review before sending chat history', async () => {
+    const stream = makeSSEStream([['done', {}]])
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(stream, {
+        status: 200,
+        headers: { 'Content-Type': 'text/event-stream' },
+      })
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    const events = []
+    for await (const { event } of chatStream({
+      messages: [
+        {
+          role: 'assistant',
+          content: 'Done.',
+          synopsis: {
+            headline: 'Built a parallel lanes workflow · 2 lanes',
+            topology: 'parallel_lanes',
+            change_kind: 'created',
+            lanes: [{ label: 'Market', tools: ['web_search'] }],
+            pipeline: ['Coordinator'],
+            tools: ['web_search'],
+            outputs: [],
+            warnings: [],
+          },
+          review: {
+            verdict: 'pass',
+            summary: 'Looks good.',
+            agent_findings: [],
+            coverage_gaps: [],
+            output_gaps: [],
+          },
+          activity: [
+            { label: 'Workflow Architect (Opus)', iteration: null, total: null },
+            { label: 'Refining', iteration: 2, total: 4 },
+          ],
+        },
+      ],
+      current_ast: null,
+    })) {
+      events.push(event)
+    }
+
+    expect(fetchMock).toHaveBeenCalledOnce()
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    const body = JSON.parse(init.body as string) as {
+      messages: Array<Record<string, unknown>>
+    }
+    // The backend ChatMessage schema is extra="forbid": these display-only
+    // fields must never reach the wire (or the resend would 422 / bloat).
+    expect(body.messages[0]).toEqual({ role: 'assistant', content: 'Done.' })
+    expect(body.messages[0]).not.toHaveProperty('synopsis')
+    expect(body.messages[0]).not.toHaveProperty('review')
+    expect(body.messages[0]).not.toHaveProperty('activity')
+  })
+
   // 7. chatStream throws on 413 BEFORE yielding any events
   it('throws ApiError with status 413 before yielding any events', async () => {
     vi.stubGlobal(
