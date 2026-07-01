@@ -64,7 +64,7 @@ def create_backend(settings: Settings) -> StorageBackend:
 
     if name == "fake":
         # Deferred import — tests supply this path.
-        from tests.fakes.fake_backend import FakeBackend  # type: ignore[import-not-found]
+        from tests.fakes.fake_backend import FakeBackend
 
         return FakeBackend()
 
@@ -107,7 +107,7 @@ class StorageStack:
             except Exception:  # noqa: BLE001 — shutdown must not raise
                 logger.exception("cleanup stop failed")
         try:
-            self.queue._shutdown_timeout_sec = timeout  # type: ignore[attr-defined]
+            self.queue._shutdown_timeout_sec = timeout
             await self.queue.stop()
         except Exception:  # noqa: BLE001
             logger.exception("queue stop failed")
@@ -135,7 +135,7 @@ class StorageStack:
             logger.debug("no running loop; skipping signal handler install")
             return
 
-        def _on_term():
+        def _on_term() -> None:
             logger.info("SIGTERM received; scheduling storage drain")
             loop.create_task(self.stop(timeout=15.0))
 

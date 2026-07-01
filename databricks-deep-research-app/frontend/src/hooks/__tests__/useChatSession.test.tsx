@@ -149,7 +149,46 @@ describe('useChatSession', () => {
     expect(assistant?.content).toBe('Hello, world!')
   })
 
-  it('progress events are transient: never persisted to messages and cleared at turn end', async () => {
+  it('architect_synopsis and critic_review events attach to the assistant turn', async () => {
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        { type: 'message', content: 'Done.' },
+        {
+          type: 'architect_synopsis',
+          headline: 'Built a parallel lanes workflow · 2 lanes',
+          topology: 'parallel_lanes',
+          change_kind: 'created',
+          lanes: [{ label: 'Market', tools: ['web_search'] }],
+          pipeline: ['Coordinator'],
+          tools: ['web_search'],
+          outputs: [],
+          warnings: [],
+        },
+        {
+          type: 'critic_review',
+          verdict: 'pass',
+          summary: 'Looks good.',
+          agent_findings: [],
+          coverage_gaps: [],
+          output_gaps: [],
+        },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+    await act(async () => {
+      await result.current.sendMessage('go')
+    })
+    await waitFor(() => expect(result.current.isStreaming).toBe(false))
+
+    const assistant = result.current.messages.find((m) => m.role === 'assistant')
+    expect(assistant?.synopsis?.headline).toBe('Built a parallel lanes workflow · 2 lanes')
+    expect(assistant?.synopsis?.lanes).toEqual([{ label: 'Market', tools: ['web_search'] }])
+    expect(assistant?.review?.verdict).toBe('pass')
+  })
+
+  it('progress events: transient line cleared at turn end, but accumulated into the persistent activity feed', async () => {
     mockChatStream.mockReturnValue(
       fakeEvents([
         { type: 'progress', label: 'Workflow Architect (Opus)', iteration: null, total: null },
@@ -166,15 +205,46 @@ describe('useChatSession', () => {
     })
     await waitFor(() => expect(result.current.isStreaming).toBe(false))
 
-    // Cleared when the turn ends.
+    // The transient single-line status is cleared when the turn ends.
     expect(result.current.progress).toBeNull()
-    // Never entered the transcript (must not bloat the resent payload).
+    // No EXTRA messages enter the transcript (no payload bloat) ...
     expect(result.current.messages).toHaveLength(2) // user + assistant only
     const assistant = result.current.messages.find((m) => m.role === 'assistant')
     expect(assistant?.content).toBe('Here is the proposal.')
+    // ... and the labels never land in message CONTENT (the wire payload).
     expect(
       result.current.messages.some((m) => (m.content ?? '').includes('Workflow Architect')),
     ).toBe(false)
+    // But each milestone IS accumulated into the persistent per-turn activity
+    // feed (the "see actual progress" surface), in order.
+    expect(assistant?.activity).toEqual([
+      { label: 'Workflow Architect (Opus)', iteration: null, total: null },
+      { label: 'Refining', iteration: 2, total: 4 },
+    ])
+  })
+
+  it('consecutive identical progress milestones are de-duplicated in the activity feed', async () => {
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        { type: 'progress', label: 'Designer Critic (GPT-5)', iteration: null, total: null },
+        { type: 'progress', label: 'Designer Critic (GPT-5)', iteration: null, total: null },
+        { type: 'progress', label: 'Finalizing', iteration: null, total: null },
+        { type: 'message', content: 'ok' },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+    await act(async () => {
+      await result.current.sendMessage('go')
+    })
+    await waitFor(() => expect(result.current.isStreaming).toBe(false))
+
+    const assistant = result.current.messages.find((m) => m.role === 'assistant')
+    expect(assistant?.activity).toEqual([
+      { label: 'Designer Critic (GPT-5)', iteration: null, total: null },
+      { label: 'Finalizing', iteration: null, total: null },
+    ])
   })
 
   it('a progress event sets transient progress while the turn is still streaming', async () => {
@@ -664,6 +734,44 @@ describe('useChatSession', () => {
     // Partial content still accumulated
     const assistant = result.current.messages.find((m) => m.role === 'assistant')
     expect(assistant?.content).toBe('partial')
+  })
+
+  it('does not auto-apply an empty-canvas mutation when the turn ends with error', async () => {
+    const draft = createDraftWorkflow()
+    act(() => {
+      useAgentEditorStore.setState({ ast: draft, isDirty: false })
+    })
+    const setAstSpy = vi.spyOn(useAgentEditorStore.getState(), 'setAst')
+
+    mockChatStream.mockReturnValue(
+      fakeEvents([
+        {
+          type: 'mutation_proposed',
+          tool_name: 'propose_workflow',
+          tool_call_id: 'tc-rejected',
+          old_ast: draft,
+          new_ast: makeAst('rejected'),
+          validation_errors: [],
+          summary: null,
+        },
+        {
+          type: 'error',
+          message: 'The generated workflow did not pass review.',
+          tool_call_id: null,
+        },
+        { type: 'done' },
+      ]),
+    )
+
+    const { result } = renderHook(() => useChatSession())
+
+    await act(async () => {
+      await result.current.sendMessage('Build an agent')
+    })
+
+    expect(result.current.error).toBe('The generated workflow did not pass review.')
+    expect(setAstSpy).not.toHaveBeenCalled()
+    expect(useAgentEditorStore.getState().ast).toBe(draft)
   })
 
   // -------------------------------------------------------------------------

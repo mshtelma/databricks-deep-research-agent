@@ -24,7 +24,10 @@ import {
 import { applyBootstrapAgentName } from '@/lib/agentNaming'
 import { clearTranscript, loadTranscript, saveTranscript } from '@/lib/designerChatPersistence'
 import type {
+  ActivityStep,
+  ArchitectSynopsis,
   ChatMessage,
+  CriticReview,
   DesignerAsset,
   DesignerSSEEvent,
   NormalizationFix,
@@ -139,7 +142,20 @@ type ChatAction =
   | { type: 'SET_ERROR'; message: string }
   | { type: 'SET_STREAMING'; value: boolean }
   | { type: 'SET_PROGRESS'; progress: ProgressInfo | null }
+  | { type: 'ADD_ACTIVITY_STEP'; step: ActivityStep }
+  | { type: 'SET_SYNOPSIS'; synopsis: ArchitectSynopsis }
+  | { type: 'SET_REVIEW'; review: CriticReview }
   | { type: 'RESET' }
+
+/** Index of the most recent assistant message, or -1. The synopsis/review
+ *  events arrive after the turn's tool-result messages, so the assistant turn
+ *  is not necessarily the last message — scan back for it. */
+function lastAssistantIndex(messages: ChatMessage[]): number {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]!.role === 'assistant') return i
+  }
+  return -1
+}
 
 function reducer(state: ChatState, action: ChatAction): ChatState {
   switch (action.type) {
@@ -182,6 +198,39 @@ function reducer(state: ChatState, action: ChatAction): ChatState {
 
     case 'ADD_TOOL_RESULT':
       return { ...state, messages: [...state.messages, action.message] }
+
+    case 'SET_SYNOPSIS': {
+      const msgs = state.messages.slice()
+      const idx = lastAssistantIndex(msgs)
+      if (idx === -1) return state
+      msgs[idx] = { ...msgs[idx]!, synopsis: action.synopsis }
+      return { ...state, messages: msgs }
+    }
+
+    case 'SET_REVIEW': {
+      const msgs = state.messages.slice()
+      const idx = lastAssistantIndex(msgs)
+      if (idx === -1) return state
+      msgs[idx] = { ...msgs[idx]!, review: action.review }
+      return { ...state, messages: msgs }
+    }
+
+    case 'ADD_ACTIVITY_STEP': {
+      // Accumulate a persistent activity feed on the live assistant turn (the
+      // transient `progress` line is replace-only and vanishes; this survives).
+      const msgs = state.messages.slice()
+      const idx = lastAssistantIndex(msgs)
+      if (idx === -1) return state
+      const existing = msgs[idx]!.activity ?? []
+      const last = existing[existing.length - 1]
+      // Dedup consecutive identical milestones (same label + iteration) so a
+      // repeated node label never doubles a row.
+      if (last && last.label === action.step.label && last.iteration === action.step.iteration) {
+        return state
+      }
+      msgs[idx] = { ...msgs[idx]!, activity: [...existing, action.step] }
+      return { ...state, messages: msgs }
+    }
 
     case 'UPSERT_PENDING_MUTATION': {
       // Coalesce all mutation events from one turn into a single card (Fix #4).
@@ -497,7 +546,7 @@ export function useChatSession(opts?: {
         }
         // Empty-canvas auto-apply happens once, after the turn's final AST is
         // known — never mid-stream (Codex #3).
-        if (autoApplyInitialWorkflow && initialApplyAst) {
+        if (!sawError && autoApplyInitialWorkflow && initialApplyAst) {
           useAgentEditorStore.getState().setAst(initialApplyAst)
         }
       } finally {
@@ -684,6 +733,26 @@ function processEvent(
           total: event.total ?? null,
         },
       })
+      // Also append to the persistent per-turn activity feed so the milestone
+      // survives after the transient status line is cleared.
+      dispatch({
+        type: 'ADD_ACTIVITY_STEP',
+        step: {
+          label: event.label,
+          iteration: event.iteration ?? null,
+          total: event.total ?? null,
+        },
+      })
+      break
+
+    case 'architect_synopsis':
+      // Display-only; attached to the assistant turn. Stripped from the wire by
+      // chatStream's whitelist (backend ChatMessage is extra="forbid").
+      dispatch({ type: 'SET_SYNOPSIS', synopsis: event })
+      break
+
+    case 'critic_review':
+      dispatch({ type: 'SET_REVIEW', review: event })
       break
 
     case 'error':

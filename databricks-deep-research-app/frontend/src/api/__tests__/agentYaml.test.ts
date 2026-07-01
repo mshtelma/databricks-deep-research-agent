@@ -4,7 +4,7 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 
-import { exportAgentYaml, createAgentV2, AgentCriticError } from '../agentsV2'
+import { exportAgentYaml, createAgentV2, updateAgentV2, AgentCriticError, EtagConflictError } from '../agentsV2'
 import { importYaml, exportYamlFromDefinition } from '../agentDesigner'
 import { YamlImportError } from '../client'
 
@@ -178,6 +178,67 @@ describe('createAgentV2 force + critic', () => {
     } catch (err) {
       expect(err).toBeInstanceOf(AgentCriticError)
       expect((err as AgentCriticError).critique?.summary).toBe('off-topic')
+    }
+  })
+})
+
+describe('updateAgentV2 force + critic', () => {
+  const req = { name: 'B', definition: { name: 'B', root: {} } }
+  const etag = '"etag-v1"'
+
+  it('appends ?force=true when force option is set', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeResponse({ id: 'agent-1', name: 'B' }, { status: 200, headers: { ETag: '"v2"' } }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateAgentV2('agent-1', req, etag, { force: true })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/agents-v2/agent-1?force=true')
+  })
+
+  it('does NOT append force by default', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      makeResponse({ id: 'agent-1', name: 'B' }, { status: 200 }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+
+    await updateAgentV2('agent-1', req, etag)
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/agents-v2/agent-1')
+  })
+
+  it('throws EtagConflictError on 409', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        makeResponse(
+          { detail: { current_etag: '"etag-server"' } },
+          { status: 409 },
+        ),
+      ),
+    )
+
+    await expect(updateAgentV2('agent-1', req, etag)).rejects.toBeInstanceOf(EtagConflictError)
+  })
+
+  it('throws AgentCriticError with the critique on a 422 critic fail', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue(
+        httpError(
+          { message: 'critic blocked', critique: { verdict: 'fail', summary: 'irrelevant scope' } },
+          422,
+        ),
+      ),
+    )
+
+    try {
+      await updateAgentV2('agent-1', req, etag)
+      expect.unreachable('should have thrown')
+    } catch (err) {
+      expect(err).toBeInstanceOf(AgentCriticError)
+      expect((err as AgentCriticError).critique?.summary).toBe('irrelevant scope')
     }
   })
 })

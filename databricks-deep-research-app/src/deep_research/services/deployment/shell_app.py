@@ -14,6 +14,7 @@ locally-built ``databricks_deep_research-*.whl`` is bundled into the zip at
 Phase 2-B ships the zip artifact + recorded metadata; live deploy via
 ``w.apps.create`` lands in Phase 3 alongside MLflow agent live deploy.
 """
+
 # Method args (deployment) carry context required by DeploymentTranslator
 # but are not all used in Phase 2-B's stub deploy/deactivate paths.
 # ruff: noqa: ARG002
@@ -34,6 +35,15 @@ from jinja2 import StrictUndefined, Template
 
 from deep_research.models.agent_deployment import AgentDeployment, DeploymentMode
 from deep_research.services.deployment._paths import resolve_package_data_dir
+from deep_research.services.deployment.shell_app_runtime import (
+    DEFAULT_BRAVE_SECRET_KEY as _DEFAULT_BRAVE_SECRET_KEY,
+)
+from deep_research.services.deployment.shell_app_runtime import (
+    DEFAULT_BRAVE_SECRET_SCOPE as _DEFAULT_BRAVE_SECRET_SCOPE,
+)
+from deep_research.services.deployment.shell_app_runtime import (
+    ShellAppRuntimeBindings,
+)
 from deep_research.services.deployment.translator import (
     Artifact,
     DeploymentCleanupError,
@@ -47,8 +57,6 @@ if TYPE_CHECKING:
     from deep_research.services.deployment.auth import WorkspaceClientResolver
 
 logger = logging.getLogger(__name__)
-_DEFAULT_BRAVE_SECRET_SCOPE = "deep-research-secrets"
-_DEFAULT_BRAVE_SECRET_KEY = "BRAVE_API_KEY"
 
 # Historical: shell-apps used to install the framework via a git URL pinned
 # in their generated pyproject.toml; the value was validated against this
@@ -61,9 +69,7 @@ _GIT_REF_WHITELIST = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,255}$")
 
 # Matches the version segment in a PEP 427 framework wheel filename:
 #   ``databricks_deep_research-<version>-py3-none-any.whl``
-_FRAMEWORK_WHEEL_RE = re.compile(
-    r"^databricks_deep_research-(?P<version>[^-]+)-py3-none-any\.whl$"
-)
+_FRAMEWORK_WHEEL_RE = re.compile(r"^databricks_deep_research-(?P<version>[^-]+)-py3-none-any\.whl$")
 
 
 class ShellAppWheelMissingError(RuntimeError):
@@ -92,8 +98,7 @@ def _resolve_framework_wheel() -> tuple[str, bytes]:
     primary_dir = Path(__file__).resolve().parent / "_framework_wheel"
     if primary_dir.is_dir():
         matches = [
-            p for p in primary_dir.iterdir()
-            if p.is_file() and _FRAMEWORK_WHEEL_RE.match(p.name)
+            p for p in primary_dir.iterdir() if p.is_file() and _FRAMEWORK_WHEEL_RE.match(p.name)
         ]
         if len(matches) == 1:
             return matches[0].name, matches[0].read_bytes()
@@ -111,7 +116,8 @@ def _resolve_framework_wheel() -> tuple[str, bytes]:
         if candidate_dir.is_dir():
             fallback_matches = sorted(
                 (
-                    p for p in candidate_dir.iterdir()
+                    p
+                    for p in candidate_dir.iterdir()
                     if p.is_file() and _FRAMEWORK_WHEEL_RE.match(p.name)
                 ),
                 key=lambda p: p.stat().st_mtime,
@@ -206,8 +212,6 @@ _JINJA_FILES: tuple[tuple[str, str], ...] = (
 # set on the uploaded source. ZipInfo.external_attr encodes the file mode
 # in the high 16 bits.
 _EXEC_ENTRIES: frozenset[str] = frozenset({"entrypoint.sh"})
-_BRAVE_SECRET_RESOURCE_NAME = "brave-api-key"
-_SQL_WAREHOUSE_RESOURCE_NAME = "text-table-sql-warehouse"
 _SQL_WAREHOUSE_TOOL_KINDS: frozenset[str] = frozenset(
     {
         "table_search",
@@ -233,14 +237,27 @@ def _render(template: str, **context: Any) -> str:
     return Template(template, undefined=StrictUndefined).render(**context)
 
 
+# Builtin web tool kinds (matches the framework loader's auto-declarable set).
+# All are provider-inheriting: they need the shell app's default databricks
+# search backend, NOT a Brave key.
+_BUILTIN_WEB_KINDS = ("web_search", "web_research", "web_crawl")
+
+
 def _definition_uses_web_search(definition: dict[str, Any]) -> bool:
-    """Return True when the workflow references the built-in web_search tool."""
+    """Return True when the workflow references any builtin web tool.
+
+    Detects all builtin web kinds (``web_search``/``web_research``/``web_crawl``)
+    whether DECLARED at the workflow level (a tool dict) or bound by-name in a
+    node's ``config.tools`` (a string ref — the binding-vs-declaration case the
+    framework loader heals at runtime). Both forms must count so the exporter
+    pins the databricks web-search endpoint for inheriting-web agents.
+    """
 
     def _walk(value: Any) -> bool:
         if isinstance(value, dict):
-            if value.get("kind") == "web_search":
+            if value.get("kind") in _BUILTIN_WEB_KINDS:
                 return True
-            if value.get("tool") == "web_search" or value.get("ref") == "web_search":
+            if value.get("tool") in _BUILTIN_WEB_KINDS or value.get("ref") in _BUILTIN_WEB_KINDS:
                 return True
             for key, child in value.items():
                 if key == "tools" and _walk_tool_refs(child):
@@ -253,8 +270,11 @@ def _definition_uses_web_search(definition: dict[str, Any]) -> bool:
         return False
 
     def _walk_tool_refs(value: Any) -> bool:
+        # A ``tools`` value is a list of EITHER string refs OR declaration dicts.
         if isinstance(value, str):
-            return value == "web_search"
+            return value in _BUILTIN_WEB_KINDS
+        if isinstance(value, list):
+            return any(_walk_tool_refs(item) for item in value)
         return _walk(value)
 
     return _walk(definition)
@@ -303,15 +323,9 @@ def _resolve_brave_secret_config(
     key = config.get("brave_secret_key")
     if include_defaults:
         scope = (
-            scope
-            or os.environ.get("DEPLOY_HERE_BRAVE_SECRET_SCOPE")
-            or _DEFAULT_BRAVE_SECRET_SCOPE
+            scope or os.environ.get("DEPLOY_HERE_BRAVE_SECRET_SCOPE") or _DEFAULT_BRAVE_SECRET_SCOPE
         )
-        key = (
-            key
-            or os.environ.get("DEPLOY_HERE_BRAVE_SECRET_KEY")
-            or _DEFAULT_BRAVE_SECRET_KEY
-        )
+        key = key or os.environ.get("DEPLOY_HERE_BRAVE_SECRET_KEY") or _DEFAULT_BRAVE_SECRET_KEY
     return (
         str(scope).strip() if scope else None,
         str(key).strip() if key else None,
@@ -333,6 +347,22 @@ def _resolve_storage_warehouse_id(config: dict[str, Any]) -> str | None:
         except Exception:  # noqa: BLE001 - settings can be unavailable in tests
             value = None
     return str(value).strip() if value else None
+
+
+def _resolve_databricks_web_search_endpoint() -> str:
+    """Resolve the databricks built-in web-search endpoint from app config.
+
+    Returns the app's configured ``search.databricks.endpoint`` so the exported
+    shell app pins the SAME endpoint the main app uses. Empty string when config
+    is unavailable (the framework runner then falls back to its own default).
+    """
+    try:
+        from deep_research.core.app_config import get_app_config  # noqa: PLC0415
+
+        endpoint = getattr(get_app_config().search.databricks, "endpoint", "")
+        return str(endpoint).strip() if endpoint else ""
+    except Exception:  # noqa: BLE001 - config can be unavailable in tests/headless
+        return ""
 
 
 def _preview(value: Any, *, max_length: int = 200) -> str:
@@ -429,9 +459,7 @@ class ShellAppExporter:
         # whitelist still runs as a typing guard so malformed values don't
         # silently slip through into logs / metadata.
         git_tag = config.get("framework_git_tag", "")
-        if git_tag and (
-            not isinstance(git_tag, str) or not _GIT_REF_WHITELIST.fullmatch(git_tag)
-        ):
+        if git_tag and (not isinstance(git_tag, str) or not _GIT_REF_WHITELIST.fullmatch(git_tag)):
             errors.append(
                 ValidationError(
                     message=(
@@ -546,18 +574,38 @@ class ShellAppExporter:
             include_defaults=uses_brave,
         )
         storage_warehouse_id = _resolve_storage_warehouse_id(config)
+        # Pin the databricks built-in web-search endpoint into the shell app's env
+        # so it uses the SAME endpoint as the main app (config-driven) instead of
+        # the framework's built-in default. Only when web search is used and not
+        # brave-pinned (brave needs no endpoint). The framework runner reads
+        # DATABRICKS_WEB_SEARCH_ENDPOINT; if unset it falls back to its own default.
+        databricks_web_search_endpoint = (
+            _resolve_databricks_web_search_endpoint() if uses_web_search and not uses_brave else ""
+        )
+
+        # Single source of truth for the shell app's Databricks runtime
+        # requirements: decided HERE, recorded in the artifact metadata, and read
+        # back verbatim by the deploy path (shell_app_apps_api), which never
+        # re-derives them. Gating Brave on `uses_brave` (an explicit
+        # `provider: brave`) keeps default-provider agents from binding a Brave
+        # secret resource on workspaces that have none.
+        runtime = ShellAppRuntimeBindings.build(
+            requires_web_search=uses_web_search,
+            uses_brave=uses_brave,
+            requires_sql_warehouse=requires_sql_warehouse,
+            brave_secret_scope=brave_secret_scope,
+            brave_secret_key=brave_secret_key,
+            storage_warehouse_id=storage_warehouse_id,
+            databricks_web_search_endpoint=databricks_web_search_endpoint,
+        )
 
         framework_wheel_filename, framework_wheel_bytes = _resolve_framework_wheel()
-        framework_wheel_version = _parse_framework_wheel_version(
-            framework_wheel_filename
-        )
+        framework_wheel_version = _parse_framework_wheel_version(framework_wheel_filename)
 
         # Serialize the workflow definition into a YAML string that we splice
         # into agent.yaml.j2 below. ``default_flow_style=False`` keeps it
         # human-readable (block style).
-        definition_yaml = yaml.safe_dump(
-            definition, default_flow_style=False, sort_keys=False
-        )
+        definition_yaml = yaml.safe_dump(definition, default_flow_style=False, sort_keys=False)
 
         context = {
             "app_name": app_name,
@@ -567,25 +615,27 @@ class ShellAppExporter:
             "agent_id": str(agent.id),
             "revision_id": str(revision.rev_id),
             "definition_yaml": definition_yaml,
-            "requires_web_search": uses_web_search,
-            "brave_secret_scope": brave_secret_scope,
-            "brave_secret_key": brave_secret_key,
-            "brave_secret_resource_name": _BRAVE_SECRET_RESOURCE_NAME,
-            "requires_sql_warehouse": requires_sql_warehouse,
-            "storage_warehouse_id": storage_warehouse_id,
-            "sql_warehouse_resource_name": _SQL_WAREHOUSE_RESOURCE_NAME,
+            "requires_web_search": runtime.requires_web_search,
+            "brave_secret_scope": runtime.brave_secret_scope,
+            "brave_secret_key": runtime.brave_secret_key,
+            "brave_secret_resource_name": runtime.brave_secret_resource_name,
+            "requires_sql_warehouse": runtime.requires_sql_warehouse,
+            "storage_warehouse_id": runtime.storage_warehouse_id,
+            "sql_warehouse_resource_name": runtime.sql_warehouse_resource_name,
+            "databricks_web_search_endpoint": runtime.databricks_web_search_endpoint,
         }
 
         logger.info(
             "SHELL_APP_TRANSLATE_RUNTIME_REQUIREMENTS app_name=%s requires_web_search=%s "
-            "brave_secret_scope_configured=%s brave_secret_key_configured=%s "
+            "uses_brave=%s brave_secret_scope_configured=%s brave_secret_key_configured=%s "
             "requires_sql_warehouse=%s storage_warehouse_id_configured=%s",
             app_name,
-            uses_web_search,
-            bool(brave_secret_scope),
-            bool(brave_secret_key),
-            requires_sql_warehouse,
-            bool(storage_warehouse_id),
+            runtime.requires_web_search,
+            runtime.uses_brave,
+            bool(runtime.brave_secret_scope),
+            bool(runtime.brave_secret_key),
+            runtime.requires_sql_warehouse,
+            bool(runtime.storage_warehouse_id),
         )
         planner_guidance = _first_planner_guidance(definition)
         logger.info(
@@ -639,15 +689,9 @@ class ShellAppExporter:
                 "app_name": app_name,
                 "framework_wheel_filename": framework_wheel_filename,
                 "framework_wheel_version": framework_wheel_version,
-                "requires_web_search": str(uses_web_search).lower(),
-                "brave_secret_resource_name": _BRAVE_SECRET_RESOURCE_NAME,
-                "brave_secret_scope_configured": str(bool(brave_secret_scope)).lower(),
-                "brave_secret_key_configured": str(bool(brave_secret_key)).lower(),
-                "requires_sql_warehouse": str(requires_sql_warehouse).lower(),
-                "sql_warehouse_resource_name": _SQL_WAREHOUSE_RESOURCE_NAME,
-                "storage_warehouse_id_configured": str(bool(storage_warehouse_id)).lower(),
                 "sha256": digest,
                 "size_bytes": str(len(payload)),
+                **runtime.to_metadata(),
             },
         )
 
@@ -672,12 +716,8 @@ class ShellAppExporter:
             external_resource_ids={
                 "app_name": config["app_name"],
                 "shell_app_zip_sha256": hashlib.sha256(artifact.payload).hexdigest(),
-                "framework_wheel_filename": artifact.metadata.get(
-                    "framework_wheel_filename", ""
-                ),
-                "framework_wheel_version": artifact.metadata.get(
-                    "framework_wheel_version", ""
-                ),
+                "framework_wheel_filename": artifact.metadata.get("framework_wheel_filename", ""),
+                "framework_wheel_version": artifact.metadata.get("framework_wheel_version", ""),
                 "size_bytes": str(len(artifact.payload)),
             },
         )
@@ -747,18 +787,12 @@ class ShellAppExporter:
         if app_name:
             try:
                 await asyncio.to_thread(user_client.apps.delete, app_name)
-                logger.info(
-                    "SHELL_APP_DEACTIVATE_APP_DELETED app_name=%s", app_name
-                )
+                logger.info("SHELL_APP_DEACTIVATE_APP_DELETED app_name=%s", app_name)
             except Exception as exc:  # noqa: BLE001
                 if _is_not_found_error(exc):
-                    logger.info(
-                        "SHELL_APP_DEACTIVATE_APP_ALREADY_GONE app_name=%s", app_name
-                    )
+                    logger.info("SHELL_APP_DEACTIVATE_APP_ALREADY_GONE app_name=%s", app_name)
                 else:
-                    logger.exception(
-                        "SHELL_APP_DEACTIVATE_APP_DELETE_FAILED app_name=%s", app_name
-                    )
+                    logger.exception("SHELL_APP_DEACTIVATE_APP_DELETE_FAILED app_name=%s", app_name)
                     failures.append(("apps.delete", exc))
 
         # --- Delete the workspace source tree ---
@@ -788,20 +822,14 @@ class ShellAppExporter:
                         "SHELL_APP_DEACTIVATE_WS_ALREADY_GONE path=%s",
                         deployment_path,
                     )
-                elif (
-                    _is_permission_denied_error(exc)
-                    and user_client is not sp_client
-                ):
+                elif _is_permission_denied_error(exc) and user_client is not sp_client:
                     logger.warning(
-                        "SHELL_APP_DEACTIVATE_WS_OBO_DENIED_FALLBACK_SP "
-                        "path=%s deployment_id=%s",
+                        "SHELL_APP_DEACTIVATE_WS_OBO_DENIED_FALLBACK_SP path=%s deployment_id=%s",
                         deployment_path,
                         deployment.id,
                     )
                     try:
-                        await delete_workspace_source_tree(
-                            sp_client, deployment_path
-                        )
+                        await delete_workspace_source_tree(sp_client, deployment_path)
                         logger.info(
                             "SHELL_APP_DEACTIVATE_WS_DELETED path=%s actor=sp",
                             deployment_path,
@@ -809,8 +837,7 @@ class ShellAppExporter:
                     except Exception as exc2:  # noqa: BLE001
                         if _is_not_found_error(exc2):
                             logger.info(
-                                "SHELL_APP_DEACTIVATE_WS_ALREADY_GONE "
-                                "path=%s actor=sp",
+                                "SHELL_APP_DEACTIVATE_WS_ALREADY_GONE path=%s actor=sp",
                                 deployment_path,
                             )
                         elif _is_permission_denied_error(exc2):
@@ -831,8 +858,7 @@ class ShellAppExporter:
                             ) from exc2
                         else:
                             logger.exception(
-                                "SHELL_APP_DEACTIVATE_WS_DELETE_FAILED "
-                                "path=%s actor=sp",
+                                "SHELL_APP_DEACTIVATE_WS_DELETE_FAILED path=%s actor=sp",
                                 deployment_path,
                             )
                             failures.append(("workspace.delete", exc2))
@@ -845,8 +871,7 @@ class ShellAppExporter:
 
         if failures:
             detail = ", ".join(
-                f"{resource} raised {type(exc).__name__}"
-                for resource, exc in failures
+                f"{resource} raised {type(exc).__name__}" for resource, exc in failures
             )
             raise DeploymentCleanupError(
                 f"Shell-app deactivate failed: {detail}",

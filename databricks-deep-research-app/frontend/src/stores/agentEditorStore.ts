@@ -18,6 +18,7 @@ import { create } from 'zustand';
 import type { AST, Block, BlockPath, NodeType, ToolDecl, ValidationError } from '@/types/ast';
 import type { AgentV2Response, ModelTier } from '@/types/agentDesigner';
 import { resolveBlock, isDescendant } from '@/lib/blockPath';
+import { semanticNodeLabel } from '@/lib/agentDesignerNaming';
 import { normalizeWorkflowAst } from '@/lib/workflowAst';
 
 // ---------------------------------------------------------------------------
@@ -31,6 +32,19 @@ export interface AgentEditorState {
   selectedPath: BlockPath | null;
   isDirty: boolean;
   validationErrors: ValidationError[];
+  /**
+   * When set, the ChatPanel will pre-fill its composer input with this text
+   * on its next render cycle, then clear the field. Used by the validation
+   * banner's "Ask designer to fix" action to hand off findings to the co-pilot.
+   */
+  pendingChatSeed: string | null;
+  /**
+   * Set to an agent id immediately after an advisory save whose validation is
+   * running in the background. The designer page watches this (surviving the
+   * new-agent save→navigate) to poll GET /agents-v2/{id} until the verdict
+   * lands, then surfaces it — so the verdict is never silently lost.
+   */
+  pendingValidationAgentId: string | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -127,6 +141,18 @@ export interface AgentEditorActions {
 
   /** Clear isDirty and update etag (called after successful save). */
   markClean(newEtag: string | null): void;
+
+  /**
+   * Set the pending chat seed that the ChatPanel will consume to pre-fill
+   * the composer input. Call with null to clear without consuming.
+   */
+  setPendingChatSeed(text: string | null): void;
+
+  /**
+   * Mark an agent as having a background validation in flight (or clear it with
+   * null). Consumed by the designer page's validation-poll effect.
+   */
+  setPendingValidationAgentId(agentId: string | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -242,6 +268,8 @@ export const initialState: AgentEditorState = {
   selectedPath: null,
   isDirty: false,
   validationErrors: [],
+  pendingChatSeed: null,
+  pendingValidationAgentId: null,
 };
 
 export const useAgentEditorStore = create<AgentEditorState & AgentEditorActions>()(
@@ -300,7 +328,7 @@ export const useAgentEditorStore = create<AgentEditorState & AgentEditorActions>
       const newBlock: Block = {
         id: crypto.randomUUID(),
         type: nodeType,
-        label,
+        label: semanticNodeLabel(nodeType, label, config),
         config,
         children: [],
       };
@@ -631,6 +659,17 @@ export const useAgentEditorStore = create<AgentEditorState & AgentEditorActions>
     markClean(newEtag) {
       set({ isDirty: false, etag: newEtag });
     },
+
+    // -----------------------------------------------------------------------
+    // setPendingChatSeed
+    // -----------------------------------------------------------------------
+    setPendingChatSeed(text) {
+      set({ pendingChatSeed: text });
+    },
+
+    setPendingValidationAgentId(agentId) {
+      set({ pendingValidationAgentId: agentId });
+    },
   }),
 );
 
@@ -653,7 +692,7 @@ function _addToPlanBody(
   const newBlock: Block = {
     id: crypto.randomUUID(),
     type: nodeType,
-    label,
+    label: semanticNodeLabel(nodeType, label, config),
     config,
     children: [],
   };

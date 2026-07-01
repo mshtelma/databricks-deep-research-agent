@@ -229,6 +229,10 @@ export function useStreamingQuery(
 
   // Track active job session ID for background job architecture
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  // Mirror of activeSessionId for stable reads inside callbacks that are created
+  // once (e.g. handleSseError captures state at definition time, so it would
+  // otherwise see a stale null). Written alongside every setActiveSessionId call.
+  const activeSessionIdRef = useRef<string | null>(null);
   // Track last sequence number for reconnection support
   const lastSequenceRef = useRef(0);
   // Handles stop pressed before job submission returns a session ID.
@@ -302,6 +306,7 @@ export function useStreamingQuery(
     }
     setIsStreaming(false);
     setActiveSessionId(null);
+    activeSessionIdRef.current = null;
   }, []);
 
   const stopStream = useCallback(() => {
@@ -711,13 +716,55 @@ export function useStreamingQuery(
 
     // EventSource auto-reconnects, so only give up after multiple rapid errors
     if (sseErrorCountRef.current >= 3 || eventSource.readyState === 2) {
-      const err = new Error('Stream connection failed');
-      setError(err);
-      setErrorDetails({ error: err, errorCode: 'CONNECTION_FAILED', recoverable: true });
-      setAgentStatus('error');
+      const sessionId = activeSessionIdRef.current;
+      // Stop the native reconnect storm immediately, regardless of the outcome below.
       disconnectStream();
+
+      const showConnectionFailed = () => {
+        const err = new Error('Stream connection failed');
+        setError(err);
+        setErrorDetails({ error: err, errorCode: 'CONNECTION_FAILED', recoverable: true });
+        setAgentStatus('error');
+      };
+
+      // The trailing job_completed SSE frame can be dropped by the gateway on a
+      // large from-zero replay, making a COMPLETED job look like a dropped
+      // connection. Before declaring failure, check the real job status — the same
+      // SSE-independent completion signal ChatPage relies on — and suppress the
+      // false banner when the job actually finished.
+      if (!chatId || !sessionId) {
+        showConnectionFailed();
+        return;
+      }
+
+      void jobsApi.get(chatId, sessionId)
+        .then((job) => {
+          if (job.status === 'completed') {
+            setAgentStatus('complete');
+            // Make the persisted report appear even if the terminal SSE event
+            // never arrived (mirrors handleJobEvent's completed path).
+            queryClient.invalidateQueries({ queryKey: ['messages', chatId] });
+            queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+            queryClient.invalidateQueries({ queryKey: ['chats'] });
+            queryClient.invalidateQueries({ queryKey: ['jobs'] });
+          } else if (job.status === 'failed') {
+            const err = new Error('Research job failed');
+            setError(err);
+            setErrorDetails({ error: err, errorCode: 'JOB_FAILED', recoverable: false });
+            setAgentStatus('error');
+          } else if (job.status === 'cancelled') {
+            setAgentStatus('idle');
+          } else {
+            // Genuinely still in progress => a real connection drop.
+            showConnectionFailed();
+          }
+        })
+        .catch(() => {
+          // Couldn't verify status => fall back to the recoverable banner.
+          showConnectionFailed();
+        });
     }
-  }, [disconnectStream]);
+  }, [disconnectStream, chatId, queryClient]);
 
   const sendQuery = useCallback(
     async (submission: QuerySubmission) => {
@@ -788,6 +835,7 @@ export function useStreamingQuery(
       // Reset sequence tracking for reconnection
       lastSequenceRef.current = 0;
       setActiveSessionId(null);
+      activeSessionIdRef.current = null;
 
       // Store query mode for the session (used for activity panel visibility)
       setCurrentQueryMode(queryMode || 'simple');
@@ -821,6 +869,7 @@ export function useStreamingQuery(
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);
+        activeSessionIdRef.current = sessionId;
         queryClient.invalidateQueries({ queryKey: ['jobs'] });
 
         if (stopRequestedRef.current) {
@@ -923,6 +972,7 @@ export function useStreamingQuery(
 
       // Set job state
       setActiveSessionId(sessionId);
+      activeSessionIdRef.current = sessionId;
       setIsStreaming(true);
       setAgentStatus('researching');
       setStartTime(Date.now());

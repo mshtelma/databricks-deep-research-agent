@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -187,12 +187,10 @@ class CachedChatMemoryService(ChatMemoryService):
         )
         # 2) route through cache.mutate — synchronous mutation to in-memory
         #    ChatState + fire-and-forget DB persistence via WriteQueue.
-        await self._stack.cache.mutate(
-            chat_id,
-            lambda doc, _pn=plugin_name, _p=payload_json: doc.state.upsert_plugin_ext(
-                _pn, _p
-            ),
-        )
+        def upsert_plugin_ext(doc: ChatDocument) -> None:
+            doc.state.upsert_plugin_ext(plugin_name, payload_json)
+
+        await self._stack.cache.mutate(chat_id, upsert_plugin_ext)
 
     # -- Private upsert paths -------------------------------------------
     #
@@ -233,12 +231,13 @@ class CachedChatMemoryService(ChatMemoryService):
 
     async def preprocess_new_files(
         self,
-        chat_id: Any,
-        file_ids: list[UUID],
+        chat_id: UUID,
+        file_ids: Iterable[UUID],
         *,
         file_service: Any = None,
+        head_chars: int = 4000,
         research_session_id: UUID | None = None,
-    ) -> None:
+    ) -> list[ChatMemoryFile]:
         """Preprocess uploaded files via CachedFileUploadService.
 
         Reads chunk text from the append-only ``file_chunks`` table via the
@@ -246,17 +245,19 @@ class CachedChatMemoryService(ChatMemoryService):
         the parent class implementation when a legacy SQLAlchemy-backed
         ``file_service`` is provided (detected by absence of ``_stack``).
         """
-        if not file_ids:
-            return
+        file_id_list = list(file_ids)
+        if not file_id_list:
+            return []
 
         # Determine whether we have a cached or legacy file service
         if file_service is None or not hasattr(file_service, "_stack"):
             # No file service or legacy file service — try parent class path
             try:
-                await super().preprocess_new_files(
+                return await super().preprocess_new_files(
                     chat_id,
-                    file_ids,
+                    file_id_list,
                     file_service=file_service,
+                    head_chars=head_chars,
                     research_session_id=research_session_id,
                 )
             except Exception as exc:
@@ -266,11 +267,11 @@ class CachedChatMemoryService(ChatMemoryService):
                     chat_id,
                     str(exc)[:200],
                 )
-            return
+            return []
 
         # Cached path: read file metadata + chunks via CachedFileUploadService
-        chat_uuid = chat_id if isinstance(chat_id, UUID) else UUID(str(chat_id))
-        for file_id in file_ids:
+        processed: list[ChatMemoryFile] = []
+        for file_id in file_id_list:
             try:
                 uploaded = await file_service.get(file_id)
                 if uploaded is None:
@@ -291,14 +292,16 @@ class CachedChatMemoryService(ChatMemoryService):
                     continue
 
                 # Register the file memo in the memory service
-                await self._upsert_file_memo(
-                    chat_id=chat_uuid,
+                row = await self._upsert_file_memo(
+                    chat_id=chat_id,
                     file_id=file_id,
                     filename=uploaded.filename,
                     content_summary=full_text[:2000],
                     chunk_count=len(chunks),
                     research_session_id=research_session_id,
                 )
+                if row is not None:
+                    processed.append(row)
 
             except Exception as exc:
                 logger.warning(
@@ -307,6 +310,7 @@ class CachedChatMemoryService(ChatMemoryService):
                     file_id,
                     str(exc)[:200],
                 )
+        return processed
 
     async def _upsert_file_memo(
         self,
@@ -316,12 +320,15 @@ class CachedChatMemoryService(ChatMemoryService):
         content_summary: str,
         chunk_count: int,
         research_session_id: UUID | None,  # noqa: ARG002 — reserved for future
-    ) -> None:
+    ) -> ChatMemoryFile | None:
         """Store a FileMemo into `state.memory.files` via ChatState."""
         try:
             doc = await self._read_chat(chat_id)
             if any(f.id == file_id for f in doc.state.memory.files):
-                return  # idempotent
+                return next(
+                    (row for row in self._files if row.file_id == file_id),
+                    None,
+                )
 
             memo = DocFileMemo(
                 id=file_id,
@@ -339,10 +346,11 @@ class CachedChatMemoryService(ChatMemoryService):
                 _legacy_file(chat_id, memo, chunk_count=chunk_count)
             )
 
-            await self._mutate_chat(
-                chat_id,
-                lambda d, _m=memo: d.state.upsert_file_memo(_m),
-            )
+            def upsert_file_memo(doc: ChatDocument) -> None:
+                doc.state.upsert_file_memo(memo)
+
+            await self._mutate_chat(chat_id, upsert_file_memo)
+            return self._files[-1]
         except Exception as exc:
             logger.warning(
                 "CACHED_CHAT_MEMORY_UPSERT_FILE_MEMO_FAILED "
@@ -350,6 +358,7 @@ class CachedChatMemoryService(ChatMemoryService):
                 file_id,
                 str(exc)[:200],
             )
+            return None
 
     # -- Cross-turn research consolidation (the write half) -------------------
 
@@ -494,7 +503,7 @@ def _legacy_entity(chat_id: UUID, e: DocEntity) -> ChatMemoryEntity:
     row.name = e.name
     row.entity_type = e.type
     row.aliases = list(e.aliases)
-    row.summary = getattr(e, "summary", None)
+    row.summary = str(getattr(e, "summary", "") or "")
     row.supporting_finding_ids = list(e.supporting_finding_ids)
     return row
 
@@ -504,8 +513,8 @@ def _legacy_coverage(chat_id: UUID, c: DocCoverage) -> ChatMemoryCoverage:
     row.id = c.id
     row.chat_id = chat_id
     row.topic = c.topic
-    row.status = c.status
-    row.depth = c.depth
+    row.status = str(c.status)
+    row.depth = str(c.depth)
     return row
 
 
@@ -517,7 +526,6 @@ def _legacy_file(
     row.chat_id = chat_id
     row.file_id = f.id
     row.one_line_summary = f.summary or ""
-    row.status = f.status
     row.entity_ids = list(f.entity_ids)
     row.chunk_count = chunk_count
     row.preprocessed_at = datetime.now(UTC)

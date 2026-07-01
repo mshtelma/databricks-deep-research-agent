@@ -246,24 +246,15 @@ _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE = (
     "\n"
     "## How to investigate\n"
     "- Use the runtime tools bound to this lane (visible in your tool\n"
-    "  list) to gather source-backed evidence.\n"
-    "- For web search + fetch: call ``web_research`` FIRST. It returns\n"
-    "  search results AND auto-fetches the top-K page bodies in a\n"
-    "  single call; the URLs it discovers populate the shared URL\n"
-    "  index that downstream tools read. Cite by full URL; prefer\n"
-    "  primary and high-authority sources over aggregators.\n"
-    "- If ``web_crawl`` is bound (rare; only when extra URLs beyond\n"
-    "  auto_fetch_top_k are needed): call it ONLY AFTER ``web_research``\n"
-    "  has populated URLs. Pass a ``url_index`` from a prior\n"
-    "  ``web_research`` result; never call ``web_crawl`` with\n"
-    "  ``url_index=0`` before any search — the URL registry is empty\n"
-    "  at that point and the call will error.\n"
-    "- For corpus tools (vector_search, table_search, table_read,\n"
-    "  table_neighbors, table_load, table_aggregate): cite by\n"
-    "  (file_name, page_info, chunk_id) when those fields are available;\n"
-    "  do NOT cite URLs.\n"
-    "- For computation (compute, compute_namespace): pass numeric work\n"
-    "  through the tool — never narrate sums, ratios, or aggregations\n"
+    "  list) to gather source-backed evidence. Consult each bound\n"
+    "  tool's own description for when and how to call it; do not call\n"
+    "  tools that are not in your tool list.\n"
+    "- Anchor every numeric, named-entity, or dated claim to a cited\n"
+    "  source; prefer primary and high-authority sources over\n"
+    "  aggregators. Cite each source by the stable identifier its tool\n"
+    "  returns for it (for web pages, the full URL).\n"
+    "- Route any numeric work (sums, ratios, aggregations) through a\n"
+    "  computation tool when one is bound — never narrate calculations\n"
     "  from prose.\n"
     "\n"
     "## Output contract\n"
@@ -272,8 +263,8 @@ _PLACEHOLDER_SYSTEM_PROMPT_TEMPLATE = (
     "    inline citations.\n"
     "  - ``findings``: list of source-backed claims, each carrying its\n"
     "    source id, snippet, and confidence.\n"
-    "  - ``sources``: list of source records (URL or chunk_id, title,\n"
-    "    extracted_text).\n"
+    "  - ``sources``: list of source records (each with its identifier,\n"
+    "    title, extracted_text).\n"
     "\n"
     "If a sub-question is unanswerable from available evidence, mark\n"
     "it \"Data unavailable\" — do NOT improvise."
@@ -372,10 +363,35 @@ def _contract_evidence_block(contract: ResolvedToolContract | None) -> str:
     return "\n".join(lines)
 
 
+def _citation_guidance(contract: ResolvedToolContract | None) -> str:
+    """Citation-format guidance derived from the contract's evidence policy.
+
+    Never names a modality the workflow does not use: a ``web_only`` build
+    must not mention a corpus, while a corpus/structured build keeps its
+    document-identifier (file_name, page_info, chunk_id) guidance. Driven
+    purely off ``evidence_policy`` so it generalizes across every asset
+    configuration without hardcoding domains or tool kinds.
+    """
+    policy = contract.evidence_policy if contract is not None else "web_only"
+    if policy == "corpus_plus_web":
+        return (
+            "Cite web sources by full URL and corpus sources by their "
+            "(file_name, page_info, chunk_id) identifiers."
+        )
+    if policy in ("corpus_only", "structured_only"):
+        return (
+            "Cite every source by the identifiers its tool returns "
+            "(e.g. file_name, page_info, chunk_id)."
+        )
+    return "Cite every source by its full URL."
+
+
 def _contract_specialized_system_prompt(
     lane_focus: str,
     contract: ResolvedToolContract | None,
 ) -> str:
+    if contract is None:
+        return _placeholder_system_prompt(lane_focus)
     block = _contract_evidence_block(contract)
     if not block:
         return _placeholder_system_prompt(lane_focus)
@@ -387,13 +403,13 @@ def _contract_specialized_system_prompt(
         else "Mark missing evidence as Data unavailable rather than improvising."
     )
     return (
-        "You are a resource-grounded research agent for this workflow. "
-        "Use only the declared runtime tools and preserve the compact evidence "
-        "contract below while investigating the lane focus.\n\n"
+        "You are a research agent for this workflow. "
+        "Use only the runtime tools bound to this lane and preserve the compact "
+        "evidence contract below while investigating the lane focus.\n\n"
         f"{block}\n\n"
         "## Lane Focus\n"
         f"{lane_focus}\n\n"
-        "Use grounded resources before synthesis. "
+        "Gather source-backed evidence with the bound tools before synthesis. "
         f"{missing_evidence}"
     )
 
@@ -412,9 +428,9 @@ def _contract_specialized_user_prompt_template(
         f"{lane_focus}\n\n"
         "## Research request\n"
         "{{ query }}\n\n"
-        "Investigate the concern focus using the declared Databricks/corpus "
-        "tools. Return source-backed findings, resource identifiers used, "
-        "and explicit missing-data notes."
+        "Investigate the concern focus using the tools bound to this lane. "
+        f"{_citation_guidance(contract)} Return source-backed findings, the "
+        "source identifiers used, and explicit missing-data notes."
     )
 
 
@@ -518,7 +534,8 @@ def _build_asset_tool_plan(
       defaults appended. Required by case contracts that forbid public-web
       tool kinds.
     * ``corpus_plus_web`` → returns a ``ToolPlan`` containing the
-      recommended corpus tools PLUS ``web_research`` + ``web_crawl``.
+      recommended corpus tools PLUS ``web_research`` only (``web_crawl``
+      is no longer added by default — see the F1 note further below).
 
     Fails closed when any ``usage="required"`` asset has a severity=error
     diagnostic from :func:`recommend_tools_for_assets` (the most common

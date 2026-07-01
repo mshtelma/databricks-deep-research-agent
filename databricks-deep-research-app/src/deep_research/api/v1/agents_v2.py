@@ -1,27 +1,43 @@
 """Agent Designer V1 — agents_v2 CRUD endpoints with etag optimistic locking."""
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import logging
 import time
 from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, Response, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Header,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    status,
+)
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.agent_designer.mermaid_export import serialize_to_mermaid
-from deep_research.agent_designer.workflow_critic import (
-    CritiqueResult,
-    critique_workflow_against_intent,
+from deep_research.agent_designer.validation_cache import DbValidationCache
+from deep_research.agent_designer.workflow_validation import (
+    VALIDATOR_VERSION,
+    ValidationSource,
+    WorkflowValidationResult,
+    compute_semantic_hash,
+    validate_workflow,
 )
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
 from deep_research.core.databricks_auth import get_user_workspace_client
-from deep_research.db.session import get_db
+from deep_research.db.session import get_db, get_session_maker
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.agent_deployment import MAX_CLEANUP_ATTEMPTS
 from deep_research.models.agent_v2 import AgentRevision, AgentV2
@@ -103,78 +119,153 @@ def _extract_intent_from_definition(definition: dict[str, Any]) -> str:
     return ""
 
 
-async def _run_save_critic_gate(
+def _build_critic_llm(llm_client: Any) -> Any:
+    """Build the LLM adapter for the workflow validator, or ``None`` to skip.
+
+    Fail-open: any missing client or import/init failure returns ``None`` so save
+    reliability is never coupled to LLM availability — the validator then returns
+    ``verdict="skipped"`` and the save proceeds.
+    """
+    if llm_client is None:
+        logger.warning("save-time validation skipped: no llm_client available")
+        return None
+    try:
+        from deep_research.agent_designer.llm_adapter import AppLLMAdapter
+
+        return AppLLMAdapter(llm_client)
+    except Exception as exc:  # noqa: BLE001 — fail open, never block save
+        logger.warning(
+            "save-time validation adapter init failed: %s", exc, exc_info=True
+        )
+        return None
+
+
+async def _run_save_validation(
     definition: dict[str, Any],
     llm_client: Any,
-    *,
-    force: bool,
-) -> tuple[CritiqueResult | None, list[str]]:
-    """Run the workflow critic at save time.
+    session: AsyncSession,
+) -> WorkflowValidationResult:
+    """Validate ``definition`` via the single validator service + DB cache.
 
-    Returns (critique, warnings). When ``critique.verdict == "fail"`` AND
-    ``force is False``, the caller raises HTTP 422 to block the save.
-    ``needs_revision`` is surfaced as a warning header but does not block.
-    Returns ``(None, [])`` when the gate is skipped — e.g., the definition
-    carries no intent (legacy agent), no LLM client is wired, or the import
-    fails — so legacy/headless paths continue to work unchanged.
+    Never raises and never blocks (the caller decides via
+    :func:`_raise_if_validation_blocks`). Logs every non-pass verdict so the
+    outcome is never silent in the logs. An unchanged workflow (already validated
+    during the build loop) is served from the cache with no LLM call.
     """
-    intent = _extract_intent_from_definition(definition)
-    if not intent:
-        # No intent to judge against — legacy agents and bare configs pass.
-        return None, []
-    if llm_client is None:
-        logger.warning("save-time critic skipped: no llm_client available")
-        return None, []
-    try:
-        from deep_research.agent.adapters.llm_adapter import AppLLMAdapter
-
-        adapter = AppLLMAdapter(llm_client)
-    except Exception as exc:  # noqa: BLE001 — fail open, never block save
-        logger.warning("save-time critic adapter init failed: %s", exc, exc_info=True)
-        return None, []
-    try:
-        critique = await critique_workflow_against_intent(
-            definition=definition,
-            intent=intent,
-            required_outputs=None,
-            llm=adapter,
+    result = await validate_workflow(
+        definition=definition,
+        intent=_extract_intent_from_definition(definition),
+        required_outputs=None,
+        llm=_build_critic_llm(llm_client),
+        cache=DbValidationCache(session),
+    )
+    if result.verdict in ("needs_revision", "fail"):
+        logger.warning(
+            "save-time validation verdict=%s source=%s summary=%s",
+            result.verdict,
+            result.source.value,
+            result.summary,
         )
-    except Exception as exc:  # noqa: BLE001 — fail open, never block save
-        logger.warning("save-time critic call failed: %s", exc, exc_info=True)
-        return None, []
-
-    warnings: list[str] = []
-    if critique.verdict == "needs_revision":
-        warnings.append(
-            f"critic verdict=needs_revision: {critique.summary}"
-        )
-    elif critique.verdict == "fail" and force:
-        warnings.append(
-            f"critic verdict=fail (overridden by force=true): {critique.summary}"
-        )
-    return critique, warnings
+    return result
 
 
-def _raise_if_critic_blocks(
-    critique: CritiqueResult | None,
+def _raise_if_validation_blocks(
+    result: WorkflowValidationResult,
     *,
     force: bool,
+    strict: bool,
 ) -> None:
-    """Raise HTTP 422 when ``verdict == "fail"`` and ``force`` is not set."""
-    if critique is None or force:
+    """Raise HTTP 422 on ``verdict == "fail"`` — ONLY in strict mode and when
+    ``force`` is not set.
+
+    Advisory mode (the default) never hard-blocks a save on the stochastic LLM
+    verdict: structural + deterministic-semantic validation already ran at
+    request parse (``schemas.agent_v2``), and the verdict is surfaced to the UI
+    via the response body + warning header instead. Strict mode
+    (``?validation_mode=strict``) restores the hard gate for callers that want
+    it (CI / admin / import); ``?force=true`` overrides only that gate.
+    """
+    if force or not strict:
         return
-    if critique.verdict == "fail":
+    if result.verdict == "fail":
+        payload = result.model_dump(mode="json")
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail={
                 "message": (
-                    "Workflow critic verdict=fail — the workflow does not "
+                    "Workflow validation verdict=fail — the workflow does not "
                     "answer the user's request. Pass ?force=true to save "
                     "anyway, or revise the workflow first."
                 ),
-                "critique": critique.model_dump(),
+                # Surfaced under BOTH keys: "validation" is the canonical
+                # WorkflowValidationResult contract; "critique" is kept so the
+                # current frontend AgentCriticError parser (which keys on
+                # "critique") still gets the typed path. Safe because a strict
+                # block only fires on verdict=="fail" (a valid CritiqueResult
+                # verdict). Drop "critique" once the FE reads "validation".
+                "validation": payload,
+                "critique": payload,
             },
         )
+
+
+def _raise_if_coverage_blocks(definition: dict[str, Any], *, force: bool) -> None:
+    """Deterministic save-gate: block the save when the report producer does not
+    cover every requested topic, UNLESS ``force`` (the frontend 'Save draft anyway').
+
+    Fast (no LLM call) so it never times out, and force-overridable so a deliberate
+    work-in-progress draft can still be persisted. Structural errors already hard-block
+    at request parse (``schemas.agent_v2``); the stochastic LLM critic stays advisory
+    (background) — this gate is the deterministic, specific, never-silent quality bar."""
+    if force:
+        return
+    from deep_research.agent_designer.semantic_validation import (
+        prompt_term_coverage_errors,
+    )
+
+    errors = prompt_term_coverage_errors(definition)
+    if errors:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={
+                "message": (
+                    "This workflow can't be saved yet — its report doesn't cover every "
+                    "requested topic. Resolve these (or pass ?force=true to save a draft):"
+                ),
+                "coverage_errors": [
+                    {"message": e.message, "path": e.path} for e in errors
+                ],
+            },
+        )
+
+
+def _validation_warning_header(result: WorkflowValidationResult) -> str | None:
+    """Latin-1-safe ``X-Critic-Warning`` value for a non-pass verdict, else None."""
+    if result.verdict in ("needs_revision", "fail"):
+        return _critic_warning_header_value(
+            [f"validation verdict={result.verdict}: {result.summary}"]
+        )
+    return None
+
+
+def _stamp_validation(agent: AgentV2, result: WorkflowValidationResult) -> None:
+    """Persist the latest verdict + content hash on the agent row.
+
+    Authoritative DB state — never trust AST-embedded metadata (spoofable)."""
+    agent.last_validation = result.model_dump(mode="json")
+    agent.last_validation_verdict = result.verdict
+    agent.last_validation_hash = result.semantic_hash
+
+
+def _critic_warning_header_value(warnings: list[str]) -> str:
+    """Return a Starlette-safe HTTP header value for critic warnings.
+
+    Starlette encodes response headers as latin-1. Critic summaries come from
+    model text and may include Unicode punctuation or newlines, so normalize
+    this advisory header before assigning it to ``response.headers``.
+    """
+    value = "; ".join(warnings).replace("\r", " ").replace("\n", " ")
+    return value.encode("latin-1", errors="replace").decode("latin-1")
 
 
 class RevisionResponse(BaseModel):
@@ -199,39 +290,242 @@ def _to_response(agent: AgentV2) -> AgentV2Response:
     return AgentV2Response.model_validate(agent)
 
 
+def _response_with_validation(
+    agent: AgentV2,
+    validation: WorkflowValidationResult | None,
+    *,
+    pending: bool = False,
+) -> AgentV2Response:
+    """``_to_response`` plus the advisory validation result + pending flag in the
+    body so the UI can surface the verdict (never silent), regardless of mode.
+
+    ``pending=True`` means a background validation for the current definition is
+    in flight; ``validation`` is then None and the UI should poll GET until the
+    verdict lands."""
+    resp = AgentV2Response.model_validate(agent)
+    resp.validation = validation
+    resp.validation_pending = pending
+    return resp
+
+
+# ----- Decoupled advisory validation (off the request path) ------------------
+#
+# The advisory save (the only path the UI uses) commits the write durably and
+# returns immediately; the slow LLM critic runs in a FastAPI background task so a
+# save can NEVER hit the frontend's 30s request timeout. A cache hit still
+# returns the verdict inline (no background needed). Strict mode keeps the old
+# inline-blocking behavior. See `.omc/plans/decouple-designer-save-validation.md`.
+
+# Hard cap on the background validator: a wedged critic stream can never run
+# longer than this. The request has already returned — this only bounds the task
+# (and lets the frontend's pending-poll resolve to a fallback instead of hanging).
+BG_VALIDATION_TIMEOUT_S = 120.0
+
+
+async def _advisory_save_probe(
+    agent: AgentV2, session: AsyncSession
+) -> tuple[WorkflowValidationResult | None, bool]:
+    """Fast, LLM-free advisory check at save time. Returns ``(validation, needs_bg)``:
+
+    * cache HIT  -> ``(cached authoritative verdict, False)``  [instant; caller stamps]
+    * no intent  -> ``(None, False)``                          [nothing to judge]
+    * cache MISS -> ``(None, True)``  [caller schedules background validation]
+
+    Calls the ONE validator with ``llm=None`` so it only consults the content-
+    addressed cache and never blocks on the critic — the whole point of the
+    decoupling.
+    """
+    intent = _extract_intent_from_definition(agent.definition)
+    if not intent.strip():
+        return None, False
+    probe = await validate_workflow(
+        definition=agent.definition,
+        intent=intent,
+        required_outputs=None,
+        llm=None,
+        cache=DbValidationCache(session),
+    )
+    if probe.source == ValidationSource.CACHE:
+        return probe, False
+    return None, True
+
+
+def _bg_fallback_result(
+    definition: dict[str, Any], intent: str, reason: str
+) -> WorkflowValidationResult:
+    """A non-authoritative ``skipped`` result for when the background validator
+    cannot finish (timeout). Carries the CURRENT semantic hash so the stale-race
+    guard still stamps it — clearing the frontend's pending state — but it is
+    never cached (``cacheable=False``)."""
+    return WorkflowValidationResult(
+        verdict="skipped",
+        summary=(
+            f"Background validation did not complete ({reason}). The agent is "
+            "saved; ask in the designer chat to re-run validation."
+        ),
+        semantic_hash=compute_semantic_hash(definition, intent),
+        intent_hash=hashlib.sha1(intent.strip().encode("utf-8")).hexdigest(),
+        validator_version=VALIDATOR_VERSION,
+        source=ValidationSource.FALLBACK,
+        cacheable=False,
+    )
+
+
+async def _validate_in_background(
+    *,
+    agent_id: UUID,
+    owner_id: str,
+    definition: dict[str, Any],
+    llm_client: Any,
+) -> None:
+    """Run the advisory validator OFF the request path (the save already
+    committed), warm the cache, and stamp the verdict on the agent row.
+
+    Opens its OWN session (the request session is closed by now). Stamps ONLY if
+    the agent's CURRENT definition still matches what we validated, so a newer
+    save is never clobbered by a slower older validation. Never raises: a
+    background failure must not affect the (already successful) save.
+    """
+    intent = _extract_intent_from_definition(definition)
+    try:
+        session_maker = get_session_maker()
+        async with session_maker() as session:
+            try:
+                result = await asyncio.wait_for(
+                    validate_workflow(
+                        definition=definition,
+                        intent=intent,
+                        required_outputs=None,
+                        llm=_build_critic_llm(llm_client),
+                        cache=DbValidationCache(session),
+                    ),
+                    timeout=BG_VALIDATION_TIMEOUT_S,
+                )
+            except TimeoutError:
+                logger.warning(
+                    "bg-validation timed out after %.0fs for agent %s",
+                    BG_VALIDATION_TIMEOUT_S,
+                    agent_id,
+                )
+                result = _bg_fallback_result(
+                    definition, intent, f"timed out after {BG_VALIDATION_TIMEOUT_S:.0f}s"
+                )
+
+            agent = await AgentV2Service(session).get_for_user(agent_id, owner_id)
+            if agent is None:
+                return
+            current_hash = compute_semantic_hash(
+                agent.definition, _extract_intent_from_definition(agent.definition)
+            )
+            if current_hash != result.semantic_hash:
+                logger.info(
+                    "bg-validation result is stale (agent %s changed since save); "
+                    "not stamping",
+                    agent_id,
+                )
+                return
+            _stamp_validation(agent, result)
+            await session.commit()
+            if result.verdict in ("needs_revision", "fail"):
+                logger.warning(
+                    "bg-validation verdict=%s source=%s summary=%s",
+                    result.verdict,
+                    result.source.value,
+                    result.summary,
+                )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:  # noqa: BLE001 — a background task must never crash
+        logger.warning(
+            "bg-validation failed for agent %s: %s", agent_id, exc, exc_info=True
+        )
+
+
+def _hydrate_get_validation(
+    agent: AgentV2,
+) -> tuple[WorkflowValidationResult | None, bool]:
+    """For GET: surface the stamped verdict only when it matches the agent's
+    CURRENT definition. Returns ``(validation, pending)``.
+
+    ``pending=True`` means the workflow has an intent to judge but no current
+    verdict is stamped yet (an advisory background validation is/should be in
+    flight). The frontend only acts on this flag while polling an in-flight save,
+    so a never-validated legacy agent reading ``pending=True`` is harmless.
+    """
+    intent = _extract_intent_from_definition(agent.definition)
+    if not intent.strip():
+        return None, False
+    stamped = agent.last_validation
+    if isinstance(stamped, dict) and agent.last_validation_hash == compute_semantic_hash(
+        agent.definition, intent
+    ):
+        try:
+            return WorkflowValidationResult.model_validate(stamped), False
+        except ValidationError:
+            return None, True
+    return None, True
+
+
 @router.post("", response_model=AgentV2Response, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     request: CreateAgentV2Request,
     response: Response,
     user: CurrentUser,
     fastapi_request: Request,
-    force: bool = Query(False, description="Bypass the LLM critic verdict=fail gate."),
+    background_tasks: BackgroundTasks,
+    force: bool = Query(False, description="Bypass the strict LLM critic verdict=fail gate."),
+    validation_mode: str = Query(
+        "advisory",
+        description=(
+            "'advisory' (default): save proceeds even on critic verdict=fail; "
+            "the verdict is returned in the response body. 'strict': block "
+            "with 422 on verdict=fail unless force=true."
+        ),
+    ),
     session: AsyncSession = Depends(get_db),
 ) -> AgentV2Response:
-    # Save-time critic gate: block on verdict=fail unless force=true.
-    # Reads the AST definition from the request payload; uses the app's LLM
-    # client. Critique failures are logged and treated as "skip gate" so
-    # save reliability is never coupled to LLM availability.
-    llm_client = getattr(fastapi_request.app.state, "llm_client", None)
-    critique, critic_warnings = await _run_save_critic_gate(
-        request.definition or {},
-        llm_client,
-        force=force,
-    )
-    _raise_if_critic_blocks(critique, force=force)
-
+    # ADVISORY (default, the only path the UI uses): commit the write durably,
+    # then validate OFF the request path so the save can never hit the client's
+    # 30s timeout. A cache hit returns the verdict inline; a cache miss runs the
+    # critic in a background task that stamps the verdict + warms the cache.
+    # STRICT mode (?validation_mode=strict) validates inline and 422s on
+    # verdict=fail (rolling back the create). Structural/semantic validation
+    # already blocked at request parse.
     service = AgentV2Service(session)
     _t0 = time.monotonic()
     agent = await service.create(owner_id=user.user_id, request=request)
+    llm_client = getattr(fastapi_request.app.state, "llm_client", None)
+    needs_bg = False
+    validation: WorkflowValidationResult | None
+    if validation_mode == "strict":
+        validation = await _run_save_validation(agent.definition, llm_client, session)
+        _raise_if_validation_blocks(validation, force=force, strict=True)
+        _stamp_validation(agent, validation)
+    else:
+        validation, needs_bg = await _advisory_save_probe(agent, session)
+        if validation is not None:
+            _stamp_validation(agent, validation)
+    # Deterministic coverage gate (force-overridable). Structural errors already
+    # blocked at request parse; the LLM critic stays advisory/background.
+    _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
+    if needs_bg:
+        background_tasks.add_task(
+            _validate_in_background,
+            agent_id=agent.id,
+            owner_id=user.user_id,
+            definition=agent.definition,
+            llm_client=llm_client,
+        )
     record_save_latency("create", (time.monotonic() - _t0) * 1000)
     response.headers["ETag"] = agent.etag
-    if critic_warnings:
-        # Surface needs_revision / force-override warnings to the UI so the
-        # user knows the agent saved but the critic flagged issues.
-        response.headers["X-Critic-Warning"] = "; ".join(critic_warnings)
-    await service._write_revision_best_effort(agent, agent.etag, user.user_id)
-    return _to_response(agent)
+    header = _validation_warning_header(validation) if validation is not None else None
+    if header is not None:
+        response.headers["X-Critic-Warning"] = header
+    await service._write_revision_best_effort(
+        agent, agent.etag, user.user_id, validation=validation
+    )
+    return _response_with_validation(agent, validation, pending=needs_bg)
 
 
 @router.get("/{agent_id}", response_model=AgentV2Response)
@@ -246,7 +540,11 @@ async def get_agent(
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
     response.headers["ETag"] = agent.etag
-    return _to_response(agent)
+    # Surface the stamped advisory verdict (gated to the current definition) so
+    # the UI can poll this endpoint after an advisory save until the background
+    # validation lands (validation_pending flips False).
+    validation, pending = _hydrate_get_validation(agent)
+    return _response_with_validation(agent, validation, pending=pending)
 
 
 @router.patch("/{agent_id}", response_model=AgentV2Response)
@@ -256,8 +554,17 @@ async def update_agent(
     response: Response,
     user: CurrentUser,
     fastapi_request: Request,
+    background_tasks: BackgroundTasks,
     if_match: str | None = Header(default=None, alias="If-Match"),
-    force: bool = Query(False, description="Bypass the LLM critic verdict=fail gate."),
+    force: bool = Query(False, description="Bypass the strict LLM critic verdict=fail gate."),
+    validation_mode: str = Query(
+        "advisory",
+        description=(
+            "'advisory' (default): save proceeds even on critic verdict=fail; "
+            "the verdict is returned in the response body. 'strict': block "
+            "with 422 on verdict=fail unless force=true."
+        ),
+    ),
     session: AsyncSession = Depends(get_db),
 ) -> AgentV2Response:
     if not if_match:
@@ -265,20 +572,11 @@ async def update_agent(
             status_code=428,
             detail="If-Match header required for PATCH",
         )
-    # Save-time critic gate: only runs when the PATCH carries a definition
-    # payload (UpdateAgentV2Request allows partial updates; name/description
-    # changes without a new definition skip the gate).
-    critique = None
-    critic_warnings: list[str] = []
-    if request.definition is not None:
-        llm_client = getattr(fastapi_request.app.state, "llm_client", None)
-        critique, critic_warnings = await _run_save_critic_gate(
-            request.definition,
-            llm_client,
-            force=force,
-        )
-        _raise_if_critic_blocks(critique, force=force)
-
+    # ETag is checked inside service.update FIRST, so a conflicting save 409s
+    # before any LLM call. Validation then runs on the persisted (materialized)
+    # definition — only when the PATCH carried one (partial name/description
+    # updates skip it) — via the ONE validator + cache; advisory by default,
+    # strict mode 422s on verdict=fail (which rolls back the update).
     service = AgentV2Service(session)
     _t0 = time.monotonic()
     try:
@@ -291,13 +589,40 @@ async def update_agent(
         ) from exc
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    validation: WorkflowValidationResult | None = None
+    llm_client = getattr(fastapi_request.app.state, "llm_client", None)
+    needs_bg = False
+    if request.definition is not None:
+        if validation_mode == "strict":
+            validation = await _run_save_validation(agent.definition, llm_client, session)
+            _raise_if_validation_blocks(validation, force=force, strict=True)
+            _stamp_validation(agent, validation)
+        else:
+            validation, needs_bg = await _advisory_save_probe(agent, session)
+            if validation is not None:
+                _stamp_validation(agent, validation)
+        # Deterministic coverage gate (force-overridable) — only on a definition change.
+        _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
+    if needs_bg:
+        background_tasks.add_task(
+            _validate_in_background,
+            agent_id=agent.id,
+            owner_id=user.user_id,
+            definition=agent.definition,
+            llm_client=llm_client,
+        )
     record_save_latency("update", (time.monotonic() - _t0) * 1000)
     response.headers["ETag"] = agent.etag
-    if critic_warnings:
-        response.headers["X-Critic-Warning"] = "; ".join(critic_warnings)
-    await service._write_revision_best_effort(agent, agent.etag, user.user_id)
-    return _to_response(agent)
+    header = (
+        _validation_warning_header(validation) if validation is not None else None
+    )
+    if header is not None:
+        response.headers["X-Critic-Warning"] = header
+    await service._write_revision_best_effort(
+        agent, agent.etag, user.user_id, validation=validation
+    )
+    return _response_with_validation(agent, validation, pending=needs_bg)
 
 
 @router.delete("/{agent_id}", status_code=status.HTTP_204_NO_CONTENT)

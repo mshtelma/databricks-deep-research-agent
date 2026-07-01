@@ -236,6 +236,18 @@ def test_default_breadth_and_depth() -> None:
     assert [len(p["children"]) for p in parallels] == [4, 2]
 
 
+def test_generated_researcher_labels_are_semantic_not_ordinals() -> None:
+    ast = build_blueprint(_sig(tree_breadth=4, tree_depth=2), INTENT)
+    researcher_labels = [
+        str(node.get("label") or "")
+        for node in _agents(ast)
+        if (node.get("config") or {}).get("subtype") == "researcher"
+    ]
+    assert researcher_labels
+    assert all("primary survey angle" in label.casefold() for label in researcher_labels)
+    assert not any(label.casefold() in {"researcher 1", "researcher 2"} for label in researcher_labels)
+
+
 def test_breadth_depth_clamped_for_non_signature_callers() -> None:
     # the signature field caps the range, but the builder's clamp is a secondary
     # defense for direct (non-signature) callers passing out-of-range values.

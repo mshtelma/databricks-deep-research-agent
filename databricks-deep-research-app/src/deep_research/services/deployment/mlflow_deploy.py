@@ -22,6 +22,7 @@ when this code path is exercised in production.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import logging
 import re
@@ -275,7 +276,7 @@ def _deploy_via_sdk(
     import mlflow.pyfunc  # noqa: PLC0415
 
     try:
-        from databricks import agents  # noqa: PLC0415 -- lazy
+        agents = importlib.import_module("databricks.agents")
     except ImportError:
         return DeploymentResult(
             success=False,
@@ -376,7 +377,7 @@ def _deactivate_via_sdk(deployment: AgentDeployment) -> None:
     import mlflow  # noqa: PLC0415
 
     try:
-        from databricks import agents  # noqa: PLC0415
+        agents = importlib.import_module("databricks.agents")
     except ImportError:
         return  # If the SDK is missing the deployment was never live anyway.
 

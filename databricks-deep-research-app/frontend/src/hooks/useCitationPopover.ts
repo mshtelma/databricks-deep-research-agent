@@ -206,7 +206,6 @@ export function useCitationPopover(
     if (resolvedKeyRef.current === activeKey) {
       if (!churnWarnedRef.current) {
         churnWarnedRef.current = true;
-        // eslint-disable-next-line no-console
         console.warn(
           '[useCitationPopover] citation marker keeps remounting; the popover anchor ' +
             'cannot stabilize. Ensure MarkdownRenderer citation callbacks are stable.'

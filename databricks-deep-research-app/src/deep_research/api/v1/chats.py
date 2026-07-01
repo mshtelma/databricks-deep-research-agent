@@ -3,7 +3,7 @@
 import json as json_module
 import logging
 from datetime import datetime
-from typing import Any
+from typing import Any, Protocol
 from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
@@ -47,6 +47,18 @@ logger = logging.getLogger(__name__)
 INCOGNITO_SESSION_COOKIE = "incognito_session"
 
 
+class _ChatLike(Protocol):
+    id: UUID
+    user_id: str
+    title: str | None
+    status: Any
+    chat_type: Any
+    incognito_session_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+    deleted_at: datetime | None
+
+
 def _research_session_inline(
     rs: Any, sources: list[SourceResponse]
 ) -> ResearchSessionInline | None:
@@ -88,7 +100,7 @@ def _research_session_inline(
     return None
 
 
-def _chat_to_response(chat: "object") -> ChatResponse:
+def _chat_to_response(chat: _ChatLike) -> ChatResponse:
     """Convert Chat model or ChatView to ChatResponse schema."""
     return ChatResponse(
         id=chat.id,
@@ -540,7 +552,7 @@ async def convert_incognito_to_regular(
     # Convert to regular — update via service
     # Build a mutable proxy for convert_to_regular
     class _ChatProxy:
-        def __init__(self, c: object) -> None:
+        def __init__(self, c: _ChatLike) -> None:
             self._c = c
             # Copy mutable attrs
             self.id = c.id

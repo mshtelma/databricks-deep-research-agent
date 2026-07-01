@@ -248,7 +248,7 @@ class ChatMemoryService:
             entities=[self._entity_to_record(e) for e in self._entities.by_id.values()],
             findings=[self._finding_to_projection(f) for f in self._findings],
             coverage=[
-                CoverageEntry(topic=c.topic, status=c.status, depth=c.depth)  # type: ignore[arg-type]
+                CoverageEntry(topic=c.topic, status=c.status, depth=c.depth)
                 for c in self._coverage
             ],
             plugin_extensions={
@@ -879,7 +879,7 @@ class ChatMemoryService:
         return KnowledgeFinding(
             id=f.id,
             content=f.content,
-            confidence=f.confidence,  # type: ignore[arg-type]
+            confidence=f.confidence,
             source_step=f.source_step,
             origin=f.origin,
             entity_ids=[

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from deep_research.core.app_config import (
+    AgentEffortConfig,
     BackgroundConfig,
     CitationVerificationConfig,
     CoordinatorConfig,
@@ -26,6 +27,19 @@ from deep_research.core.app_config import (
 def get_researcher_config() -> ResearcherConfig:
     """Get Researcher agent configuration."""
     return get_app_config().agents.researcher
+
+
+def get_agent_effort_config() -> AgentEffortConfig:
+    """Get the effort/depth scaling config for custom-agent workflows."""
+    return get_app_config().agent_effort
+
+
+def get_research_timeout_seconds() -> int:
+    """Hard wall-clock cap (seconds) for a single research run (H1 watchdog).
+
+    Tunable per-target via the app-config overlay; default 1800 (30 min).
+    """
+    return get_app_config().orchestration.research_timeout_seconds
 
 
 def get_planner_config() -> PlannerConfig:

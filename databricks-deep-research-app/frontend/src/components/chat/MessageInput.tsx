@@ -162,6 +162,7 @@ function agentV2ToSelectorSummary(agent: AgentV2Summary): CustomAgentSummary {
     visibility: agent.visibility === 'workspace' ? 'workspace' : 'private',
     ownerId: agent.visibility === 'system' ? 'system' : agent.owner_id,
     inAppActive: agent.in_app_active,
+    defaultVerifySources: agent.default_verify_sources,
   };
 }
 
@@ -485,13 +486,24 @@ export function MessageInput({
     }
   }, [discoveryData?.sources, disabledSources, setDisabledSources]);
 
-  // Reset verifySources when query mode changes (only when selector is visible)
-  // Default to OFF - user must explicitly enable source verification
+  // Reset verifySources when query mode changes — only when the selector is
+  // visible AND no custom agent is selected. For a selected agent the seeding
+  // effect below owns the default, so this never clobbers a seeded/edited value.
   React.useEffect(() => {
-    if (effectiveShowVerifySources) {
+    if (effectiveShowVerifySources && !selectedAgent) {
       setVerifySources(false);
     }
-  }, [queryMode, effectiveShowVerifySources]);
+  }, [queryMode, effectiveShowVerifySources, selectedAgent]);
+
+  // Seed the verify toggle from the selected agent's authored default
+  // (reclaim => on; classical_lite/none => off). Re-seeds only when the selected
+  // agent changes (keyed on id), so a user's later toggle change overrides and
+  // persists for that agent ("toggle wins"). Absent field => true (safe floor).
+  React.useEffect(() => {
+    if (selectedAgent) {
+      setVerifySources(selectedAgent.defaultVerifySources ?? true);
+    }
+  }, [selectedAgent?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // T053-T054: Validation - Check if submission should be blocked due to source scope issues
   const enterpriseSources = React.useMemo(() => {
@@ -650,6 +662,23 @@ export function MessageInput({
             onChange={setResearchDepth}
             disabled={disabled || isLoading}
           />
+        )}
+        {/* Effort: a selected CUSTOM agent runs its own saved workflow, so the
+            built-in Depth control is hidden — this scales that agent's researcher
+            tool budgets + loop iterations for THIS turn. Auto = the agent's saved
+            Research-depth default (set in the Designer). */}
+        {selectedAgent && (
+          <>
+            <span
+              className="mx-0.5 h-5 w-px shrink-0 bg-db-gray-lines"
+              aria-hidden="true"
+            />
+            <EffortChip
+              value={researchDepth}
+              onChange={setResearchDepth}
+              disabled={disabled || isLoading}
+            />
+          </>
         )}
         {/* Sources is the control that decides Answer→Simple vs Web; show it in
             both modes (unless the selected agent defines its own sources). */}
@@ -1133,6 +1162,84 @@ function DepthChip({
   );
 }
 
+// Effort chip for a selected CUSTOM agent. Reuses the ResearchDepth values the
+// backend already understands, relabelled to the effort vocabulary: 'medium' is
+// the no-op midpoint (Standard), 'extended' is Deep, and 'auto' defers to the
+// agent's saved research_effort default.
+const EFFORT_CHIP_OPTIONS: { value: ResearchDepth; label: string }[] = [
+  { value: 'auto', label: 'Auto' },
+  { value: 'light', label: 'Light' },
+  { value: 'medium', label: 'Standard' },
+  { value: 'extended', label: 'Deep' },
+];
+
+/** Effort chip + popover (Auto / Light / Standard / Deep) for custom agents. */
+function EffortChip({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: ResearchDepth;
+  onChange: (d: ResearchDepth) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = React.useState(false);
+  const label = EFFORT_CHIP_OPTIONS.find((o) => o.value === value)?.label ?? 'Auto';
+  return (
+    <Popover.Root open={open} onOpenChange={setOpen}>
+      <Popover.Trigger asChild>
+        <button
+          type="button"
+          disabled={disabled}
+          data-testid="composer-effort-chip"
+          className={composerChipClass(open)}
+        >
+          <Zap size={14} className="text-db-gray-text" />
+          <span className="text-db-gray-text">Effort</span>
+          <span className="font-semibold text-db-navy-800">{label}</span>
+          <ChevronDown size={13} className="text-db-navy-400" />
+        </button>
+      </Popover.Trigger>
+      <Popover.Portal>
+        <Popover.Content
+          side="top"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          className="z-50 w-44 rounded-db-md border border-db-gray-lines bg-white p-1 shadow-lg"
+        >
+          {EFFORT_CHIP_OPTIONS.map((o) => {
+            const active = o.value === value;
+            return (
+              <button
+                key={o.value}
+                type="button"
+                onClick={() => {
+                  onChange(o.value);
+                  setOpen(false);
+                }}
+                className={cn(
+                  'flex w-full items-center gap-2 rounded-db-md px-2 py-1.5 text-left text-[13px] transition-colors',
+                  active
+                    ? 'bg-db-oat-light font-medium text-db-navy-800'
+                    : 'text-db-navy-800 hover:bg-db-oat-light',
+                )}
+              >
+                {active ? (
+                  <Check size={13} className="text-db-lava-600" />
+                ) : (
+                  <span className="w-[13px]" />
+                )}
+                {o.label}
+              </button>
+            );
+          })}
+        </Popover.Content>
+      </Popover.Portal>
+    </Popover.Root>
+  );
+}
+
 const SOURCE_CHANNELS: { id: keyof ComposerSources; label: string; icon: typeof Globe }[] = [
   { id: 'web', label: 'Web', icon: Globe },
   { id: 'ent', label: 'Enterprise', icon: Database },
@@ -1335,7 +1442,7 @@ function AgentPickerDropdown({
   );
 
   return (
-    <div data-testid="agent-selector-dropdown" className="absolute left-0 top-full z-50 mt-1 w-64 max-h-64 overflow-auto rounded-md border bg-popover p-1 shadow-md">
+    <div data-testid="agent-selector-dropdown" className="absolute left-0 bottom-full z-50 mb-1 w-64 max-h-64 overflow-auto rounded-md border bg-popover p-1 shadow-md">
       {myAgents.length > 0 && (
         <>
           <div className="px-3 py-1 text-xs font-semibold text-muted-foreground uppercase tracking-wider">

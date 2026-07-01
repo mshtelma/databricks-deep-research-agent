@@ -170,6 +170,10 @@ plugins = ["pydantic.mypy"]
 module = [
     "mlflow.*",
     "databricks.*",
+    "asyncpg",
+    "asyncpg.*",
+    "databricks_mcp",
+    "databricks_mcp.*",
     "bm25s.*",
     # Optional binary-export backends (the 'export' extra). Deferred imports;
     # absent in the base/dev env, so mypy cannot resolve their stubs.

@@ -417,8 +417,14 @@ class LoopNodeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     until: Condition  # Serialised Condition (StateCondition / LLMCondition / Composite)
-    min_iterations: int = 1
-    max_iterations: int = 10
+    min_iterations: int = Field(
+        default=1, description="Minimum loop passes before the until-condition can stop the loop."
+    )
+    max_iterations: int = Field(
+        default=10,
+        description="Hard cap on loop passes (raise for deeper iterative refinement). "
+        "Scaled by the agent's effort level at runtime.",
+    )
 
 
 class ConditionalNodeConfig(BaseModel):
@@ -473,8 +479,14 @@ class PlanAndExecuteNodeConfig(BaseModel):
     item_state_key: str = "current_step"
     body: WorkflowNode | None = None  # Serialised child node(s) to run per item
     evaluator: dict[str, Any] | None = None  # Optional evaluator agent config
-    max_iterations: int = 10
-    min_iterations: int = 1
+    max_iterations: int = Field(
+        default=10,
+        description="Max research steps executed across all replan cycles (raise to dig "
+        "deeper into multi-step questions). Scaled by the agent's effort level at runtime.",
+    )
+    min_iterations: int = Field(
+        default=1, description="Minimum research steps before the evaluator may declare completion."
+    )
     max_replan_cycles: int = 3
     complete_on_exhaustion: bool = True
     planner_guidance: str = ""  # Free-text guidance injected into planner prompt

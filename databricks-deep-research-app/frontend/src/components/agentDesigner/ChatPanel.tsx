@@ -42,7 +42,13 @@ import { useDesignerSettings } from '@/hooks/useDesignerSettings';
 import { PendingMutationCard } from './PendingMutationCard';
 import { MutationConflictModal } from './MutationConflictModal';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
-import type { ChatMessage, DesignerAsset } from '@/types/agentDesigner';
+import type {
+  ActivityStep,
+  ArchitectSynopsis,
+  ChatMessage,
+  CriticReview,
+  DesignerAsset,
+} from '@/types/agentDesigner';
 import type { AST } from '@/types/ast';
 
 // ---------------------------------------------------------------------------
@@ -839,6 +845,335 @@ function MessageRow({ message, messages }: MessageRowProps): React.ReactElement 
 }
 
 // ---------------------------------------------------------------------------
+// Designer-review cards (the "what I built" + "what the critic flagged"
+// surfaces) and the collapsed tool-activity disclosure.
+// ---------------------------------------------------------------------------
+
+/** "What I built / changed" — a readable synopsis of the workflow, derived
+ *  deterministically on the backend (no raw JSON). */
+function WorkflowSynopsisCard({ synopsis }: { synopsis: ArchitectSynopsis }): React.ReactElement {
+  const verb = synopsis.change_kind === 'edited' ? 'Updated' : 'Built';
+  const topology = synopsis.topology && synopsis.topology !== 'unknown' ? synopsis.topology.replace(/_/g, ' ') : null;
+  return (
+    <div
+      className="overflow-hidden rounded-db-md border border-db-gray-lines bg-white shadow-db-xs"
+      aria-label={synopsis.headline}
+    >
+      <div className="px-3 py-2.5">
+        <div className="mb-1 flex items-start gap-2">
+          <span className="mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] bg-db-blue-100 text-db-blue-700">
+            <Sparkles size={13} />
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+              <span className="text-[12px] font-semibold text-db-navy-800">{synopsis.headline}</span>
+              {topology && (
+                <span className="rounded-sm bg-db-blue-100 px-1.5 py-0.5 font-db-mono text-[9px] font-semibold uppercase tracking-[0.04em] text-db-blue-700">
+                  {topology}
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-[11px] uppercase tracking-[0.04em] text-db-gray-text">
+              {verb} this turn
+            </p>
+          </div>
+        </div>
+
+        {synopsis.lanes.length > 0 && (
+          <ul className="mt-2 space-y-1">
+            {synopsis.lanes.map((lane, idx) => (
+              <li key={`${lane.label}-${idx}`} className="min-w-0">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="truncate text-[12px] font-medium text-db-navy-800">{lane.label}</span>
+                  {lane.tools.map((tool) => (
+                    <span
+                      key={tool}
+                      className="rounded-db-pill border border-db-gray-lines bg-db-oat-light px-2 py-0.5 text-[10px] font-medium text-db-navy-800"
+                    >
+                      {tool}
+                    </span>
+                  ))}
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {synopsis.pipeline.length > 0 && (
+          <p className="mt-2 text-[11px] leading-[1.45] text-db-gray-text">{synopsis.pipeline.join(' → ')}</p>
+        )}
+
+        {synopsis.outputs.length > 0 && (
+          <p className="mt-2 text-[11px] leading-[1.45] text-db-gray-text">
+            <span className="font-medium text-db-navy-800">Outputs: </span>
+            {synopsis.outputs.join(', ')}
+          </p>
+        )}
+
+        {synopsis.warnings.length > 0 && (
+          <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[11px] leading-[1.4] text-db-yellow-800">
+            {synopsis.warnings.map((w, idx) => (
+              <li key={`${w}-${idx}`}>{w}</li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** "Designer review" — the critic's structured verdict + findings. */
+function CriticReviewCard({ review }: { review: CriticReview }): React.ReactElement {
+  const verdictMeta: Record<
+    CriticReview['verdict'],
+    { label: string; bg: string; color: string; border: string; icon: React.ReactNode }
+  > = {
+    pass: {
+      label: 'Pass',
+      bg: 'bg-db-green-300/40',
+      color: 'text-db-green-700',
+      border: 'border-db-green-300',
+      icon: <CheckCircle2 size={13} />,
+    },
+    needs_revision: {
+      label: 'Needs revision',
+      bg: 'bg-db-yellow-300/40',
+      color: 'text-db-yellow-800',
+      border: 'border-db-yellow-300',
+      icon: <AlertTriangle size={13} />,
+    },
+    fail: {
+      label: 'Fail',
+      bg: 'bg-db-lava-100',
+      color: 'text-db-lava-700',
+      border: 'border-db-lava-300',
+      icon: <AlertCircle size={13} />,
+    },
+  };
+  const meta = verdictMeta[review.verdict] ?? verdictMeta.needs_revision;
+  const hasFindings =
+    review.agent_findings.length > 0 || review.coverage_gaps.length > 0 || review.output_gaps.length > 0;
+  return (
+    <div
+      className={`overflow-hidden rounded-db-md border bg-white shadow-db-xs ${meta.border}`}
+      aria-label={`Designer review: ${meta.label}`}
+    >
+      <div className="px-3 py-2.5">
+        <div className="mb-1 flex items-start gap-2">
+          <span className={`mt-0.5 inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-[5px] ${meta.bg} ${meta.color}`}>
+            {meta.icon}
+          </span>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-1.5">
+              <span className="text-[12px] font-semibold text-db-navy-800">Designer review</span>
+              <span className={`rounded-sm px-1.5 py-0.5 font-db-mono text-[9px] font-semibold uppercase tracking-[0.04em] ${meta.bg} ${meta.color}`}>
+                {meta.label}
+              </span>
+            </div>
+            {review.summary && (
+              <p className="mt-0.5 text-[12px] leading-[1.45] text-db-gray-text">{review.summary}</p>
+            )}
+          </div>
+        </div>
+
+        {hasFindings && (
+          <ul className="mt-2 space-y-1.5">
+            {review.agent_findings.map((f, idx) => (
+              <li key={`af-${idx}`} className="text-[11px] leading-[1.45]">
+                <span className="font-medium text-db-navy-800">{f.label || f.node_path || 'Agent'}</span>
+                {f.severity && (
+                  <span className="ml-1 font-db-mono text-[9px] uppercase tracking-[0.03em] text-db-gray-text">
+                    [{f.severity}]
+                  </span>
+                )}
+                {f.finding && <span className="text-db-gray-text"> — {f.finding}</span>}
+              </li>
+            ))}
+            {review.coverage_gaps.map((g, idx) => (
+              <li key={`cg-${idx}`} className="text-[11px] leading-[1.45] text-db-gray-text">
+                <span className="font-medium text-db-navy-800">Coverage gap:</span> {g.aspect}
+                {g.rationale ? ` — ${g.rationale}` : ''}
+              </li>
+            ))}
+            {review.output_gaps.map((g, idx) => (
+              <li key={`og-${idx}`} className="text-[11px] leading-[1.45] text-db-gray-text">
+                <span className="font-medium text-db-navy-800">Output gap:</span> {g.required_output}
+                {g.rationale ? ` — ${g.rationale}` : ''}
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** "Designer activity" — the accumulated per-turn milestone feed (architect →
+ *  critic → revisions → finalizing), so the user sees real progress instead of a
+ *  single flickering status line. Completed steps show a check; while the turn is
+ *  live, the most recent step shows a spinner. Persists after the turn ends. */
+function ActivityFeed({
+  steps,
+  live,
+}: {
+  steps: ActivityStep[];
+  live: boolean;
+}): React.ReactElement | null {
+  if (steps.length === 0) return null;
+  return (
+    <div
+      className="rounded-db-md border border-db-gray-lines bg-white px-3 py-2 shadow-db-xs"
+      aria-label="Designer activity"
+      data-testid="designer-activity-feed"
+    >
+      <ul className="space-y-1">
+        {steps.map((step, idx) => {
+          const isActive = live && idx === steps.length - 1;
+          const text =
+            step.iteration && step.total
+              ? `${step.label} ${step.iteration}/${step.total}`
+              : step.label;
+          return (
+            <li
+              key={`${step.label}-${step.iteration ?? ''}-${idx}`}
+              className="flex items-center gap-2 text-[12px] leading-[1.45]"
+            >
+              {isActive ? (
+                <span
+                  className="h-3 w-3 shrink-0 animate-spin rounded-full border-2 border-db-blue-700 border-t-transparent"
+                  aria-label="In progress"
+                />
+              ) : (
+                <CheckCircle2 size={12} className="shrink-0 text-db-green-700" aria-hidden />
+              )}
+              <span className={isActive ? 'text-db-blue-700' : 'text-db-navy-800'}>{text}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </div>
+  );
+}
+
+/** Collapses a turn's intermediate tool steps behind one closed-by-default
+ *  disclosure, so the raw tool-call args / tool-result JSON no longer clutter
+ *  the transcript (one click away when needed). */
+function DesignerActivitySteps({
+  stepCount,
+  children,
+}: {
+  stepCount: number;
+  children: React.ReactNode;
+}): React.ReactElement {
+  const [open, setOpen] = React.useState(false);
+  return (
+    <div className="rounded-db-md border border-db-gray-lines bg-db-oat-light">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        className="flex w-full items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-db-gray-text transition-colors hover:text-db-navy-800 focus:outline-none"
+      >
+        {open ? <ChevronDown size={11} /> : <ChevronRightIcon size={11} />}
+        <Wrench size={11} />
+        Designer activity ({stepCount} {stepCount === 1 ? 'step' : 'steps'})
+      </button>
+      {open && <div className="space-y-1 border-t border-db-gray-lines px-2.5 py-2">{children}</div>}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Transcript grouping
+//
+// The flat message list is grouped into turns so each assistant turn renders
+// as: assistant text -> "What I built" synopsis -> "Designer review" -> a
+// single collapsed "Designer activity" disclosure (the tool_call + tool_result
+// steps). User messages render standalone; a tool message with no preceding
+// assistant (mid-session join) falls back to a standalone row.
+// ---------------------------------------------------------------------------
+
+type TranscriptItem =
+  | { kind: 'user'; message: ChatMessage; key: string }
+  | { kind: 'orphanTool'; message: ChatMessage; key: string }
+  | { kind: 'turn'; assistant: ChatMessage; tools: ChatMessage[]; key: string };
+
+function groupTranscript(messages: ChatMessage[]): TranscriptItem[] {
+  const items: TranscriptItem[] = [];
+  let current: Extract<TranscriptItem, { kind: 'turn' }> | null = null;
+  messages.forEach((message, idx) => {
+    if (message.role === 'assistant') {
+      current = { kind: 'turn', assistant: message, tools: [], key: `a${idx}` };
+      items.push(current);
+    } else if (message.role === 'user') {
+      current = null;
+      items.push({ kind: 'user', message, key: `u${idx}` });
+    } else {
+      // tool result
+      if (current) current.tools.push(message);
+      else items.push({ kind: 'orphanTool', message, key: `t${idx}` });
+    }
+  });
+  return items;
+}
+
+function TranscriptTurn({
+  assistant,
+  tools,
+  allMessages,
+  live = false,
+}: {
+  assistant: ChatMessage;
+  tools: ChatMessage[];
+  allMessages: ChatMessage[];
+  /** True when this is the in-flight turn (last assistant turn while streaming) —
+   *  drives the activity feed's spinner on the most recent milestone. */
+  live?: boolean;
+}): React.ReactElement | null {
+  const hasContent = Boolean(assistant.content && assistant.content.trim().length > 0);
+  const toolCalls = assistant.tool_calls ?? [];
+  const stepCount = toolCalls.length + tools.length;
+  const activity = assistant.activity ?? [];
+  if (!hasContent && !assistant.synopsis && !assistant.review && stepCount === 0 && activity.length === 0) {
+    // Empty placeholder turn (OPEN_ASSISTANT before any delta) — skip.
+    return null;
+  }
+  return (
+    <div className="flex min-w-0 items-start justify-start gap-2" data-role="assistant">
+      <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded-[5px] bg-db-lava-600">
+        <Sparkles size={12} className="text-white" />
+      </div>
+      <div className="min-w-0 flex-1 space-y-1.5">
+        {hasContent && (
+          <div
+            className="break-words text-[13px] leading-[1.55] text-db-navy-800"
+            dangerouslySetInnerHTML={{ __html: renderMarkdownHTML(assistant.content) }}
+          />
+        )}
+        {activity.length > 0 && <ActivityFeed steps={activity} live={live} />}
+        {assistant.synopsis && <WorkflowSynopsisCard synopsis={assistant.synopsis} />}
+        {assistant.review && <CriticReviewCard review={assistant.review} />}
+        {stepCount > 0 && (
+          <DesignerActivitySteps stepCount={stepCount}>
+            {toolCalls.map((tc) => (
+              <ToolEventCard
+                key={tc.id}
+                kind="call"
+                toolName={tc.function.name}
+                payload={tryParseJson(tc.function.arguments)}
+              />
+            ))}
+            {tools.map((toolMsg, i) => (
+              <MessageRow key={`tool-${i}`} message={toolMsg} messages={allMessages} />
+            ))}
+          </DesignerActivitySteps>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // ChatPanel
 // ---------------------------------------------------------------------------
 
@@ -862,6 +1197,17 @@ export function ChatPanel({ sessionId, assets, embedded = false }: ChatPanelProp
   const [collapsed, setCollapsed] = React.useState<boolean>(false);
   const bottomRef = React.useRef<HTMLDivElement>(null);
   const scrollRef = React.useRef<HTMLDivElement>(null);
+
+  // Consume the pending chat seed written by AgentDesignerPage's validation
+  // banner "Ask designer to fix" action. Pre-fills the composer and clears
+  // the store field so subsequent renders don't re-apply it.
+  const pendingChatSeed = useAgentEditorStore((s) => s.pendingChatSeed);
+  React.useEffect(() => {
+    if (pendingChatSeed) {
+      setInputText(pendingChatSeed);
+      useAgentEditorStore.getState().setPendingChatSeed(null);
+    }
+  }, [pendingChatSeed]);
 
   // Fix #3 — surface the result of an apply instead of silently no-op-ing.
   const [conflict, setConflict] = React.useState<{
@@ -907,6 +1253,20 @@ export function ChatPanel({ sessionId, assets, embedded = false }: ChatPanelProp
     () => latestDesignerActivityTitle(session.messages),
     [session.messages],
   );
+  const transcriptItems = React.useMemo(
+    () => groupTranscript(session.messages),
+    [session.messages],
+  );
+  // The in-flight turn (last assistant turn while streaming) — drives the
+  // activity feed's live spinner on its most recent milestone.
+  const liveTurnKey = React.useMemo(() => {
+    if (!session.isStreaming) return null;
+    for (let i = transcriptItems.length - 1; i >= 0; i--) {
+      const item = transcriptItems[i]!;
+      if (item.kind === 'turn') return item.key;
+    }
+    return null;
+  }, [transcriptItems, session.isStreaming]);
 
   React.useEffect(() => {
     const node = scrollRef.current;
@@ -1106,9 +1466,19 @@ export function ChatPanel({ sessionId, assets, embedded = false }: ChatPanelProp
             </div>
           )}
 
-          {session.messages.map((msg, idx) => (
-            <MessageRow key={idx} message={msg} messages={session.messages} />
-          ))}
+          {transcriptItems.map((item) =>
+            item.kind === 'turn' ? (
+              <TranscriptTurn
+                key={item.key}
+                assistant={item.assistant}
+                tools={item.tools}
+                allMessages={session.messages}
+                live={item.key === liveTurnKey}
+              />
+            ) : (
+              <MessageRow key={item.key} message={item.message} messages={session.messages} />
+            ),
+          )}
 
           {/* Live progress while a long turn streams — keeps the panel from
               looking frozen during the multi-minute Best-of-N architect/critic

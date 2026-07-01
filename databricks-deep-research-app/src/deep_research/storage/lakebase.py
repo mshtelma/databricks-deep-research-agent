@@ -745,7 +745,7 @@ class LakebaseBackend:
                     text(sql),
                     {"cutoff": cutoff, "exclude_ids": exclude_ids_text},
                 )
-                return int(result.rowcount or 0)
+                return int(getattr(result, "rowcount", 0) or 0)
         except Exception as exc:
             raise _wrap_error(exc) from exc
 

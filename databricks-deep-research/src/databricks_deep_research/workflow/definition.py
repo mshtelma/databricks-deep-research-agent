@@ -227,6 +227,12 @@ class WorkflowDefinition(BaseModel):
     token_budget: int = 0
     timeout_seconds: int = 1800
     run_as: Literal["caller"] | ServicePrincipalRunAs = Field(default="caller")
+    # Saved research-depth/effort default for this workflow. ``None`` (the default)
+    # and "standard" are byte-identical to today; "light"/"deep" let the host scale
+    # researcher tool budgets and loop iteration counts at runtime (proportional
+    # overlay, applied in the app's framework_orchestrator). Lives in the workflow
+    # JSONB, so no DB migration. Per-run overrides win over this saved default.
+    research_effort: Literal["light", "standard", "deep"] | None = None
 
     @model_validator(mode="before")
     @classmethod

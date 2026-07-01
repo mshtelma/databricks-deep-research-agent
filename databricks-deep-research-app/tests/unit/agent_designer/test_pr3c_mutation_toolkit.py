@@ -197,6 +197,69 @@ async def test_inspect_ast_summary_returns_compact_payload(
     assert "agent-b" in body["agent_roles"]
 
 
+async def test_inspect_ast_summary_includes_plan_execute_nested_roles(
+    ctx: ToolContext,
+) -> None:
+    ast = {
+        "id": "designer-draft",
+        "tools": [],
+        "pools": [],
+        "root": {
+            "id": "main",
+            "type": "sequence",
+            "label": "Main",
+            "config": {},
+            "children": [
+                {
+                    "id": "coordinator",
+                    "type": "agent",
+                    "label": "Coordinator",
+                    "config": {"subtype": "coordinator"},
+                },
+                {
+                    "id": "plan-and-execute",
+                    "type": "plan_and_execute",
+                    "label": "Plan and Execute",
+                    "config": {
+                        "planner": {"label": "Planner", "subtype": "planner"},
+                        "evaluator": {
+                            "label": "Coverage Evaluator",
+                            "subtype": "reflector",
+                        },
+                        "body": {
+                            "id": "body",
+                            "type": "sequence",
+                            "label": "Body",
+                            "config": {},
+                            "children": [
+                                {
+                                    "id": "researcher",
+                                    "type": "agent",
+                                    "label": "Researcher",
+                                    "config": {"subtype": "researcher"},
+                                }
+                            ],
+                        },
+                    },
+                },
+                {
+                    "id": "synthesizer",
+                    "type": "agent",
+                    "label": "Synthesizer",
+                    "config": {"subtype": "synthesizer"},
+                },
+            ],
+        },
+    }
+    tool = InspectAstSummaryTool(state_getter=lambda: ast)
+    result = await tool.execute({}, ctx)
+    body = json.loads(result.content)
+    assert body["topology"] == "plan_and_execute"
+    assert any("reflector" in role for role in body["agent_roles"])
+    assert any("planner" in role for role in body["agent_roles"])
+    assert body["node_count"] >= 6
+
+
 # ---------------------------------------------------------------------------
 # CriticDirective severity + tool_hint defaults
 # ---------------------------------------------------------------------------

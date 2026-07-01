@@ -116,6 +116,15 @@ describe('addBlock', () => {
     expect(typeof s.ast?.root.children?.[0]?.id).toBe('string');
   });
 
+  it('replaces generic researcher labels on inserted blocks', () => {
+    const ast = makeAst();
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    store().addBlock('root', 'agent', 'Researcher 1', { subtype: 'researcher' });
+
+    expect(store().ast?.root.children?.[0]?.label).toBe('Evidence Researcher');
+  });
+
   it('addBlock to invalid parent returns null and does not mutate', () => {
     const ast = makeAst();
     useAgentEditorStore.setState({ ast, isDirty: false });
@@ -465,5 +474,23 @@ describe('select', () => {
     useAgentEditorStore.setState({ selectedPath: 'root.children.0' });
     store().select(null);
     expect(store().selectedPath).toBeNull();
+  });
+});
+
+describe('setPendingChatSeed', () => {
+  it('sets pendingChatSeed to the provided text', () => {
+    store().setPendingChatSeed('Please fix these validation issues');
+    expect(store().pendingChatSeed).toBe('Please fix these validation issues');
+  });
+
+  it('clears pendingChatSeed when called with null', () => {
+    useAgentEditorStore.setState({ pendingChatSeed: 'some seed' });
+    store().setPendingChatSeed(null);
+    expect(store().pendingChatSeed).toBeNull();
+  });
+
+  it('initialState has pendingChatSeed as null', () => {
+    useAgentEditorStore.setState(initialState);
+    expect(store().pendingChatSeed).toBeNull();
   });
 });

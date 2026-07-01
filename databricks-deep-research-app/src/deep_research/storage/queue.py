@@ -34,6 +34,7 @@ import contextlib
 import logging
 import time
 from collections import deque
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
@@ -241,7 +242,7 @@ class WriteQueue:
     async def _run_events_loop(self, table: str) -> None:
         await self._tick_loop(lambda: self._flush_events_batch(table))
 
-    async def _tick_loop(self, body) -> None:
+    async def _tick_loop(self, body: Callable[[], Awaitable[None]]) -> None:
         while not self._stopping:
             try:
                 await asyncio.sleep(self._flush_interval_sec)
@@ -365,7 +366,7 @@ class WriteQueue:
 
     # -- Retry core ----------------------------------------------------
 
-    async def _attempt(self, op) -> Any:
+    async def _attempt(self, op: Callable[[], Awaitable[Any]]) -> Any:
         backoffs = self._backoffs
         for i, delay in enumerate(backoffs):
             try:

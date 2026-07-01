@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from deep_research.agent_designer.semantic_validation import (
     semantic_validation_errors,
 )
+from deep_research.agent_designer.workflow_validation import WorkflowValidationResult
 from deep_research.models.visibility import AgentVisibility
 
 
@@ -107,6 +108,25 @@ class AgentV2Response(BaseModel):
     etag: str
     created_at: datetime
     updated_at: datetime
+    validation: WorkflowValidationResult | None = Field(
+        default=None,
+        description=(
+            "Save-time workflow validation result (advisory). Carries the "
+            "verdict (pass/needs_revision/fail/skipped) + summary + directives "
+            "so the UI can surface it. None when the gate was skipped OR when a "
+            "background validation is still running (see validation_pending)."
+        ),
+    )
+    validation_pending: bool = Field(
+        default=False,
+        description=(
+            "True when an advisory validation for the CURRENT definition is "
+            "still running in the background (cache miss on save). The verdict "
+            "is delivered asynchronously: poll GET /agents-v2/{id} until this is "
+            "False, then read `validation`. Distinguishes 'validation pending' "
+            "from 'validation not applicable' (both have validation=None)."
+        ),
+    )
 
 
 class AgentV2Summary(BaseModel):
@@ -125,6 +145,16 @@ class AgentV2Summary(BaseModel):
             "True if this agent has at least one active in_app deployment "
             "(i.e., the chat composer should list it). Computed via JOIN against "
             "agent_deployments at list time."
+        ),
+    )
+    default_verify_sources: bool = Field(
+        default=True,
+        description=(
+            "The agent's authored default for expensive NLI 'verify sources': "
+            "True if its synthesizer uses grounding_mode='reclaim' (verify), False "
+            "for classical_lite/none (cite-only). The chat composer seeds the "
+            "'Verify sources' toggle from this so it reflects the agent's intent; "
+            "the toggle then fully overrides it per run."
         ),
     )
 

@@ -11,7 +11,11 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from deep_research.agent.config import get_coordinator_config, get_planner_config
+from deep_research.agent.config import (
+    get_coordinator_config,
+    get_planner_config,
+    get_research_timeout_seconds,
+)
 from deep_research.core.app_config import DomainFilterConfig, DomainFilterMode
 from deep_research.core.logging_utils import get_logger
 
@@ -148,8 +152,12 @@ class OrchestrationConfig:
     # =========================================================================
     # Research Session Timeout (H1)
     # =========================================================================
-    research_timeout_seconds: int = 1800  # 30 minutes default
-    """Maximum time in seconds before a research job is terminated."""
+    research_timeout_seconds: int = field(default_factory=get_research_timeout_seconds)
+    """Maximum time in seconds before a research job is terminated.
+
+    Default comes from app.yaml ``orchestration.research_timeout_seconds`` (1800),
+    so it's tunable per-target via the app-config overlay. Explicit constructor
+    values still win."""
 
     # =========================================================================
     # Plugin Workflow Reference (012-workflow-provider)

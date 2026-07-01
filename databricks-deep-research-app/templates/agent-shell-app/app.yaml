@@ -34,3 +34,11 @@ env:
   - name: STORAGE_WAREHOUSE_ID
     value: '{{ storage_warehouse_id }}'
 {% endif %}
+{% if databricks_web_search_endpoint %}
+  # Pins the databricks built-in web-search serving endpoint to match the main
+  # app (config-driven). Set when a web tool inherits the default provider and is
+  # not brave-pinned. The framework runner reads this for provider-inheriting web
+  # tools; if absent it falls back to its built-in default.
+  - name: DATABRICKS_WEB_SEARCH_ENDPOINT
+    value: '{{ databricks_web_search_endpoint }}'
+{% endif %}

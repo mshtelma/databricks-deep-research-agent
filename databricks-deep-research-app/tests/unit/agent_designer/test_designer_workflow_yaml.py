@@ -259,6 +259,31 @@ def test_architect_user_prompt_includes_task_signature_slot():
     assert "{task_signature}" in architect.config["user_prompt_template"]
 
 
+def test_critic_receives_full_prompts_projection():
+    # Part 1A: the critic must consume {current_ast_prompts} (the per-agent prompt
+    # projection) so it can verify prompt-content checklist items. load_workflow runs
+    # build-time dataflow validation, so a missing runtime_injected_keys declaration
+    # for current_ast_prompts would raise here (dangling read).
+    wf = load_workflow(str(_YAML))
+    critic = next(n for n in _walk_nodes(wf.root) if n.id == "critic")
+    assert "{current_ast_prompts}" in critic.config["user_prompt_template"]
+
+
+def test_critic_does_not_relitigate_topology():
+    """Regression — the critic is told topology is structurally fixed and must
+    NOT flag "should be plan_and_execute" / a different topology. That demand is
+    unwinnable (the architect cannot change topology via a prompt patch) and
+    produced a useless blocking review on the investment/parallel_lanes case."""
+    wf = load_workflow(str(_YAML))
+    critic = next(n for n in _walk_nodes(wf.root) if n.id == "critic")
+    system_prompt = critic.config["system_prompt"]
+    assert "Out of scope" in system_prompt
+    assert "plan_and_execute" in system_prompt
+    assert "structural shape" in system_prompt
+    # It must also tell the critic to remove (not demand adding) an unbound tool.
+    assert "web_crawl" in system_prompt
+
+
 def test_agent_prompt_templates_are_safe_renderer_compatible():
     """Every prompt in the designer workflow must pass the runtime renderer.
 

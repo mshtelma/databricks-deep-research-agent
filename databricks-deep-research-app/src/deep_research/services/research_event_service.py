@@ -1,5 +1,6 @@
 """Research event service for activity event persistence."""
 
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -67,7 +68,7 @@ class ResearchEventService:
     async def save_events_batch(
         self,
         research_session_id: UUID,
-        events: list[dict[str, Any]],
+        events: Sequence[dict[str, Any]],
     ) -> int:
         """Save multiple research events in a batch.
 

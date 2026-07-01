@@ -17,6 +17,7 @@ from databricks_deep_research.workflow.definition import (
 )
 
 from deep_research.agent.config import get_report_limits, get_research_type_config
+from deep_research.agent.synthesis_grounding import apply_grounding_to_synth_config
 
 if TYPE_CHECKING:
     from deep_research.agent.orchestration_config import OrchestrationConfig
@@ -353,32 +354,12 @@ def _build_synthesizer(config: OrchestrationConfig) -> WorkflowNode:
     # (set on the node config below — the source of truth for cite-vs-verify).
     full_verify = synthesis_mode == "reclaim" or verify_sources
 
-    # ``interleaved`` is the only generation strategy used here. The legacy
-    # ``synthesis_mode="reclaim"`` alias was an invalid SynthesisMode that
-    # silently fell back to interleaved; setting it explicitly drops that
-    # warning with no behavior change.
-    synth_schema: dict[str, Any] = {
-        "synthesis_mode": "interleaved",
-        "enable_citation_verification": True,
-    }
-    if full_verify:
-        synth_config["grounding_mode"] = "reclaim"
-        synth_schema["enable_isolated_verification"] = True
-    else:
-        synth_config["grounding_mode"] = "classical_lite"
-        # Cheap grounding-only: generate + link + render citations, then skip
-        # the expensive verification overlay (Stage 4 NLI / 5 correction /
-        # 6 numeric) and Stage 8 disposition. Claims persist as resolvable-
-        # but-unverified (a normal clickable citation, no verdict).
-        synth_schema["enable_isolated_verification"] = False
-        synth_schema["enable_citation_correction"] = False
-        synth_schema["enable_numeric_qa_verification"] = False
-
-    logger.debug(
-        "SYNTHESIZER_GROUNDING_MODE grounding=%s verify_sources=%s",
-        synth_config["grounding_mode"],
-        verify_sources,
-    )
+    # grounding_mode (node-level) + the citation-pipeline enable flags
+    # (output_schema) are stamped consistently by the shared helper
+    # ``apply_grounding_to_synth_config`` AFTER the per-depth report limits below
+    # — the single source of truth shared with the custom-agent verify override in
+    # ``framework_orchestrator``. The helper preserves the keys set in between.
+    synth_schema: dict[str, Any] = {}
 
     # ------------------------------------------------------------------
     # Report limits → framework synthesizer
@@ -407,6 +388,16 @@ def _build_synthesizer(config: OrchestrationConfig) -> WorkflowNode:
         synth_schema["claim_disposition"] = citation_cfg.claim_disposition
 
     synth_config["output_schema"] = synth_schema
+
+    # Stamp grounding_mode (node-level) + the verification enable flags
+    # (output_schema) consistently; preserves the report-limit / disposition keys
+    # set above. ``full_verify`` reflects the resolved verify choice.
+    apply_grounding_to_synth_config(synth_config, full_verify=full_verify)
+    logger.debug(
+        "SYNTHESIZER_GROUNDING_MODE grounding=%s verify_sources=%s",
+        synth_config["grounding_mode"],
+        verify_sources,
+    )
 
     # ------------------------------------------------------------------
     # Structured output

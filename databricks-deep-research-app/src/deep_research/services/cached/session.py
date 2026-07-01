@@ -20,7 +20,7 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 from uuid import UUID, uuid4
 
 from deep_research.models.incognito_session import MAX_INCOGNITO_CHATS, SESSION_TTL_HOURS
@@ -101,11 +101,12 @@ def _decode_state(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {}
     if isinstance(raw, dict):
-        return raw
+        return cast(dict[str, Any], raw)
     try:
-        return json.loads(raw)
+        decoded = json.loads(raw)
     except (json.JSONDecodeError, ValueError):
         return {}
+    return cast(dict[str, Any], decoded) if isinstance(decoded, dict) else {}
 
 
 def _encode_state(state: dict[str, Any]) -> str:

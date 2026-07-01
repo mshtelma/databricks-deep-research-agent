@@ -114,6 +114,12 @@ export interface AST {
   token_budget?: number;
   timeout_seconds?: number;
   run_as?: 'caller' | ServicePrincipalRunAs;
+  /**
+   * Saved research depth/effort default for this agent. Scales researcher tool
+   * budgets + loop iterations at runtime (proportional). Absent / 'standard' =
+   * no change. A per-turn chat selection overrides this.
+   */
+  research_effort?: 'light' | 'standard' | 'deep';
   /** Forward-compatible storage for future WorkflowDefinition fields. */
   [key: string]: unknown;
 }
@@ -130,5 +136,5 @@ export interface ValidationError {
   message: string;
   path: string | null;
   line: number | null;
-  kind: 'syntax' | 'schema' | 'validation';
+  kind: 'syntax' | 'schema' | 'validation' | 'coverage';
 }

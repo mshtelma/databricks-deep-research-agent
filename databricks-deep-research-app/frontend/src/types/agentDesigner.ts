@@ -162,6 +162,19 @@ export interface AgentV2Response {
   etag: string
   created_at: string
   updated_at: string
+  /**
+   * Workflow validation result returned after a save. Present when the
+   * backend validator ran; absent when skipped or not configured.
+   * The shape matches {@link import('@/api/agentsV2').WorkflowValidationResult}.
+   */
+  validation?: import('@/api/agentsV2').WorkflowValidationResult | null
+  /**
+   * True when an advisory validation for the CURRENT definition is still
+   * running in the background (cache miss on save). The verdict is delivered
+   * asynchronously: poll GET /agents-v2/{id} until this is false, then read
+   * `validation`. Distinguishes "pending" from "not applicable" (both null).
+   */
+  validation_pending?: boolean
 }
 
 /** Lightweight summary item returned in list responses. */
@@ -175,6 +188,12 @@ export interface AgentV2Summary {
   node_count: number
   /** True when the agent has an active in_app deployment. Drives chat picker. */
   in_app_active: boolean
+  /**
+   * The agent's authored default for NLI "verify sources" (True if its
+   * synthesizer uses grounding_mode='reclaim'). The composer seeds the verify
+   * toggle from this; defaults to true if the backend omits it.
+   */
+  default_verify_sources?: boolean
 }
 
 /** GET /api/v1/agents-v2 response. */
@@ -200,6 +219,18 @@ export interface ToolCall {
 }
 
 /**
+ * One milestone in the per-turn "Designer activity" feed, accumulated from the
+ * transient `progress` SSE events so the user sees what the designer did
+ * (architect → critic → revisions → finalizing) instead of a single flickering
+ * status line. UI-only — never sent back to the API (see ChatMessage.activity).
+ */
+export interface ActivityStep {
+  label: string
+  iteration?: number | null
+  total?: number | null
+}
+
+/**
  * Chat message shape accepted by POST /api/v1/agent-designer/chat.
  * Mirrors the backend ChatMessage Pydantic model.
  */
@@ -214,6 +245,22 @@ export interface ChatMessage {
    * history back to /agent-designer/chat.
    */
   tool_name?: string | null
+  /**
+   * UI-only display artifacts attached to an assistant turn from the
+   * `architect_synopsis` / `critic_review` SSE events. Like `tool_name`, the
+   * backend ChatMessage schema is extra="forbid", so `chatStream`'s wire
+   * whitelist strips these before POSTing chat history back — they never reach
+   * the request payload (so they cannot bloat it or trip the byte cap).
+   */
+  synopsis?: ArchitectSynopsis | null
+  review?: CriticReview | null
+  /**
+   * UI-only accumulated activity feed for this assistant turn (from `progress`
+   * SSE events). Stripped before POSTing chat history back — like `synopsis` /
+   * `review`, the wire builder in `chatStream` reconstructs each message with a
+   * fixed key set, so this never reaches the request payload.
+   */
+  activity?: ActivityStep[] | null
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +379,74 @@ export interface TurnStartedSSEEvent {
   turn_id: string
 }
 
+// ---------------------------------------------------------------------------
+// Designer-review display payloads (additive). The backend derives these and
+// emits them as their own SSE events; the frontend renders them as readable
+// cards. Display-only — never re-sent on the wire (see ChatMessage above).
+// ---------------------------------------------------------------------------
+
+/** One researcher/agent lane in the workflow synopsis. */
+export interface SynopsisLane {
+  label: string
+  tools: string[]
+}
+
+/** "What I built" payload. Mirrors the backend `ArchitectSynopsisEvent`. */
+export interface ArchitectSynopsis {
+  headline: string
+  topology: string
+  change_kind: 'created' | 'edited'
+  lanes: SynopsisLane[]
+  pipeline: string[]
+  tools: string[]
+  outputs: string[]
+  warnings: string[]
+}
+
+export interface CriticAgentFinding {
+  node_path?: string
+  label?: string
+  severity?: 'fail' | 'needs_revision' | 'minor'
+  finding?: string
+  suggested_action?: string
+}
+
+export interface CriticCoverageGap {
+  aspect?: string
+  rationale?: string
+}
+
+export interface CriticOutputGap {
+  required_output?: string
+  rationale?: string
+}
+
+/** "Designer review" payload. Mirrors the backend `CriticReviewEvent`
+ *  (= workflow_critic.CritiqueResult). */
+export interface CriticReview {
+  verdict: 'pass' | 'needs_revision' | 'fail'
+  summary: string
+  agent_findings: CriticAgentFinding[]
+  coverage_gaps: CriticCoverageGap[]
+  output_gaps: CriticOutputGap[]
+}
+
+/**
+ * Synopsis of what the designer built/changed this turn. Emitted once at
+ * finalize; rendered as the "What I built" card. Display-only.
+ */
+export interface ArchitectSynopsisSSEEvent extends ArchitectSynopsis {
+  type: 'architect_synopsis'
+}
+
+/**
+ * The critic's structured verdict, surfaced as a first-class event instead of
+ * buried in the `validate` tool result. Rendered as the "Designer review" card.
+ */
+export interface CriticReviewSSEEvent extends CriticReview {
+  type: 'critic_review'
+}
+
 /** Discriminated union of all SSE events emitted by the agent-designer chat endpoint. */
 export type DesignerSSEEvent =
   | TurnStartedSSEEvent
@@ -340,6 +455,8 @@ export type DesignerSSEEvent =
   | MutationProposedSSEEvent
   | ToolResultSSEEvent
   | ProgressSSEEvent
+  | ArchitectSynopsisSSEEvent
+  | CriticReviewSSEEvent
   | ErrorSSEEvent
   | DoneSSEEvent
 
@@ -351,7 +468,7 @@ export interface ValidationErrorItem {
   message: string
   path: string | null
   line: number | null
-  kind: 'syntax' | 'schema' | 'validation'
+  kind: 'syntax' | 'schema' | 'validation' | 'coverage'
 }
 
 export interface WorkflowSummary {

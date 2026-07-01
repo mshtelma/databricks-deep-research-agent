@@ -17,9 +17,11 @@ from databricks_deep_research.tools.factory import ToolFactoryContext
 from databricks_deep_research.tools.resolver import ToolResolver
 
 from deep_research.agent.framework_orchestrator import (
+    _apply_effort_overlay,
     _apply_runtime_overlays_to_workflow,
     _apply_source_scope_to_workflow_declarations,
     _build_state_proxy,
+    _ensure_node_tools_declared,
     _extract_verification_from_framework_state,
     _fill_databricks_tool_defaults,
     _load_enterprise_tools,
@@ -143,7 +145,8 @@ async def test_resolve_agent_v2_workflow_loads_saved_definition() -> None:
     assert definition.root.children[0].label == "Synthesizer"
 
 
-def test_runtime_overlay_enables_reclaim_when_verify_sources_requested() -> None:
+def test_runtime_overlay_forces_reclaim_when_verify_on() -> None:
+    """Full override: verify_sources=True stamps reclaim + the NLI flags on synthesizers."""
     from databricks_deep_research.workflow.loader import load_workflow_from_dict
 
     definition = load_workflow_from_dict(_workflow_dict())
@@ -152,8 +155,45 @@ def test_runtime_overlay_enables_reclaim_when_verify_sources_requested() -> None
     updated = _apply_runtime_overlays_to_workflow(definition, config)
     synth_config = updated.root.children[0].config
 
-    assert synth_config["output_schema"]["synthesis_mode"] == "reclaim"
+    assert synth_config["grounding_mode"] == "reclaim"
+    assert synth_config["output_schema"]["enable_isolated_verification"] is True
     assert synth_config["output_schema"]["enable_citation_verification"] is True
+
+
+def test_runtime_overlay_forces_classical_lite_when_verify_off() -> None:
+    """Full override: verify_sources=False stamps classical_lite + disables the NLI overlay."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    definition = load_workflow_from_dict(_workflow_dict())
+    config = _mock_config(verify_sources=False)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+    synth_config = updated.root.children[0].config
+
+    assert synth_config["grounding_mode"] == "classical_lite"
+    assert synth_config["output_schema"]["enable_isolated_verification"] is False
+    assert synth_config["output_schema"]["enable_citation_correction"] is False
+    assert synth_config["output_schema"]["enable_numeric_qa_verification"] is False
+
+
+def test_runtime_overlay_downgrades_baked_reclaim_when_verify_off() -> None:
+    """The toggle wins: a baked-reclaim synthesizer becomes classical_lite when verify is off,
+    while unrelated author output_schema keys are preserved."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    workflow = _workflow_dict(
+        output_schema={"enable_isolated_verification": True, "max_tokens": 4096}
+    )
+    workflow["root"]["children"][0]["config"]["grounding_mode"] = "reclaim"
+    definition = load_workflow_from_dict(workflow)
+    config = _mock_config(verify_sources=False)
+
+    updated = _apply_runtime_overlays_to_workflow(definition, config)
+    synth_config = updated.root.children[0].config
+
+    assert synth_config["grounding_mode"] == "classical_lite"
+    assert synth_config["output_schema"]["enable_isolated_verification"] is False
+    assert synth_config["output_schema"]["max_tokens"] == 4096
 
 
 def test_runtime_overlay_preserves_explicit_synthesizer_grounding() -> None:
@@ -3079,3 +3119,223 @@ class TestFailurePersistenceLogging:
         assert "FWK_PERSISTENCE_FAILED" in caplog.text
         # Inner except is NOT entered → PR4 log line is absent.
         assert "FWK_FAILURE_PERSISTENCE_FAILED" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Tests — runtime net: auto-declare node-bound-but-undeclared web tools
+# (regression: parallel-lane researcher binds ``web_research`` via the
+#  ``_tool_plan_bindings`` default fallback while the workflow declares only the
+#  architect's tool-plan tools → "missing declared tools: ['web_research']")
+# ---------------------------------------------------------------------------
+
+
+def _lanes_workflow_dict(
+    *,
+    lane_tool: str,
+    declared_tools: list[dict[str, Any]],
+    research_effort: str | None = None,
+    lane_max_tool_calls: int = 12,
+) -> dict[str, Any]:
+    """A parallel-lanes workflow whose lane researcher binds ``lane_tool``."""
+    wf: dict[str, Any] = {
+        "id": "lanes-agent",
+        "name": "Lanes Agent",
+        "version": 1,
+        "required_inputs": ["query"],
+        "output_keys": ["report"],
+        "tools": declared_tools,
+        "root": {
+            "id": "main",
+            "type": "sequence",
+            "label": "Workflow",
+            "config": {},
+            "children": [
+                {
+                    "id": "parallel-lanes",
+                    "type": "parallel",
+                    "label": "Lanes",
+                    "config": {},
+                    "children": [
+                        {
+                            "id": "lane_1-researcher",
+                            "type": "agent",
+                            "label": "Lane 1",
+                            "config": {
+                                "subtype": "researcher",
+                                "model_tier": "analytical",
+                                "input_keys": ["query"],
+                                "output_key": "findings_1",
+                                "tools": [lane_tool],
+                                "max_tool_calls": lane_max_tool_calls,
+                            },
+                            "children": [],
+                        },
+                    ],
+                },
+            ],
+        },
+    }
+    if research_effort is not None:
+        wf["research_effort"] = research_effort
+    return wf
+
+
+def _lane_budget(definition: Any) -> int:
+    """Pull lane_1-researcher's max_tool_calls from a loaded lanes workflow."""
+    return definition.root.children[0].children[0].config["max_tool_calls"]
+
+
+def test_ensure_node_tools_declared_adds_missing_web_research() -> None:
+    """A lane binding ``web_research`` with no matching declaration is healed.
+
+    The heal now lives in the framework loader (single source of truth), so a
+    workflow loaded via ``load_workflow_from_dict`` is already healed; the app
+    delegate ``_ensure_node_tools_declared`` is then an idempotent no-op.
+    """
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    # Workflow declares only a corpus tool (mimics an architect tool_plan that
+    # omitted web_research); the lane falls back to the web_research default.
+    definition = load_workflow_from_dict(
+        _lanes_workflow_dict(
+            lane_tool="web_research",
+            declared_tools=[
+                {"name": "earnings_index", "kind": "vector_search", "config": {}}
+            ],
+        )
+    )
+
+    _ensure_node_tools_declared(definition)  # idempotent — loader already healed
+
+    by_name = {t.name: t for t in definition.tools}
+    assert "web_research" in by_name
+    decl = by_name["web_research"]
+    assert decl.kind == "web_research"
+    # provider-inheriting (no explicit provider) → resolves via ctx.search_client
+    assert "provider" not in decl.config
+    assert decl.config.get("auto_fetch_top_k") == 5
+    # Pre-existing declaration is preserved; no duplicate web_research.
+    assert "earnings_index" in by_name
+    assert sum(1 for t in definition.tools if t.name == "web_research") == 1
+
+
+def test_ensure_node_tools_declared_idempotent_when_already_declared() -> None:
+    """A workflow whose declarations already cover its bindings is unchanged."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    definition = load_workflow_from_dict(
+        _lanes_workflow_dict(
+            lane_tool="web_research",
+            declared_tools=[
+                {
+                    "name": "web_research",
+                    "kind": "web_research",
+                    "config": {"total_results": 8},
+                }
+            ],
+        )
+    )
+    before = [(t.name, dict(t.config)) for t in definition.tools]
+
+    _ensure_node_tools_declared(definition)
+
+    after = [(t.name, dict(t.config)) for t in definition.tools]
+    assert before == after  # no duplicate, original config untouched
+
+
+def test_ensure_node_tools_declared_leaves_unknown_custom_tool(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A non-builtin custom tool ref is NOT synthesized (we can't invent config)."""
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    definition = load_workflow_from_dict(
+        _lanes_workflow_dict(
+            lane_tool="proprietary_corpus",
+            declared_tools=[
+                {"name": "web_research", "kind": "web_research", "config": {}}
+            ],
+        )
+    )
+
+    with caplog.at_level("ERROR"):
+        _ensure_node_tools_declared(definition)
+
+    assert "proprietary_corpus" not in {t.name for t in definition.tools}
+    assert "WORKFLOW_HEAL_UNDECLARED_NONWEB" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Tests — effort/depth overlay (custom-agent proportional budget scaling)
+# AgentEffortConfig defaults: light=0.5, standard=1.0, deep=2.5;
+# tool_calls clamp [3,60]. research_depth → effort: light→light,
+# medium→standard, extended→deep.
+# ---------------------------------------------------------------------------
+
+
+def _load_lanes(**kw: Any) -> Any:
+    from databricks_deep_research.workflow.loader import load_workflow_from_dict
+
+    return load_workflow_from_dict(
+        _lanes_workflow_dict(
+            lane_tool="web_research",
+            declared_tools=[
+                {"name": "web_research", "kind": "web_research", "config": {}}
+            ],
+            **kw,
+        )
+    )
+
+
+def test_effort_overlay_deep_scales_researcher_budget() -> None:
+    """Per-turn 'extended' on a custom agent scales the researcher budget ×2.5."""
+    definition = _load_lanes(lane_max_tool_calls=12)
+    config = _mock_config(agent_id=uuid4(), research_depth="extended")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 30  # round(12 * 2.5)
+
+
+def test_effort_overlay_light_reduces_budget() -> None:
+    definition = _load_lanes(lane_max_tool_calls=12)
+    config = _mock_config(agent_id=uuid4(), research_depth="light")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 6  # round(12 * 0.5)
+
+
+def test_effort_overlay_standard_is_noop() -> None:
+    definition = _load_lanes(lane_max_tool_calls=12)
+    config = _mock_config(agent_id=uuid4(), research_depth="medium")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 12  # standard multiplier 1.0
+
+
+def test_effort_overlay_skips_builtin_path_no_double_scaling() -> None:
+    """No agent_id + no saved effort = built-in path; research_depth is already
+    consumed by config_translator, so the overlay must NOT scale again."""
+    definition = _load_lanes(lane_max_tool_calls=12)
+    config = _mock_config(agent_id=None, research_depth="extended")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 12  # untouched
+
+
+def test_effort_overlay_saved_default_used_when_depth_auto() -> None:
+    definition = _load_lanes(lane_max_tool_calls=12, research_effort="deep")
+    config = _mock_config(agent_id=uuid4(), research_depth="auto")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 30  # saved 'deep' applied
+
+
+def test_effort_overlay_per_turn_overrides_saved_default() -> None:
+    """Saved 'light' but the user picks 'extended' (deep) this turn → deep wins."""
+    definition = _load_lanes(lane_max_tool_calls=12, research_effort="light")
+    config = _mock_config(agent_id=uuid4(), research_depth="extended")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 30  # deep, not light's 6
+
+
+def test_effort_overlay_clamps_to_max() -> None:
+    """Deep scaling is clamped to the configured max_tool_calls ceiling (60)."""
+    definition = _load_lanes(lane_max_tool_calls=40)  # 40 * 2.5 = 100 → clamp 60
+    config = _mock_config(agent_id=uuid4(), research_depth="extended")
+    _apply_effort_overlay(definition, config)
+    assert _lane_budget(definition) == 60

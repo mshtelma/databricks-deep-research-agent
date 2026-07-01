@@ -74,6 +74,45 @@ class ProgressEvent(_SSEBase):
     total: int | None = None
 
 
+class ArchitectSynopsisEvent(_SSEBase):
+    """Human-readable synopsis of what the designer built or changed this turn.
+
+    Emitted ONCE at finalize (build / surgical-edit / topology lanes). Derived
+    purely and deterministically from the final AST (topology + per-node roles +
+    bound tools + required outputs + placeholder-pending warnings) — NO extra
+    LLM call. Display-only: the frontend renders it as a "What I built" card and
+    strips it from the resent transcript (it is not part of the wire
+    ``ChatMessage`` schema), so it can never bloat the request payload."""
+
+    type: Literal["architect_synopsis"] = "architect_synopsis"
+    headline: str
+    topology: str
+    change_kind: Literal["created", "edited"] = "created"
+    # One row per researcher/agent lane: {label: str, tools: list[str]}.
+    lanes: list[dict[str, Any]] = []
+    # Ordered downstream stage labels (e.g. synthesis -> coverage review -> final).
+    pipeline: list[str] = []
+    tools: list[str] = []
+    outputs: list[str] = []
+    # e.g. "1 lane still uses a default prompt" (from placeholder_pending_nodes).
+    warnings: list[str] = []
+
+
+class CriticReviewEvent(_SSEBase):
+    """The LLM-as-judge critic's structured verdict, surfaced as a first-class
+    event instead of buried as raw JSON inside the ``validate`` tool result.
+
+    Mirrors :class:`workflow_critic.CritiqueResult` (the same dict the validate
+    handler already computes — no extra LLM call). Display-only."""
+
+    type: Literal["critic_review"] = "critic_review"
+    verdict: Literal["pass", "needs_revision", "fail"]
+    summary: str
+    agent_findings: list[dict[str, Any]] = []
+    coverage_gaps: list[dict[str, Any]] = []
+    output_gaps: list[dict[str, Any]] = []
+
+
 class ErrorEvent(_SSEBase):
     type: Literal["error"] = "error"
     message: str
@@ -90,6 +129,8 @@ DesignerSSEEvent = (
     | MutationProposedEvent
     | ToolResultEvent
     | ProgressEvent
+    | ArchitectSynopsisEvent
+    | CriticReviewEvent
     | ErrorEvent
     | DoneEvent
 )

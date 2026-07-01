@@ -21,6 +21,7 @@ chat-document read and ownership can be enforced; the legacy normalized
 
 import logging
 from datetime import UTC
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -71,7 +72,7 @@ async def _load_verification_data(
     user_id: str,
     chat_service: IChatService,
     rs_service: IResearchSessionService,
-) -> dict | None:
+) -> dict[str, Any] | None:
     """Return the ``verification_data`` dict for ``message_id`` within ``chat_id``.
 
     Reads from the event-sourced storage stack. Returns ``None`` when:

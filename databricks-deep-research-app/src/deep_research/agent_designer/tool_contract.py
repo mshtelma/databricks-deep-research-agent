@@ -678,7 +678,7 @@ def project_resolved_tool_contract(
                 }
             )
     return ResolvedToolContract(
-        evidence_policy=evidence_policy,  # type: ignore[arg-type]
+        evidence_policy=evidence_policy,
         resources=resources,
         required_capabilities=_dedupe(required_capabilities, limit=12),
         ready_tool_kinds=ready_tool_kinds,
@@ -708,7 +708,7 @@ def sanitized_resolved_tool_contract_summary(
     if parsed is None:
         return {"schema": "resolved_tool_contract.v1", "available": False}
     return {
-        "schema": parsed.schema,
+        "schema": parsed.schema_,
         "available": True,
         "evidence_policy": parsed.evidence_policy,
         "resources_count": len(parsed.resources),
@@ -746,7 +746,7 @@ def resource_semantics_summary(
     if parsed is None:
         return {"schema": "resource_semantics.v1", "available": False}
     return {
-        "schema": parsed.schema,
+        "schema": parsed.schema_,
         "available": True,
         "resources_count": len(parsed.resources),
         "resources": [

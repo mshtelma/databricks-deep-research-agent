@@ -9,6 +9,7 @@ import pytest
 
 from deep_research.core.app_config import (
     SEARCH_PROVIDERS,
+    _deep_merge_dicts,
     AgentsConfig,
     AppConfig,
     BraveSearchConfig,
@@ -16,6 +17,7 @@ from deep_research.core.app_config import (
     DatabricksSearchConfig,
     EndpointConfig,
     ModelRoleConfig,
+    OrchestrationSettingsConfig,
     PlannerConfig,
     ReasoningEffort,
     ResearcherConfig,
@@ -384,6 +386,36 @@ class TestAppConfig:
             )
 
 
+class TestOrchestrationSettingsConfig:
+    """Tests for the research-run timeout watchdog config + wiring."""
+
+    def test_default_timeout_is_1800(self) -> None:
+        assert OrchestrationSettingsConfig().research_timeout_seconds == 1800
+
+    def test_app_config_orchestration_default(self) -> None:
+        assert AppConfig().orchestration.research_timeout_seconds == 1800
+
+    def test_rejects_below_minimum(self) -> None:
+        with pytest.raises(ValueError):
+            OrchestrationSettingsConfig(research_timeout_seconds=30)
+
+    def test_rejects_above_maximum(self) -> None:
+        with pytest.raises(ValueError):
+            OrchestrationSettingsConfig(research_timeout_seconds=20000)
+
+    def test_orchestration_config_default_reads_app_yaml(self) -> None:
+        """OrchestrationConfig pulls its default from app.yaml (1800);
+        an explicit constructor value still wins."""
+        from deep_research.agent.orchestration_config import OrchestrationConfig
+
+        clear_config_cache()
+        assert OrchestrationConfig().research_timeout_seconds == 1800
+        assert (
+            OrchestrationConfig(research_timeout_seconds=999).research_timeout_seconds
+            == 999
+        )
+
+
 class TestGetDefaultConfig:
     """Tests for get_default_config function."""
 
@@ -457,3 +489,122 @@ models:
         # After cache clear, should be different instances
         # (but equal content since default config)
         assert config1 == config2
+
+
+class TestDeepMergeDicts:
+    """Tests for the _deep_merge_dicts overlay helper."""
+
+    def test_nested_leaf_replaced_siblings_preserved(self) -> None:
+        base = {
+            "search": {
+                "provider": "databricks",
+                "databricks": {"endpoint": "gemini", "max_results": 10},
+            }
+        }
+        overlay = {"search": {"databricks": {"endpoint": "gpt-5"}}}
+        merged = _deep_merge_dicts(base, overlay)
+        assert merged["search"]["databricks"]["endpoint"] == "gpt-5"
+        # Siblings at every nesting level are preserved.
+        assert merged["search"]["databricks"]["max_results"] == 10
+        assert merged["search"]["provider"] == "databricks"
+
+    def test_list_value_is_replaced_not_merged(self) -> None:
+        base = {"models": {"simple": {"endpoints": ["a", "b"]}}}
+        overlay = {"models": {"simple": {"endpoints": ["c"]}}}
+        merged = _deep_merge_dicts(base, overlay)
+        assert merged["models"]["simple"]["endpoints"] == ["c"]
+
+    def test_new_key_added(self) -> None:
+        assert _deep_merge_dicts({"a": 1}, {"b": 2}) == {"a": 1, "b": 2}
+
+    def test_inputs_not_mutated(self) -> None:
+        base = {"search": {"databricks": {"endpoint": "gemini"}}}
+        _deep_merge_dicts(base, {"search": {"databricks": {"endpoint": "gpt-5"}}})
+        assert base["search"]["databricks"]["endpoint"] == "gemini"
+
+
+class TestConfigOverlay:
+    """Tests for base + partial-overlay config layering (APP_CONFIG_OVERLAY)."""
+
+    def setup_method(self) -> None:
+        clear_config_cache()
+
+    def _write(self, content: str) -> Path:
+        f = tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False)
+        f.write(content)
+        f.flush()
+        f.close()
+        return Path(f.name)
+
+    def test_overlay_overrides_only_target_leaf(self) -> None:
+        base = self._write(
+            "search:\n"
+            "  provider: databricks\n"
+            "  databricks:\n"
+            "    endpoint: databricks-gemini-3-1-flash-lite\n"
+            "    max_results: 10\n"
+            "    timeout_seconds: 30\n"
+        )
+        overlay = self._write(
+            "search:\n  databricks:\n    endpoint: databricks-gpt-5-4-mini\n"
+        )
+        try:
+            config = load_app_config(base, overlay)
+            # Overridden leaf:
+            assert config.search.databricks.endpoint == "databricks-gpt-5-4-mini"
+            # Untouched siblings inherit from the base config:
+            assert config.search.databricks.max_results == 10
+            assert config.search.databricks.timeout_seconds == 30
+            assert config.search.provider == "databricks"
+        finally:
+            os.unlink(base)
+            os.unlink(overlay)
+
+    def test_missing_overlay_falls_back_to_base(self) -> None:
+        base = self._write(
+            "search:\n  databricks:\n    endpoint: databricks-gemini-3-1-flash-lite\n"
+        )
+        missing = Path(tempfile.gettempdir()) / "no-such-app-overlay-xyz.yaml"
+        try:
+            config = load_app_config(base, missing)
+            assert (
+                config.search.databricks.endpoint
+                == "databricks-gemini-3-1-flash-lite"
+            )
+        finally:
+            os.unlink(base)
+
+    def test_no_overlay_leaves_base_unchanged(self) -> None:
+        base = self._write(
+            "search:\n  databricks:\n    endpoint: databricks-gemini-3-1-flash-lite\n"
+        )
+        try:
+            config = load_app_config(base, None)
+            assert (
+                config.search.databricks.endpoint
+                == "databricks-gemini-3-1-flash-lite"
+            )
+        finally:
+            os.unlink(base)
+
+    def test_overlay_raises_research_timeout(self) -> None:
+        """The fevm-style overlay raises orchestration.research_timeout_seconds
+        without disturbing other sections (e.g. search)."""
+        base = self._write(
+            "search:\n"
+            "  databricks:\n"
+            "    endpoint: databricks-gpt-5-4-mini\n"
+            "orchestration:\n"
+            "  research_timeout_seconds: 1800\n"
+        )
+        overlay = self._write(
+            "orchestration:\n  research_timeout_seconds: 3600\n"
+        )
+        try:
+            config = load_app_config(base, overlay)
+            assert config.orchestration.research_timeout_seconds == 3600
+            # Untouched section inherits from base:
+            assert config.search.databricks.endpoint == "databricks-gpt-5-4-mini"
+        finally:
+            os.unlink(base)
+            os.unlink(overlay)

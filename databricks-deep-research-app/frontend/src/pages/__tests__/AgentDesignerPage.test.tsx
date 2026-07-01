@@ -24,6 +24,14 @@ vi.mock('@/api/agentsV2', () => {
       this.current_etag = current_etag
     }
   }
+  class AgentCriticError extends Error {
+    critique: Record<string, unknown> | null
+    constructor(critique: Record<string, unknown> | null, message = 'Critic blocked') {
+      super(message)
+      this.name = 'AgentCriticError'
+      this.critique = critique
+    }
+  }
   return {
     getAgentV2WithEtag: vi.fn(),
     createAgentV2: vi.fn(),
@@ -32,6 +40,9 @@ vi.mock('@/api/agentsV2', () => {
     getRevision: vi.fn(),
     deleteAgentV2: vi.fn(),
     EtagConflictError,
+    AgentCriticError,
+    parseAgentCriticError: (error: unknown) =>
+      error instanceof AgentCriticError ? error : null,
   }
 })
 
@@ -59,7 +70,7 @@ vi.mock('@/components/agentDesigner/ToolsPanel', () => ({
 // Imports (after mocks are set up)
 // ---------------------------------------------------------------------------
 
-import { getAgentV2WithEtag, updateAgentV2, EtagConflictError } from '@/api/agentsV2'
+import { getAgentV2WithEtag, updateAgentV2, EtagConflictError, AgentCriticError } from '@/api/agentsV2'
 import { getRegistry, validateWorkflow } from '@/api/agentDesigner'
 import { useAgentEditorStore, initialState } from '@/stores/agentEditorStore'
 import { createDraftWorkflow } from '@/lib/workflowAst'
@@ -300,6 +311,50 @@ describe('AgentDesignerPage', () => {
     expect(await screen.findByText(/1 error/i)).toBeInTheDocument()
   })
 
+  // Test 4b: coverage-only validation is force-overridable via "Save as draft anyway"
+  it('coverage-only validation offers "Save as draft anyway" and forces the save', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: false,
+      errors: [
+        {
+          message: "Required topic 'earnings' is not referenced by any agent prompt.",
+          path: 'synth',
+          line: null,
+          kind: 'coverage',
+        },
+      ],
+      workflow_summary: null,
+    })
+    vi.mocked(updateAgentV2).mockResolvedValue({
+      agent: { ...FAKE_AGENT, validation_pending: false },
+      etag: '"etag-v2"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST)
+    })
+
+    fireEvent.click(await screen.findByRole('button', { name: /save agent/i }))
+
+    // Coverage block: no save yet, but a force affordance appears.
+    await waitFor(() => expect(validateWorkflow).toHaveBeenCalled())
+    expect(updateAgentV2).not.toHaveBeenCalled()
+    const forceBtn = await screen.findByRole('button', { name: /save as draft anyway/i })
+
+    fireEvent.click(forceBtn)
+
+    await waitFor(() => expect(updateAgentV2).toHaveBeenCalled())
+    // The options arg (4th) carries force: true so the backend coverage gate is bypassed.
+    const call = vi.mocked(updateAgentV2).mock.calls.at(-1)!
+    expect(call[3]).toEqual({ force: true })
+  })
+
   // Test 5: 409 from updateAgentV2 opens EtagConflictModal
   it('409 from save opens EtagConflictModal', async () => {
     vi.mocked(getAgentV2WithEtag).mockResolvedValue({
@@ -334,6 +389,39 @@ describe('AgentDesignerPage', () => {
     expect(screen.getByRole('button', { name: /reload agent from server/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /force overwrite remote agent/i })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /cancel/i })).toBeInTheDocument()
+  })
+
+  // Test 5b: AgentCriticError from updateAgentV2 shows a visible error banner
+  it('AgentCriticError from save is surfaced as a visible banner', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: true,
+      errors: [],
+      workflow_summary: null,
+    })
+    vi.mocked(updateAgentV2).mockRejectedValue(
+      new AgentCriticError({ verdict: 'fail', summary: 'off-topic workflow' } as import('@/api/agentsV2').WorkflowValidationResult),
+    )
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST)
+    })
+
+    const saveBtn = await screen.findByRole('button', { name: /save agent/i })
+    fireEvent.click(saveBtn)
+
+    // A visible alert banner containing the critic summary must appear
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert')
+      const saveAlert = alerts.find((el) => el.textContent?.includes('off-topic workflow'))
+      expect(saveAlert).toBeTruthy()
+    })
   })
 
   // Test 6: Save button is disabled when !isDirty (existing agent with no changes)
@@ -457,4 +545,142 @@ describe('AgentDesignerPage', () => {
   // removed in D1. The DeployDropdown (new deploy path) is tested via its
   // own component tests in components/agentDesigner/deploy/__tests__/.
   // Chat-picker visibility is now handled by the D2-shim in deployments.py.
+
+  // ---------------------------------------------------------------------------
+  // US-301: validation directives in saveNotice banner
+  // ---------------------------------------------------------------------------
+
+  // Test US-301-a: advisory save with directives renders each directive line
+  it('advisory save with directives renders directive lines in the banner', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: true,
+      errors: [],
+      workflow_summary: null,
+    })
+
+    const validationResult = {
+      verdict: 'needs_revision',
+      summary: 'Researcher lacks a tool',
+      directives: [
+        {
+          node_path: 'root.children.0',
+          issue: 'No web_search tool bound',
+          suggested_action: 'Bind web_search to the Researcher agent',
+          severity: 'blocking' as const,
+          tool_hint: 'web_search',
+        },
+        {
+          node_path: 'root.children.1',
+          issue: 'Missing system prompt',
+          suggested_action: 'Add a user_prompt_template',
+          severity: 'advisory' as const,
+          tool_hint: null,
+        },
+      ],
+      semantic_hash: 'abc',
+      intent_hash: 'def',
+      validator_version: '1.0',
+      source: 'fresh' as const,
+      cache_hit: false,
+      cacheable: true,
+    } satisfies import('@/api/agentsV2').WorkflowValidationResult
+
+    vi.mocked(updateAgentV2).mockResolvedValue({
+      agent: { ...FAKE_AGENT, validation: validationResult },
+      etag: '"etag-v2"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST)
+    })
+
+    const saveBtn = await screen.findByRole('button', { name: /save agent/i })
+    fireEvent.click(saveBtn)
+
+    // The advisory banner should appear
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert')
+      const banner = alerts.find((el) => el.textContent?.includes('needs_revision'))
+      expect(banner).toBeTruthy()
+    })
+
+    // Directive lines should be rendered in the banner
+    expect(await screen.findByText(/No web_search tool bound/)).toBeInTheDocument()
+    expect(await screen.findByText(/Bind web_search to the Researcher agent/)).toBeInTheDocument()
+    expect(await screen.findByText(/Missing system prompt/)).toBeInTheDocument()
+  })
+
+  // Test US-301-b: "Ask designer to fix" seeds the store and dismisses the banner
+  it('"Ask designer to fix" seeds agentEditorStore.pendingChatSeed and dismisses banner', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: true,
+      errors: [],
+      workflow_summary: null,
+    })
+
+    const validationResult = {
+      verdict: 'needs_revision',
+      summary: 'Researcher lacks a tool',
+      directives: [
+        {
+          node_path: 'root.children.0',
+          issue: 'No web_search tool bound',
+          suggested_action: 'Bind web_search to the Researcher agent',
+          severity: 'blocking' as const,
+          tool_hint: null,
+        },
+      ],
+      semantic_hash: 'abc',
+      intent_hash: 'def',
+      validator_version: '1.0',
+      source: 'fresh' as const,
+      cache_hit: false,
+      cacheable: true,
+    } satisfies import('@/api/agentsV2').WorkflowValidationResult
+
+    vi.mocked(updateAgentV2).mockResolvedValue({
+      agent: { ...FAKE_AGENT, validation: validationResult },
+      etag: '"etag-v2"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST)
+    })
+
+    const saveBtn = await screen.findByRole('button', { name: /save agent/i })
+    fireEvent.click(saveBtn)
+
+    // Wait for the advisory banner
+    const fixBtn = await screen.findByRole('button', { name: /ask designer to fix/i })
+    expect(fixBtn).toBeInTheDocument()
+
+    fireEvent.click(fixBtn)
+
+    // Banner should be dismissed
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /ask designer to fix/i })).toBeNull()
+    })
+
+    // pendingChatSeed should be set in the store with verdict + summary + directives
+    const { pendingChatSeed } = useAgentEditorStore.getState()
+    expect(pendingChatSeed).toContain('needs_revision')
+    expect(pendingChatSeed).toContain('Researcher lacks a tool')
+    expect(pendingChatSeed).toContain('[root.children.0]')
+    expect(pendingChatSeed).toContain('No web_search tool bound')
+    expect(pendingChatSeed).toContain('Bind web_search to the Researcher agent')
+  })
 })

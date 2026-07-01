@@ -7,6 +7,7 @@ import pytest
 
 import deep_research.agent_designer.tool_contract as tool_contract_module
 from deep_research.agent_designer.designer_types import (
+    ResolvedToolContract,
     ResourceSemanticExtraction,
     ResourceSemanticItem,
 )
@@ -33,6 +34,26 @@ calculations, and synthesize a concise answer with the fiscal/calendar-year
 distinction when the evidence supports it.
 """
 _OFFICEQA_INTENT = _OFFICEQA_RESOURCE_INTENT + "Do not use public web tools.\n"
+
+
+def test_schema_aliases_accept_and_emit_public_contract_keys() -> None:
+    semantics = ResourceSemanticExtraction.model_validate(
+        {"schema": "resource_semantics.v1"}
+    )
+    contract = ResolvedToolContract.model_validate(
+        {"schema": "resolved_tool_contract.v1"}
+    )
+
+    assert semantics.schema_ == "resource_semantics.v1"
+    assert contract.schema_ == "resolved_tool_contract.v1"
+    assert semantics.model_dump(mode="json", by_alias=True)["schema"] == (
+        "resource_semantics.v1"
+    )
+    assert contract.model_dump(mode="json", by_alias=True)["schema"] == (
+        "resolved_tool_contract.v1"
+    )
+    assert "schema_" not in semantics.model_dump(mode="json", by_alias=True)
+    assert "schema_" not in contract.model_dump(mode="json", by_alias=True)
 
 
 async def _officeqa_grounding(default_warehouse_id: str | None = "wh-officeqa"):

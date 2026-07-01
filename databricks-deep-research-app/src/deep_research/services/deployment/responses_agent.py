@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import mlflow.pyfunc
 from databricks_deep_research import WorkflowRunner
@@ -33,8 +33,11 @@ from databricks_deep_research.workflow.loader import load_workflow_from_dict
 if TYPE_CHECKING:
     from databricks_deep_research.workflow.definition import WorkflowDefinition
 
+_PythonModel: Any = mlflow.pyfunc.PythonModel
+_PythonModelContext: Any = mlflow.pyfunc.PythonModelContext
 
-class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
+
+class DeepResearchResponsesAgent(_PythonModel):  # type: ignore[misc]
     """Wrap ``WorkflowRunner`` for Mosaic AI Agent Framework serving.
 
     The runner + workflow definition are loaded lazily in ``load_context``
@@ -47,7 +50,7 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
         self._runner: WorkflowRunner | None = None
         self._definition: WorkflowDefinition | None = None
 
-    def load_context(self, context: mlflow.pyfunc.PythonModelContext) -> None:
+    def load_context(self, context: _PythonModelContext) -> None:
         """Load the workflow definition + construct the runner.
 
         ``context.artifacts['workflow_definition']`` is a path to a JSON file
@@ -79,7 +82,7 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
 
     def predict(
         self,
-        context: mlflow.pyfunc.PythonModelContext,
+        context: _PythonModelContext,
         model_input: dict[str, Any],
         params: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -108,7 +111,7 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
 
     async def predict_stream(
         self,
-        context: mlflow.pyfunc.PythonModelContext,
+        context: _PythonModelContext,
         model_input: dict[str, Any],
         params: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
@@ -129,9 +132,10 @@ class DeepResearchResponsesAgent(mlflow.pyfunc.PythonModel):
             strict_tool_resolution=True,
         ):
             if event.event_type == "agent_stream_chunk":
+                chunk_event = cast(Any, event)
                 yield {
                     "type": "response.output_text.delta",
-                    "delta": event.chunk,
+                    "delta": chunk_event.chunk,
                 }
 
         yield {"type": "response.output_item.done"}

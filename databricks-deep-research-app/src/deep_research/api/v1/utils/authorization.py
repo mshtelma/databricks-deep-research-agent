@@ -8,7 +8,7 @@ This module consolidates authorization logic previously duplicated across:
 """
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID
 
 from fastapi import Request
@@ -39,9 +39,12 @@ def _resolve_stack(
     sites — the factory will fall back to `session=db`.
     """
     if storage_stack is not None:
-        return storage_stack
+        return cast("StorageStack", storage_stack)
     if request is not None:
-        return getattr(request.app.state, "storage_stack", None)
+        return cast(
+            "StorageStack | None",
+            getattr(request.app.state, "storage_stack", None),
+        )
     return None
 
 

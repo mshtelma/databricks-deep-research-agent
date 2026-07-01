@@ -46,12 +46,47 @@ export class EtagConflictError extends Error {
   }
 }
 
-/** Save-time LLM critic verdict payload (subset; backend CritiqueResult). */
-export interface CritiqueResult {
-  verdict: string
-  summary?: string
+/**
+ * A single directive from the workflow validator — describes an issue on a
+ * specific node and what action to take.
+ */
+export interface ValidationDirective {
+  node_path: string
+  issue: string
+  suggested_action: string
+  severity: 'blocking' | 'advisory'
+  tool_hint?: string | null
+}
+
+/**
+ * Full workflow validation result returned by the backend WorkflowValidationResult
+ * and surfaced on AgentV2Response.validation after a save.
+ *
+ * Supersedes the old narrow CritiqueResult shape. The `verdict` union now
+ * includes 'skipped' and `directives` carries structured per-node findings.
+ */
+export interface WorkflowValidationResult {
+  verdict: 'pass' | 'needs_revision' | 'fail' | 'skipped'
+  summary: string
+  directives: ValidationDirective[]
+  agent_findings?: unknown[]
+  coverage_gaps?: unknown[]
+  output_gaps?: unknown[]
+  semantic_hash: string
+  intent_hash: string
+  validator_version: string
+  source: 'fresh' | 'cache' | 'fallback' | 'skipped'
+  cache_hit: boolean
+  cacheable: boolean
   [key: string]: unknown
 }
+
+/**
+ * Save-time LLM critic verdict payload.
+ * @deprecated Use WorkflowValidationResult instead. Kept as an alias for
+ *   backwards-compatible call sites that only need verdict + summary.
+ */
+export type CritiqueResult = WorkflowValidationResult
 
 /**
  * Thrown by {@link createAgentV2} when the save-time critic returns
@@ -271,21 +306,30 @@ export async function exportAgentYaml(id: string): Promise<string> {
   return fetchText(`/agents-v2/${id}/yaml`)
 }
 
+export interface UpdateAgentV2Options {
+  /** Bypass the save-time LLM critic verdict=fail gate (does NOT bypass validation). */
+  force?: boolean
+}
+
 /**
  * Update an existing agent using optimistic locking.
  *
  * @param id - Agent UUID.
  * @param req - Partial update payload.
  * @param etag - The ETag obtained from the last GET or create/update response.
+ * @param options - Optional flags (e.g. `force` to bypass the critic gate).
  * @throws {EtagConflictError} When the server returns 409 (stale ETag).
+ * @throws {AgentCriticError} On HTTP 422 critic `verdict=fail` (unless `force`).
  * @throws {ApiError} For 404, 428, or other HTTP errors.
  */
 export async function updateAgentV2(
   id: string,
   req: UpdateAgentV2Request,
-  etag: string
+  etag: string,
+  options: UpdateAgentV2Options = {},
 ): Promise<{ agent: AgentV2Response; etag: string | null }> {
-  const { response, etag: newEtag } = await rawFetch(`/agents-v2/${id}`, {
+  const endpoint = `/agents-v2/${id}${options.force ? '?force=true' : ''}`
+  const { response, etag: newEtag } = await rawFetch(endpoint, {
     method: 'PATCH',
     headers: { 'If-Match': etag },
     body: JSON.stringify(req),
@@ -304,7 +348,31 @@ export async function updateAgentV2(
     throw new EtagConflictError(currentEtag)
   }
 
-  await throwOnError(response)
+  if (!response.ok) {
+    // Read the body ONCE; route the critic 422 to a typed error, everything
+    // else (incl. Pydantic semantic-validation 422s) to a generic ApiError.
+    const body = await readErrorBody(response)
+    const detail = unwrapDetail(body)
+    if (
+      response.status === 422 &&
+      detail &&
+      typeof detail === 'object' &&
+      'critique' in (detail as Record<string, unknown>)
+    ) {
+      const d = detail as { message?: string; critique?: CritiqueResult }
+      throw new AgentCriticError(
+        d.critique ?? null,
+        typeof d.message === 'string' ? d.message : undefined,
+      )
+    }
+    throw new ApiError(
+      response.status,
+      'HTTP_ERROR',
+      errorMessageFromDetail(detail, 'Failed to update agent'),
+      detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : undefined,
+    )
+  }
+
   const agent = (await response.json()) as AgentV2Response
   return { agent, etag: newEtag }
 }

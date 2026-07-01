@@ -94,8 +94,9 @@ class ReadAttachedFileTool:
             chunks = await self._file_service.get_file_chunks(file_id)
         except Exception as e:
             logger.warning(
-                "READ_ATTACHED_FILE_FAILED file_id=%s error=%s",
-                file_id, str(e)[:200],
+                "READ_ATTACHED_FILE_FAILED",
+                file_id=file_id,
+                error=str(e)[:200],
             )
             return ToolResult(
                 content=(

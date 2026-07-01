@@ -224,7 +224,7 @@ def extract_resource_mentions(intent: str) -> list[ResourceMention]:
     mentions: list[ResourceMention] = []
     for text, span in _uc_fqn_spans(intent):
         inferred_kind = _infer_asset_kind_from_intent(intent, text)
-        kind_hint: ResourceKindHint = inferred_kind or "unknown"  # type: ignore[assignment]
+        kind_hint: ResourceKindHint = inferred_kind or "unknown"
         evidence = ["three_part_fqn"]
         confidence = 0.7
         if inferred_kind == "vector_index":
@@ -677,8 +677,9 @@ def _compute_tool_readiness(
     for tool in reco.get("recommended_tools") or []:
         if not isinstance(tool, dict):
             continue
-        config = tool.get("config") if isinstance(tool.get("config"), dict) else {}
-        asset_ref = str(tool.get("asset_ref") or "") or None
+        raw_config = tool.get("config")
+        config: dict[str, Any] = raw_config if isinstance(raw_config, dict) else {}
+        tool_asset_ref: str | None = str(tool.get("asset_ref") or "") or None
         config_sources: dict[str, Any] = {}
         for key in config:
             if key in {"index_name", "table_name"}:
@@ -690,10 +691,10 @@ def _compute_tool_readiness(
         readiness.append(
             ToolReadiness(
                 tool_kind=str(tool.get("kind") or ""),
-                asset_ref=asset_ref,
+                asset_ref=tool_asset_ref,
                 ready=True,
                 blocking=False,
-                source_mentions=source_mentions_by_asset.get(asset_ref or "", []),
+                source_mentions=source_mentions_by_asset.get(tool_asset_ref or "", []),
                 diagnostics=[],
                 config_sources=config_sources,
             )
@@ -821,7 +822,7 @@ async def ground_prompt(
             ]
             diagnostics.extend(mention_diagnostics)
             asset = DesignerAsset(
-                kind=kind,  # type: ignore[arg-type]
+                kind=kind,
                 full_name=mention.text,
                 usage=usage,
                 metadata={"warehouse_id": default_warehouse_id}

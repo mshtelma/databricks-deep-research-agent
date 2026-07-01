@@ -326,7 +326,7 @@ class ValidationErrorItem(BaseModel):
     message: str
     path: str | None = None
     line: int | None = None
-    kind: Literal["syntax", "schema", "validation"]
+    kind: Literal["syntax", "schema", "validation", "coverage"]
 
 
 class WorkflowSummary(BaseModel):
@@ -373,6 +373,20 @@ def _semantic_validation_errors(definition: dict[str, Any]) -> list[ValidationEr
     return items
 
 
+def _coverage_validation_items(definition: dict[str, Any]) -> list[ValidationErrorItem]:
+    """Deterministic prompt-term coverage as ``kind="coverage"`` items, so the
+    frontend can offer a force ('Save draft anyway') path distinct from the hard
+    structural errors. Reuses the Designer-Goal-stripped coverage check."""
+    from deep_research.agent_designer.semantic_validation import (
+        prompt_term_coverage_errors,
+    )
+
+    return [
+        ValidationErrorItem(message=e.message, path=e.path, line=e.line, kind="coverage")
+        for e in prompt_term_coverage_errors(definition)
+    ]
+
+
 @router.post("/validate", response_model=ValidateResponse)
 async def validate_workflow(req: ValidateRequest) -> ValidateResponse:
     semantic_errors = _semantic_validation_errors(req.definition)
@@ -398,6 +412,13 @@ async def validate_workflow(req: ValidateRequest) -> ValidateResponse:
         tool_count=len(req.definition.get("tools", []) or []),
         source_count=len(req.definition.get("sources", []) or []),
     )
+    # Deterministic coverage gate, surfaced in the preflight so the user sees it
+    # BEFORE clicking save (force-overridable at the CRUD endpoint): the report
+    # producer must reference every requested topic.
+    coverage = _coverage_validation_items(req.definition)
+    if coverage:
+        record_validation_error("validation")
+        return ValidateResponse(valid=False, errors=coverage, workflow_summary=summary)
     return ValidateResponse(valid=True, errors=[], workflow_summary=summary)
 
 

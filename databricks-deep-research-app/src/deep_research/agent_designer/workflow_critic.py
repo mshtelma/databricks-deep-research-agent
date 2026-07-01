@@ -161,6 +161,9 @@ def _extract_agents(
                     "system_prompt_excerpt": _excerpt(
                         str(config.get("system_prompt") or "")
                     ),
+                    "user_prompt_template_excerpt": _excerpt(
+                        str(config.get("user_prompt_template") or "")
+                    ),
                     "tools_bound": list(config.get("tools") or []),
                     "model_tier": str(config.get("model_tier") or ""),
                 }
@@ -179,6 +182,9 @@ def _extract_agents(
                             "subtype": str(nested.get("subtype") or nested_key),
                             "system_prompt_excerpt": _excerpt(
                                 str(nested.get("system_prompt") or "")
+                            ),
+                            "user_prompt_template_excerpt": _excerpt(
+                                str(nested.get("user_prompt_template") or "")
                             ),
                             "tools_bound": list(nested.get("tools") or []),
                             "model_tier": str(nested.get("model_tier") or ""),
@@ -246,7 +252,7 @@ You will be given:
   - The user's original intent (the request that triggered the Designer).
   - The brief's required_outputs (what the final report must contain).
   - The workflow's runtime tool declarations.
-  - A list of every agent in the generated workflow with its label, subtype, bound tools, model_tier, and the first ~1500 chars of its system_prompt.
+  - A list of every agent in the generated workflow with its label, subtype, bound tools, model_tier, and the first ~1500 chars of BOTH its system_prompt and user_prompt_template (judge prompt content using both).
 
 Your job is to emit ONE call to the `emit_critique` tool with a structured verdict:
   - verdict = "pass"           — every agent's system_prompt addresses some aspect of the intent; required_outputs covered; workflow as built will produce a useful answer to the user's request.
@@ -336,29 +342,29 @@ def _fallback_critique(reason: str) -> CritiqueResult:
 # ---- Public API -------------------------------------------------------------
 
 
-async def critique_workflow_against_intent(
+async def critique_workflow_against_intent_ex(
     *,
     definition: dict[str, Any],
     intent: str,
     required_outputs: list[str] | None = None,
     llm: CriticLLMClientProto,
-) -> CritiqueResult:
-    """Run the LLM-as-judge critic against a generated workflow.
+) -> tuple[CritiqueResult, bool]:
+    """Like :func:`critique_workflow_against_intent` but also returns an
+    ``is_fallback`` flag.
 
-    Returns a structured :class:`CritiqueResult`. Callers decide what to do
-    with the verdict:
-      * Chat orchestrator: surface as ``advice`` in the ``validate`` tool result.
-      * Save path: block on ``verdict == "fail"`` unless ``?force=true``;
-        log ``needs_revision`` as a warning header but allow save.
+    ``is_fallback`` is True whenever the returned verdict is a non-authoritative
+    placeholder (empty intent, malformed AST, no agent nodes, LLM stream error,
+    or invalid critic output) rather than a real judgment. Callers that cache
+    the verdict MUST NOT persist a fallback as an authoritative result.
     """
     if not intent or not intent.strip():
-        return _fallback_critique("empty intent — no semantic question to judge")
+        return _fallback_critique("empty intent — no semantic question to judge"), True
     if not isinstance(definition, dict) or "root" not in definition:
-        return _fallback_critique("missing or malformed definition.root")
+        return _fallback_critique("missing or malformed definition.root"), True
 
     agents = _extract_agents(definition)
     if not agents:
-        return _fallback_critique("no agent nodes found in workflow")
+        return _fallback_critique("no agent nodes found in workflow"), True
 
     messages = _build_critic_messages(
         intent=intent,
@@ -378,16 +384,42 @@ async def critique_workflow_against_intent(
             if getattr(chunk, "finish", False):
                 break
     except Exception as exc:  # noqa: BLE001 — LLM clients raise heterogeneously
-        return _fallback_critique(f"LLM stream raised: {exc}")
+        return _fallback_critique(f"LLM stream raised: {exc}"), True
 
     if tool_call_args is None:
-        return _fallback_critique("critic did not call emit_critique")
+        return _fallback_critique("critic did not call emit_critique"), True
 
     try:
         parsed = _parse_tool_call_args(tool_call_args)
-        return CritiqueResult.model_validate(parsed)
+        return CritiqueResult.model_validate(parsed), False
     except (ValueError, ValidationError) as exc:
-        return _fallback_critique(f"critic output failed validation: {exc}")
+        return _fallback_critique(f"critic output failed validation: {exc}"), True
+
+
+async def critique_workflow_against_intent(
+    *,
+    definition: dict[str, Any],
+    intent: str,
+    required_outputs: list[str] | None = None,
+    llm: CriticLLMClientProto,
+) -> CritiqueResult:
+    """Run the LLM-as-judge critic against a generated workflow.
+
+    Returns a structured :class:`CritiqueResult`. Callers decide what to do
+    with the verdict:
+      * Chat orchestrator: surface as ``advice`` in the ``validate`` tool result.
+      * Save path: advisory by default; strict mode blocks on ``verdict ==
+        "fail"`` unless ``?force=true``.
+    Thin back-compat wrapper over
+    :func:`critique_workflow_against_intent_ex` (drops the ``is_fallback`` flag).
+    """
+    result, _is_fallback = await critique_workflow_against_intent_ex(
+        definition=definition,
+        intent=intent,
+        required_outputs=required_outputs,
+        llm=llm,
+    )
+    return result
 
 
 __all__ = [
@@ -397,4 +429,5 @@ __all__ = [
     "CritiqueResult",
     "CriticLLMClientProto",
     "critique_workflow_against_intent",
+    "critique_workflow_against_intent_ex",
 ]

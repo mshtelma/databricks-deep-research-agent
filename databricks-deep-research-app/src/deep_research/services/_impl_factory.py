@@ -22,7 +22,7 @@ Extending for a new service:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from deep_research.services._protocols import (
     IAuditLogService,
@@ -68,7 +68,7 @@ def make_research_event_service(
             CachedResearchEventService,
         )
 
-        return CachedResearchEventService(stack)
+        return cast(IResearchEventService, CachedResearchEventService(stack))
 
     from deep_research.services.research_event_service import (
         ResearchEventService,
@@ -76,7 +76,7 @@ def make_research_event_service(
 
     if session is None:
         raise ValueError("legacy research_event service requires an AsyncSession")
-    return ResearchEventService(session)
+    return cast(IResearchEventService, ResearchEventService(session))
 
 
 def make_chat_service(
@@ -98,13 +98,13 @@ def make_chat_service(
             raise ValueError("cached chat service requires a StorageStack")
         from deep_research.services.cached.chat import CachedChatService
 
-        return CachedChatService(stack)
+        return cast(IChatService, CachedChatService(stack))
 
     from deep_research.services.chat_service import ChatService
 
     if session is None:
         raise ValueError("legacy chat service requires an AsyncSession")
-    return ChatService(session)
+    return cast(IChatService, ChatService(session))
 
 
 # --- Stubs — Wave 5 follow-ups add cached impls + wire them here -----------
@@ -128,12 +128,12 @@ def make_feedback_service(
             raise ValueError("cached feedback service requires a StorageStack")
         from deep_research.services.cached.feedback import CachedFeedbackService
 
-        return CachedFeedbackService(stack)
+        return cast(IFeedbackService, CachedFeedbackService(stack))
     from deep_research.services.feedback_service import FeedbackService
 
     if session is None:
         raise ValueError("legacy feedback service requires an AsyncSession")
-    return FeedbackService(session)
+    return cast(IFeedbackService, FeedbackService(session))
 
 
 def make_user_service(
@@ -147,12 +147,12 @@ def make_user_service(
             raise ValueError("cached user service requires a StorageStack")
         from deep_research.services.cached.user import CachedUserService
 
-        return CachedUserService(stack)
+        return cast(IUserService, CachedUserService(stack))
     from deep_research.services.user_service import UserService
 
     if session is None:
         raise ValueError("legacy user service requires an AsyncSession")
-    return UserService(session)
+    return cast(IUserService, UserService(session))
 
 
 def make_preferences_service(
@@ -168,12 +168,12 @@ def make_preferences_service(
             CachedPreferencesService,
         )
 
-        return CachedPreferencesService(stack)
+        return cast(IPreferencesService, CachedPreferencesService(stack))
     from deep_research.services.preferences_service import PreferencesService
 
     if session is None:
         raise ValueError("legacy preferences service requires an AsyncSession")
-    return PreferencesService(session)
+    return cast(IPreferencesService, PreferencesService(session))
 
 
 def make_chat_memory_service(
@@ -198,12 +198,18 @@ def make_chat_memory_service(
             CachedChatMemoryService,
         )
 
-        return CachedChatMemoryService(stack, embedder=embedder, llm=llm)
+        return cast(
+            IChatMemoryService,
+            CachedChatMemoryService(stack, embedder=embedder, llm=llm),
+        )
     from deep_research.services.chat_memory_service import ChatMemoryService
 
     if session is None:
         raise ValueError("legacy chat_memory service requires an AsyncSession")
-    return ChatMemoryService(session, embedder=embedder, llm=llm)
+    return cast(
+        IChatMemoryService,
+        ChatMemoryService(session, embedder=embedder, llm=llm),
+    )
 
 
 def make_message_service(
@@ -217,12 +223,12 @@ def make_message_service(
             raise ValueError("cached message service requires a StorageStack")
         from deep_research.services.cached.message import CachedMessageService
 
-        return CachedMessageService(stack)
+        return cast(IMessageService, CachedMessageService(stack))
     from deep_research.services.message_service import MessageService
 
     if session is None:
         raise ValueError("legacy message service requires an AsyncSession")
-    return MessageService(session)
+    return cast(IMessageService, MessageService(session))
 
 
 def make_source_service(
@@ -236,12 +242,12 @@ def make_source_service(
             raise ValueError("cached source service requires a StorageStack")
         from deep_research.services.cached.source import CachedSourceService
 
-        return CachedSourceService(stack)
+        return cast(ISourceService, CachedSourceService(stack))
     from deep_research.services.source_service import SourceService
 
     if session is None:
         raise ValueError("legacy source service requires an AsyncSession")
-    return SourceService(session)
+    return cast(ISourceService, SourceService(session))
 
 
 def make_research_session_service(
@@ -257,14 +263,14 @@ def make_research_session_service(
             CachedResearchSessionService,
         )
 
-        return CachedResearchSessionService(stack)
+        return cast(IResearchSessionService, CachedResearchSessionService(stack))
     from deep_research.services.research_session_service import (
         ResearchSessionService,
     )
 
     if session is None:
         raise ValueError("legacy research_session service requires an AsyncSession")
-    return ResearchSessionService(session)
+    return cast(IResearchSessionService, ResearchSessionService(session))
 
 
 def make_audit_log_service(
@@ -316,13 +322,19 @@ def make_file_upload_service(
             raise ValueError("cached file_upload service requires a StorageStack")
         from deep_research.services.cached.file_upload import CachedFileUploadService
 
-        return CachedFileUploadService(stack, storage_path=storage_path)
+        return cast(
+            IFileUploadService,
+            CachedFileUploadService(stack, storage_path=storage_path),
+        )
 
     from deep_research.services.file_upload_service import FileUploadService
 
     if session is None:
         raise ValueError("legacy file_upload service requires an AsyncSession")
-    return FileUploadService(session, storage_path=storage_path)
+    return cast(
+        IFileUploadService,
+        FileUploadService(session, storage_path=storage_path),
+    )
 
 
 def make_data_source_service(
@@ -345,13 +357,19 @@ def make_data_source_service(
             raise ValueError("cached data_source service requires a StorageStack")
         from deep_research.services.cached.data_source import CachedDataSourceService
 
-        return CachedDataSourceService(stack, obo_client=obo_client)
+        return cast(
+            IDataSourceService,
+            CachedDataSourceService(stack, obo_client=obo_client),
+        )
 
     from deep_research.services.data_source_service import DataSourceService
 
     if session is None:
         raise ValueError("legacy data_source service requires an AsyncSession")
-    return DataSourceService(session, obo_client=obo_client)
+    return cast(
+        IDataSourceService,
+        DataSourceService(session, obo_client=obo_client),
+    )
 
 
 def make_template_service(
@@ -372,13 +390,13 @@ def make_template_service(
             raise ValueError("cached template service requires a StorageStack")
         from deep_research.services.cached.template import CachedTemplateService
 
-        return CachedTemplateService(stack)
+        return cast(ITemplateService, CachedTemplateService(stack))
 
     from deep_research.services.template_service import TemplateService
 
     if session is None:
         raise ValueError("legacy template service requires an AsyncSession")
-    return TemplateService(session)
+    return cast(ITemplateService, TemplateService(session))
 
 
 def make_export_service(
@@ -404,18 +422,21 @@ def make_export_service(
         from deep_research.services.cached.research_session import CachedResearchSessionService
         from deep_research.services.cached.source import CachedSourceService
 
-        return CachedExportService(
-            chat_service=CachedChatService(stack),
-            message_service=CachedMessageService(stack),
-            research_session_service=CachedResearchSessionService(stack),
-            source_service=CachedSourceService(stack),
+        return cast(
+            IExportService,
+            CachedExportService(
+                chat_service=CachedChatService(stack),
+                message_service=CachedMessageService(stack),
+                research_session_service=CachedResearchSessionService(stack),
+                source_service=CachedSourceService(stack),
+            ),
         )
 
     from deep_research.services.export_service import ExportService
 
     if session is None:
         raise ValueError("legacy export service requires an AsyncSession")
-    return ExportService(session)
+    return cast(IExportService, ExportService(session))
 
 
 def make_session_service(
@@ -436,13 +457,13 @@ def make_session_service(
             raise ValueError("cached session service requires a StorageStack")
         from deep_research.services.cached.session import CachedSessionService
 
-        return CachedSessionService(stack)
+        return cast(ISessionService, CachedSessionService(stack))
 
     from deep_research.services.session_service import SessionService
 
     if session is None:
         raise ValueError("legacy session service requires an AsyncSession")
-    return SessionService(session)
+    return cast(ISessionService, SessionService(session))
 
 
 __all__ = [

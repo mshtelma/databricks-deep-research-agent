@@ -910,7 +910,7 @@ class SQLWarehouseBackend:
         sink = get_sink()
         started = asyncio.get_event_loop().time()
 
-        def _sync_call():
+        def _sync_call() -> Any:
             client = self._get_client()
             sdk_params = codec_params(dict(params)) if params else None
             # Initial wait_timeout caps at 50s per SDK docs; we use a smaller

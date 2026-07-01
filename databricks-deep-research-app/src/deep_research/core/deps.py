@@ -18,7 +18,8 @@ Usage in a route:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from typing import TYPE_CHECKING, Any, TypeVar, cast
 
 from fastapi import Depends, HTTPException, Request
 
@@ -56,6 +57,8 @@ if TYPE_CHECKING:
 
     from deep_research.storage.factory import StorageStack
 
+T = TypeVar("T")
+
 
 # --- Storage stack --------------------------------------------------------
 
@@ -76,12 +79,12 @@ def get_storage(request: Request) -> StorageStack:
                 "(STORAGE_SERVICE_IMPL!=cached or startup failed)"
             ),
         )
-    return stack
+    return cast("StorageStack", stack)
 
 
 def get_storage_optional(request: Request) -> StorageStack | None:
     """Return the stack or None — use in services that support both impls."""
-    return getattr(request.app.state, "storage_stack", None)
+    return cast("StorageStack | None", getattr(request.app.state, "storage_stack", None))
 
 
 # --- Per-service dispatchers ----------------------------------------------
@@ -272,7 +275,12 @@ def get_export_service(
 # --- Internal -------------------------------------------------------------
 
 
-def _with_legacy_session(factory, settings, request, _get_db):  # type: ignore[no-untyped-def]
+def _with_legacy_session(
+    factory: Callable[..., T],
+    settings: Settings,
+    request: Request,
+    _get_db: Any,
+) -> T:
     """Helper: call a factory with a legacy session if one is already
     attached to the request (e.g. via the existing Depends(get_db) in the
     route signature). Otherwise raise a 503 — the legacy path requires a

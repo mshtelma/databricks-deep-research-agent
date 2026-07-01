@@ -323,9 +323,12 @@ class ResourceSemanticExtraction(BaseModel):
     grounding before any field is used downstream.
     """
 
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    schema: Literal["resource_semantics.v1"] = "resource_semantics.v1"
+    schema_: Literal["resource_semantics.v1"] = Field(
+        "resource_semantics.v1",
+        alias="schema",
+    )
     resources: list[ResourceSemanticItem] = Field(default_factory=list)
     answer_obligations: list[str] = Field(default_factory=list)
     task_domain_terms: list[str] = Field(default_factory=list)
@@ -387,9 +390,12 @@ class PromptObligationContract(BaseModel):
 class ResolvedToolContract(BaseModel):
     """Compact non-executable contract passed from grounding to blueprint."""
 
-    model_config = ConfigDict(extra="ignore")
+    model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    schema: Literal["resolved_tool_contract.v1"] = "resolved_tool_contract.v1"
+    schema_: Literal["resolved_tool_contract.v1"] = Field(
+        "resolved_tool_contract.v1",
+        alias="schema",
+    )
     source: Literal["prompt_grounding"] = "prompt_grounding"
     evidence_policy: EvidencePolicy = "web_only"
     resources: list[ResourceContract] = Field(default_factory=list)

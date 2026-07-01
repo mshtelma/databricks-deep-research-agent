@@ -30,6 +30,8 @@ from deep_research.agent_designer.framework_tools import (
     SetModelTierTool,
     UpdateBlockTool,
     ValidateTool,
+    _ast_prompts_payload,
+    _coerce_critic_verdict_dict,
     builtin_designer_tools,
     get_global_registry,
     register_designer_tools,
@@ -277,16 +279,18 @@ async def test_propose_workflow_with_selected_assets_requires_explicit_tool_plan
     )
 
     ast = result.data["current_ast"]
-    # Top-level declared tool list stays empty until the architect emits a
-    # tool_plan (still the architect's job).
-    assert ast["tools"] == []
-    # P4-1 contract: when no architect tool_plan exists, _tool_plan_bindings
-    # falls back to the caller's default (default_researcher_tools =
-    # ["web_research"]) instead of silently returning []. This guarantees a
-    # deployed workflow always has SOME tool to run with, even if the
-    # architect didn't finalize tool_plan. The architect's job is now to
-    # OVERRIDE the default with corpus-specific bindings, not to bootstrap
-    # from empty.
+    # Bugfix (binding/declaration consistency): when no architect tool_plan exists,
+    # _tool_plan_bindings falls back to the caller's default
+    # (default_researcher_tools = ["web_research"]). The workflow MUST then also
+    # DECLARE that default tool — an empty tool_plan returns [] (not None), so the
+    # builder's ``not tools`` guard falls back to _default_web_tool_decls. Without
+    # this the node binds an UNDECLARED tool and execution fail-closes under strict
+    # tool resolution ("missing declared tools: ['web_research']").
+    declared_names = {t["name"] for t in ast["tools"]}
+    assert "web_research" in declared_names
+    # P4-1 contract: the node still binds the default so a deployed workflow always
+    # has SOME evidence tool, even if the architect didn't finalize a tool_plan.
+    # The architect's job is to OVERRIDE the default with corpus-specific bindings.
     answer_node = _find_node_by_id(ast, "answer-agent")
     assert answer_node["config"]["tools"] == ["web_research"]
 
@@ -1148,3 +1152,145 @@ def test_global_registry_resolves_via_tool_ref() -> None:
         reg.resolve(ToolRef(type="enterprise", name="parse_architect_ast"))
         is not None
     )
+
+
+# ---------------------------------------------------------------------------
+# _ast_prompts_payload — prompt-AWARE critic projection (Part 1A)
+# ---------------------------------------------------------------------------
+
+
+def _mk_agent(
+    node_id: str,
+    *,
+    system_prompt: str = "",
+    user_prompt_template: str = "",
+    subtype: str = "researcher",
+    tools: list[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "id": node_id,
+        "type": "agent",
+        "label": node_id.replace("_", " ").title(),
+        "config": {
+            "subtype": subtype,
+            "system_prompt": system_prompt,
+            "user_prompt_template": user_prompt_template,
+            "tools": tools or [],
+        },
+    }
+
+
+def test_ast_prompts_payload_includes_full_prompts() -> None:
+    ast = {
+        "root": {
+            "id": "root",
+            "type": "parallel",
+            "config": {},
+            "children": [
+                _mk_agent(
+                    "lane_a",
+                    system_prompt="Investigate fundamentals.",
+                    user_prompt_template="Cover {query} financials.",
+                    tools=["web_search"],
+                ),
+                _mk_agent("synth", system_prompt="Synthesize.", subtype="synthesizer"),
+            ],
+        }
+    }
+    rows = _ast_prompts_payload(ast)
+    assert {r["id"] for r in rows} == {"lane_a", "synth"}
+    lane = next(r for r in rows if r["id"] == "lane_a")
+    assert lane["system_prompt"] == "Investigate fundamentals."
+    assert lane["user_prompt_template"] == "Cover {query} financials."
+    assert lane["tools"] == ["web_search"]
+    assert lane["subtype"] == "researcher"
+
+
+def test_ast_prompts_payload_includes_pae_planner_and_evaluator() -> None:
+    ast = {
+        "root": {
+            "id": "root",
+            "type": "plan_and_execute",
+            "children": [],
+            "config": {
+                "planner": _mk_agent("planner", system_prompt="Plan.", subtype="planner"),
+                "evaluator": _mk_agent("evaluator", system_prompt="Eval.", subtype="reflector"),
+                "body": _mk_agent("body", system_prompt="Execute.", subtype="researcher"),
+            },
+        }
+    }
+    ids = {r["id"] for r in _ast_prompts_payload(ast)}
+    assert {"planner", "evaluator", "body"} <= ids
+
+
+def test_ast_prompts_payload_truncates_and_marks() -> None:
+    from deep_research.agent_designer.framework_tools import _CRITIC_PROMPT_FIELD_CAP
+
+    big = "x" * (_CRITIC_PROMPT_FIELD_CAP + 500)
+    ast = {
+        "root": {
+            "id": "root",
+            "type": "sequence",
+            "config": {},
+            "children": [_mk_agent("a", system_prompt=big)],
+        }
+    }
+    row = _ast_prompts_payload(ast)[0]
+    assert row.get("_truncated") is True
+    assert "…(truncated)" in row["system_prompt"]
+
+
+def test_ast_prompts_payload_total_budget_shrinks_field_cap() -> None:
+    from deep_research.agent_designer.framework_tools import (
+        _CRITIC_PROMPT_FIELD_CAP,
+        _CRITIC_PROMPT_TOTAL_CAP,
+    )
+
+    n = (_CRITIC_PROMPT_TOTAL_CAP // (_CRITIC_PROMPT_FIELD_CAP * 2)) + 4
+    children = [_mk_agent(f"a{i}", system_prompt="y" * 5000) for i in range(n)]
+    ast = {"root": {"id": "root", "type": "parallel", "config": {}, "children": children}}
+    rows = _ast_prompts_payload(ast)
+    # With many agents the per-field budget shrinks below the per-field max.
+    assert all(len(r["system_prompt"]) < _CRITIC_PROMPT_FIELD_CAP for r in rows)
+
+
+def test_ast_prompts_payload_empty_or_invalid_returns_empty() -> None:
+    assert _ast_prompts_payload({}) == []
+    assert _ast_prompts_payload(None) == []
+    assert _ast_prompts_payload("not json") == []
+    assert (
+        _ast_prompts_payload({"root": {"id": "r", "type": "sequence", "config": {}}}) == []
+    )
+
+
+# ---------------------------------------------------------------------------
+# _coerce_critic_verdict_dict — model-tolerant verdict read (Part 1B)
+# ---------------------------------------------------------------------------
+
+
+def test_coerce_critic_verdict_dict_from_model() -> None:
+    verdict = CriticVerdict(
+        approve=False,
+        directives=[
+            {"node_path": "agents.synth", "issue": "missing outputs", "severity": "blocking"}
+        ],
+    )
+    out = _coerce_critic_verdict_dict(verdict)
+    assert out["approve"] is False
+    assert out["directives"][0]["issue"] == "missing outputs"
+
+
+def test_coerce_critic_verdict_dict_from_dict_and_json() -> None:
+    d = {"approve": True, "directives": []}
+    assert _coerce_critic_verdict_dict(d) == d
+    assert _coerce_critic_verdict_dict(json.dumps(d)) == d
+
+
+def test_coerce_critic_verdict_dict_from_repr_string() -> None:
+    out = _coerce_critic_verdict_dict("{'approve': False, 'directives': []}")
+    assert out == {"approve": False, "directives": []}
+
+
+def test_coerce_critic_verdict_dict_garbage_is_empty_valid() -> None:
+    for junk in (None, 12345, "not a verdict", ["x"]):
+        assert _coerce_critic_verdict_dict(junk) == {"approve": False, "directives": []}

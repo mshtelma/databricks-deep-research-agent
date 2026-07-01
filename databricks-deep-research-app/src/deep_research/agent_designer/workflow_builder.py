@@ -22,6 +22,7 @@ from deep_research.agent_designer.designer_architect import (
     format_workflow_design_brief,
 )
 from deep_research.agent_designer.designer_types import ToolPlan, WorkflowDesignBrief
+from deep_research.agent_designer.naming import semantic_lane_label
 
 logger = logging.getLogger(__name__)
 
@@ -1404,10 +1405,7 @@ def _fallback_lane_user_prompt_template(
         "the top-K page bodies in one call). Subsequent calls: more "
         "``web_research`` with refined queries — refine with source names, "
         "official documents, or exact phrases from prior results.\n"
-        "- Only call ``web_crawl`` AFTER ``web_research`` has populated the "
-        "shared URL index; pass a ``url_index`` from a prior result. Never "
-        "call ``web_crawl`` with ``url_index=0`` before any search.\n"
-        "- Crawl or retrieve source text before relying on a result; titles "
+        "- Read the fetched source text before relying on a result; titles "
         f"and metadata alone are not citeable evidence.{time_bullet}"
     )
     strategy_block = _strategy_block_for_evidence_mode(
@@ -1454,10 +1452,7 @@ def _lane_id(index: int) -> str:
 
 
 def _lane_label(lane: str, index: int) -> str:
-    cleaned = lane.rstrip(".")
-    if len(cleaned) > 56:
-        cleaned = cleaned[:53].rstrip() + "..."
-    return f"Lane {index}: {cleaned}"
+    return semantic_lane_label(lane, index)
 
 
 _SPECIALIZED_LANE_PREAMBLE = (
@@ -1519,9 +1514,6 @@ def _with_lane_user_prompt_contract(
         "AND auto-fetches the top-K page bodies in a single call.\n"
         "- Refine subsequent ``web_research`` calls around source gaps; "
         "prefer primary or high-authority sources.\n"
-        "- Only call ``web_crawl`` AFTER ``web_research`` has populated URLs; "
-        "pass a ``url_index`` from a prior result. Never call ``web_crawl`` "
-        "with ``url_index=0`` before any search.\n"
     )
     strategy_block = _strategy_block_for_evidence_mode(
         assets, tool_plan, web_block=web_strategy_block,
@@ -1901,7 +1893,11 @@ def _build_plan_and_execute_workflow(
     # ``web_research`` already provides search + auto-fetch in one call.
     default_researcher_tools = ["web_research"]
     tools = _tool_plan_declarations(compiled_brief)
-    if tools is None:
+    # ``not tools`` (not ``is None``): an architect tool_plan with zero tools
+    # returns [] (not None), which must still fall back to the default web decls —
+    # otherwise the workflow declares no tools while lanes bind the ``web_research``
+    # default, and resolution fail-closes at runtime ("missing declared tools").
+    if not tools:
         tools = _default_web_tool_decls(max_results=10)
     coordinator = make_agent_node(
         node_id="coordinator",
@@ -2327,7 +2323,7 @@ def _grounded_synthesizer_output_schema(
             "quality_gates": list(compiled_brief.quality_gates),
             "constraints": list(compiled_brief.constraints),
             "resolved_tool_contract": (
-                compiled_brief.tool_contract.model_dump(mode="json")
+                compiled_brief.tool_contract.model_dump(mode="json", by_alias=True)
                 if compiled_brief.tool_contract is not None
                 else None
             ),
@@ -2704,7 +2700,11 @@ def _build_evidence_front(
     _require_authored_lane_specs(lane_specs, topology=topology)
     default_researcher_tools = ["web_research"]
     tools = _tool_plan_declarations(compiled_brief)
-    if tools is None:
+    # ``not tools`` (not ``is None``): an architect tool_plan with zero tools
+    # returns [] (not None), which must still fall back to the default web decls —
+    # otherwise the workflow declares no tools while lanes bind the ``web_research``
+    # default, and resolution fail-closes at runtime ("missing declared tools").
+    if not tools:
         tools = _default_web_tool_decls(max_results=10)
     coordinator = make_agent_node(
         node_id=f"{id_prefix}coordinator",
@@ -3746,7 +3746,11 @@ def _build_parallel_lanes_workflow(
     # ``web_research`` already provides search + auto-fetch in one call.
     default_researcher_tools = ["web_research"]
     tools = _tool_plan_declarations(compiled_brief)
-    if tools is None:
+    # ``not tools`` (not ``is None``): an architect tool_plan with zero tools
+    # returns [] (not None), which must still fall back to the default web decls —
+    # otherwise the workflow declares no tools while lanes bind the ``web_research``
+    # default, and resolution fail-closes at runtime ("missing declared tools").
+    if not tools:
         tools = _default_web_tool_decls(max_results=10)
     coordinator = make_agent_node(
         node_id="coordinator",
@@ -4029,7 +4033,11 @@ def _build_single_agent_workflow(
 
     default_researcher_tools = ["web_research"]
     tools = _tool_plan_declarations(compiled_brief)
-    if tools is None:
+    # ``not tools`` (not ``is None``): an architect tool_plan with zero tools
+    # returns [] (not None), which must still fall back to the default web decls —
+    # otherwise the workflow declares no tools while lanes bind the ``web_research``
+    # default, and resolution fail-closes at runtime ("missing declared tools").
+    if not tools:
         tools = _default_web_tool_decls(max_results=5, include_crawl=False)
     agent_node = make_agent_node(
         node_id="answer-agent",

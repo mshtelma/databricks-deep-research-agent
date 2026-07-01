@@ -27,6 +27,7 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any, BinaryIO
 from uuid import UUID, uuid4
 
+from deep_research.models.uploaded_file import FileType
 from deep_research.services._cached_base import _CachedServiceBase
 from deep_research.services._protocols import IFileUploadService
 from deep_research.services.file_upload_service import (
@@ -34,7 +35,6 @@ from deep_research.services.file_upload_service import (
     MAX_FILES_PER_SESSION,
     MAX_TOTAL_SESSION_SIZE_BYTES,
     SESSION_FILE_TTL_HOURS,
-    FileType,
     get_file_type_from_extension,
     get_file_type_from_mime,
 )
