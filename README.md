@@ -176,6 +176,7 @@ This single command executes the complete 9-step deployment pipeline:
 |--------|-------------|-------------|
 | `dev` | `e2-demo-west` | Development workspace |
 | `ais` | `ais` | Production workspace |
+| `fevm` | `fevm` | FEVM serverless-stable workspace |
 
 ### Operations Commands
 

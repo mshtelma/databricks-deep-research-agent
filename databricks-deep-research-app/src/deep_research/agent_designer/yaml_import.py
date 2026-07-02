@@ -14,6 +14,12 @@ point for any externally-supplied YAML.  It enforces:
 5. Canonical AST re-validation via
    :func:`databricks_deep_research.load_workflow_from_dict` — every imported
    AST is passed through the same validator that the /validate endpoint uses.
+6. Designer-metadata carriage — the framework loader deliberately ignores
+   unknown top-level keys, so the validated projection is re-hydrated with the
+   whitelisted, schema-validated designer metadata from the document
+   (:func:`yaml_metadata.carry_designer_metadata`). Invalid or inconsistent
+   metadata never rejects the import; it is dropped/pruned/recomputed with a
+   structured warning on :class:`YamlImportResult` (never-silent).
 
 Any violation raises :class:`YamlImportError` with a machine-readable
 ``error_kind`` and a human-readable ``message``.
@@ -26,10 +32,32 @@ from typing import Any
 
 import yaml
 from databricks_deep_research import load_workflow_from_dict
+from pydantic import BaseModel, Field
 
 from deep_research.agent_designer.registry import REGISTRY_VERSION
+from deep_research.agent_designer.yaml_metadata import (
+    ImportMetadataWarning,
+    carry_designer_metadata,
+)
 
-__all__ = ["YamlImportError", "parse_and_validate_yaml"]
+__all__ = [
+    "ImportMetadataWarning",
+    "YamlImportError",
+    "YamlImportResult",
+    "parse_and_validate_yaml",
+]
+
+
+class YamlImportResult(BaseModel):
+    """Validated definition plus structured metadata warnings (never-silent).
+
+    ``definition`` is the framework loader's healed projection with the
+    whitelisted designer metadata re-attached; ``warnings`` lists every
+    metadata key that was dropped, pruned, or recomputed on the way in.
+    """
+
+    definition: dict[str, Any]
+    warnings: list[ImportMetadataWarning] = Field(default_factory=list)
 
 
 class YamlImportError(Exception):
@@ -56,7 +84,7 @@ class YamlImportError(Exception):
         super().__init__(f"{error_kind}: {message}")
 
 
-def parse_and_validate_yaml(body: bytes) -> dict[str, Any]:
+def parse_and_validate_yaml(body: bytes) -> YamlImportResult:
     """Parse a raw YAML payload and validate the resulting workflow AST.
 
     Enforces the full import acceptance criteria in order:
@@ -72,10 +100,12 @@ def parse_and_validate_yaml(body: bytes) -> dict[str, Any]:
         body: Raw request bytes — the YAML document as UTF-8.
 
     Returns:
-        A plain dict representation of the validated
+        A :class:`YamlImportResult` whose ``definition`` is the validated
         :class:`~databricks_deep_research.workflow.definition.WorkflowDefinition`
-        (produced by ``WorkflowDefinition.model_dump()``), without the
-        ``registry_version`` field.
+        projection (``model_dump()``, without the ``registry_version`` field)
+        re-hydrated with the document's whitelisted designer metadata, and
+        whose ``warnings`` lists every metadata key dropped, pruned, or
+        recomputed during carriage.
 
     Raises:
         YamlImportError: On any validation failure.  Inspect
@@ -127,4 +157,14 @@ def parse_and_validate_yaml(body: bytes) -> dict[str, Any]:
             f"AST validation failed: {exc}",
         ) from exc
 
-    return workflow.model_dump()
+    # The loader's projection drops app-level metadata (unknown top-level keys
+    # are ignored by design). Re-attach the whitelisted designer metadata from
+    # the parsed document — validated per key, never blind passthrough — and
+    # surface anything dropped/pruned/recomputed as structured warnings.
+    # mode="json": a plain model_dump() leaves StrEnum members (NodeType) in the
+    # dict, which yaml.safe_dump cannot represent — re-EXPORTING an imported
+    # definition would crash. JSON mode matches the wire shape the response
+    # serializer produces anyway, making import a true fixed point.
+    definition: dict[str, Any] = workflow.model_dump(mode="json")
+    warnings = carry_designer_metadata(parsed, definition)
+    return YamlImportResult(definition=definition, warnings=warnings)

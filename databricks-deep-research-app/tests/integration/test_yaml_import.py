@@ -364,3 +364,71 @@ def test_error_response_shape() -> None:
     assert "kind" in error
     assert "message" in error
     assert "path" in error  # may be None but key must be present
+
+
+# ---------------------------------------------------------------------------
+# 13. Designer metadata survives the HTTP import (the silent-drop regression)
+# ---------------------------------------------------------------------------
+
+def _stamped_blueprint_definition() -> dict[str, Any]:
+    """A real build_blueprint AST — carries every designer metadata key."""
+    from deep_research.agent_designer.blueprint import build_blueprint
+
+    signature = {
+        "asset_signature": "web_only",
+        "retrieval_pattern": "independent_lanes",
+        "question_class": "open_research",
+        "primary_evidence_kind": "web_articles",
+        "expected_output_shape": "structured_report",
+        "independent_workstreams_count": 2,
+        "step_dependencies_present": False,
+        "iteration_required": False,
+        "output_aggregation_kind": "cross_concern_synthesis",
+        "lane_descriptions": ["first concern", "second concern"],
+    }
+    return build_blueprint(signature, "yaml import integration fixture", [])
+
+
+def test_designer_metadata_survives_import() -> None:
+    """POST /import-yaml returns the definition WITH designer metadata, no warnings."""
+    from deep_research.agent_designer.yaml_metadata import DESIGNER_METADATA_KEYS
+
+    source = _stamped_blueprint_definition()
+    with _noauth_client() as client:
+        resp = client.post(_URL, content=_make_valid_yaml(source))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body.get("warnings") == []
+    for spec in DESIGNER_METADATA_KEYS:
+        assert spec.key in body["definition"], spec.key
+    assert body["definition"]["designer_signature"] == source["designer_signature"]
+
+
+# ---------------------------------------------------------------------------
+# 14. Corrupted metadata imports (fail-open) with a structured warning + metric
+# ---------------------------------------------------------------------------
+
+def test_corrupted_signature_imports_with_warning() -> None:
+    """A corrupted designer_signature never blocks the import; it is dropped
+    with one structured warning on the response and one metric increment."""
+    source = _stamped_blueprint_definition()
+    source["designer_signature"] = "corrupted-not-a-dict"
+    sink = RecordingSink()
+    with use_sink(sink), _noauth_client() as client:
+        resp = client.post(_URL, content=_make_valid_yaml(source))
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert "designer_signature" not in body["definition"]
+    warnings = body.get("warnings") or []
+    mine = [w for w in warnings if w["key"] == "designer_signature"]
+    assert len(mine) == 1
+    assert mine[0]["code"] == "invalid_shape"
+    assert mine[0]["action"] == "dropped"
+    assert (
+        sink.count(
+            "agent_designer.yaml_import_metadata_warning",
+            key="designer_signature",
+            code="invalid_shape",
+        )
+        == 1.0
+    )

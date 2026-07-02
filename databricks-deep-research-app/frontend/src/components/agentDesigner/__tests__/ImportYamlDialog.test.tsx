@@ -113,6 +113,81 @@ describe('ImportYamlDialog', () => {
     expect(screen.queryByRole('button', { name: 'Create agent' })).toBeNull()
   })
 
+  it('renders designer-metadata warnings in the preview and still creates', async () => {
+    importYaml.mockResolvedValue({
+      ...OK_IMPORT,
+      definition: { ...OK_IMPORT.definition, lane_keys: { alpha_1234: 'alpha' } },
+      warnings: [
+        {
+          key: 'designer_signature',
+          code: 'invalid_shape',
+          action: 'dropped',
+          message: 'designer_signature is not a valid TaskSignature; topology edits will fall back to an explicit rebuild.',
+        },
+      ],
+    })
+    validateWorkflow.mockResolvedValue(OK_VALIDATE)
+    render(<ImportYamlDialog open onClose={vi.fn()} />)
+
+    typeYaml()
+    fireEvent.click(screen.getByRole('button', { name: 'Validate' }))
+
+    await waitFor(() =>
+      expect(screen.getByText(/some designer metadata was adjusted/i)).toBeInTheDocument(),
+    )
+    expect(screen.getByText('designer_signature')).toBeInTheDocument()
+    // Warnings don't block: Create is available and the carried metadata is
+    // still spread into the create payload.
+    fireEvent.click(screen.getByRole('button', { name: 'Create agent' }))
+    expect(mutate).toHaveBeenCalledTimes(1)
+    const payload = mutate.mock.calls[0][0] as { definition: Record<string, unknown> }
+    expect(payload.definition.lane_keys).toEqual({ alpha_1234: 'alpha' })
+  })
+
+  it('coverage-only validation failures proceed to preview as "Import as draft" with force', async () => {
+    importYaml.mockResolvedValue(OK_IMPORT)
+    validateWorkflow.mockResolvedValue({
+      valid: false,
+      errors: [
+        { path: null, kind: 'coverage', message: 'report never mentions "alpha"', line: null },
+      ],
+      workflow_summary: OK_IMPORT.workflow_summary,
+    })
+    render(<ImportYamlDialog open onClose={vi.fn()} />)
+
+    typeYaml()
+    fireEvent.click(screen.getByRole('button', { name: 'Validate' }))
+
+    // Preview reached despite the invalid verdict; coverage panel shown.
+    await waitFor(() => expect(screen.getByDisplayValue('Imported Agent')).toBeInTheDocument())
+    expect(screen.getByText(/never mentions "alpha"/)).toBeInTheDocument()
+
+    // The primary action is a forced draft import (bypasses the coverage gate).
+    fireEvent.click(screen.getByRole('button', { name: 'Import as draft' }))
+    expect(mutate).toHaveBeenCalledTimes(1)
+    expect((mutate.mock.calls[0][0] as { force: boolean }).force).toBe(true)
+  })
+
+  it('mixed coverage + validation errors still block at the source step', async () => {
+    importYaml.mockResolvedValue(OK_IMPORT)
+    validateWorkflow.mockResolvedValue({
+      valid: false,
+      errors: [
+        { path: null, kind: 'coverage', message: 'report never mentions "alpha"', line: null },
+        { path: 'root', kind: 'validation', message: 'undeclared tool "web"', line: null },
+      ],
+      workflow_summary: null,
+    })
+    render(<ImportYamlDialog open onClose={vi.fn()} />)
+
+    typeYaml()
+    fireEvent.click(screen.getByRole('button', { name: 'Validate' }))
+
+    await waitFor(() => expect(screen.getByText(/undeclared tool/)).toBeInTheDocument())
+    expect(screen.queryByRole('button', { name: 'Import as draft' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Create agent' })).toBeNull()
+  })
+
   it('offers "Import anyway" on a critic verdict=fail and retries with force', async () => {
     importYaml.mockResolvedValue(OK_IMPORT)
     validateWorkflow.mockResolvedValue(OK_VALIDATE)

@@ -48,6 +48,10 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
   const [genericError, setGenericError] = React.useState<string | null>(null)
   const [result, setResult] = React.useState<ImportYamlResponse | null>(null)
   const [critique, setCritique] = React.useState<CritiqueResult | null>(null)
+  // Coverage-only /validate failures don't block the import — the document can
+  // still be created as a draft with force=true (mirrors the editor's
+  // force-overridable coverage rule). Any other error keeps hard-blocking.
+  const [coverageWarnings, setCoverageWarnings] = React.useState<YamlFieldError[] | null>(null)
 
   // Confirm-form fields
   const [name, setName] = React.useState('')
@@ -66,6 +70,7 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
       setGenericError(null)
       setResult(null)
       setCritique(null)
+      setCoverageWarnings(null)
       setName('')
       setDescription('')
       setVisibility('private')
@@ -91,6 +96,7 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
   const handleValidate = async (): Promise<void> => {
     setErrors(null)
     setGenericError(null)
+    setCoverageWarnings(null)
     if (byteLength(yamlText) > MAX_YAML_BYTES) {
       setGenericError(`Document too large (max ${Math.floor(MAX_YAML_BYTES / 1024)} KiB).`)
       return
@@ -102,14 +108,21 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
       // errors here rather than dead-ending at the create call.
       const semantic = await validateWorkflow(imported.definition)
       if (!semantic.valid) {
-        setErrors(
-          semantic.errors.map((e) => ({
-            path: e.path,
-            kind: e.kind,
-            message: e.message,
-          })),
-        )
-        return
+        const items = semantic.errors.map((e) => ({
+          path: e.path,
+          kind: e.kind,
+          message: e.message,
+        }))
+        // Coverage-only failures are force-passable (the create endpoint's
+        // coverage gate honors force=true) — now that imported documents keep
+        // their designer metadata, a work-in-progress export must stay
+        // importable as a draft rather than dead-ending here.
+        if (items.every((e) => e.kind === 'coverage')) {
+          setCoverageWarnings(items)
+        } else {
+          setErrors(items)
+          return
+        }
       }
       setName(asString(imported.definition.name).slice(0, 255))
       setDescription(asString(imported.definition.description))
@@ -284,6 +297,46 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
                 </div>
               )}
 
+              {result && (result.warnings?.length ?? 0) > 0 && (
+                <div
+                  role="alert"
+                  className="mb-4 rounded-db-md border border-db-yellow-700 bg-db-yellow-300 px-3 py-2 text-[12px] text-db-yellow-800"
+                >
+                  <div className="font-medium">
+                    Imported with warnings — some designer metadata was adjusted:
+                  </div>
+                  <ul className="mt-1 space-y-1">
+                    {(result.warnings ?? []).map((w, i) => (
+                      <li key={i} className="leading-relaxed">
+                        <span className="font-db-mono font-semibold">{w.key}</span>
+                        <span className="font-db-mono"> · {w.action}</span>
+                        {' — '}
+                        {w.message}
+                        {w.detail && w.detail.length > 0 ? ` (${w.detail.join(', ')})` : null}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {coverageWarnings && coverageWarnings.length > 0 && (
+                <div
+                  role="alert"
+                  className="mb-4 rounded-db-md border border-db-yellow-700 bg-db-yellow-300 px-3 py-2 text-[12px] text-db-yellow-800"
+                >
+                  <div className="font-medium">
+                    This document doesn&rsquo;t cover every requested topic yet.
+                  </div>
+                  <ul className="mt-1 space-y-1">
+                    {coverageWarnings.map((e, i) => (
+                      <li key={i} className="leading-relaxed">
+                        {e.message}
+                      </li>
+                    ))}
+                  </ul>
+                  <p className="mt-1">You can import it as a draft and finish it in the editor.</p>
+                </div>
+              )}
+
               <label className="mb-1 block text-[12px] font-medium text-db-navy-800">Name</label>
               <input
                 value={name}
@@ -376,6 +429,15 @@ export function ImportYamlDialog({ open, onClose }: ImportYamlDialogProps) {
                   className="rounded-db-md bg-db-lava-600 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-db-lava-700 disabled:cursor-not-allowed disabled:opacity-55"
                 >
                   {creating ? 'Importing…' : 'Import anyway'}
+                </button>
+              ) : coverageWarnings && coverageWarnings.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => handleCreate(true)}
+                  disabled={creating || !name.trim()}
+                  className="rounded-db-md bg-db-navy-800 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-db-navy-900 disabled:cursor-not-allowed disabled:opacity-55"
+                >
+                  {creating ? 'Importing…' : 'Import as draft'}
                 </button>
               ) : (
                 <button

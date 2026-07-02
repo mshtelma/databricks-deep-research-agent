@@ -370,6 +370,7 @@ Solution: GRANT ALL to app service principal after migrations
 |--------|---------|-----------|
 | dev | e2-demo-west | E2 Demo West |
 | ais | ais | AIS Production |
+| fevm | fevm | FEVM Serverless Stable |
 
 ## YAML Configuration
 

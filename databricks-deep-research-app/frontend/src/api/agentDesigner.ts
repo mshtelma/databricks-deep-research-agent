@@ -157,9 +157,23 @@ export async function validateWorkflow(
 // YAML import / export
 // ---------------------------------------------------------------------------
 
+/**
+ * One structured warning about a designer-metadata key emitted by the import
+ * carriage (invalid metadata is dropped/pruned/recomputed, never silently).
+ */
+export interface ImportMetadataWarning {
+  key: string
+  code: 'invalid_shape' | 'consistency_mismatch' | 'recomputed_divergent' | 'stale_entries_pruned'
+  action: 'dropped' | 'recomputed' | 'pruned'
+  message: string
+  detail?: string[]
+}
+
 export interface ImportYamlResponse {
   definition: AST
   workflow_summary: WorkflowSummary
+  /** Optional so responses from older servers still parse. */
+  warnings?: ImportMetadataWarning[]
 }
 
 /**
