@@ -252,6 +252,12 @@ export const chatsApi = {
   getFull: (chatId: string) =>
     request<import('../types').ChatFullResponse>(`/chats/${chatId}/full`),
 
+  putSurfaceState: (chatId: string, surfaceState: Record<string, unknown>) =>
+    request<void>(`/chats/${chatId}/surface-state`, {
+      method: 'PUT',
+      body: JSON.stringify({ surface_state: surfaceState }),
+    }),
+
   export: async (chatId: string, format: 'markdown' | 'json'): Promise<{ content: string; filename: string }> => {
     const url = `${API_BASE_URL}/chats/${chatId}/export?format=${format}`
     const controller = new AbortController()
@@ -319,6 +325,16 @@ export const messagesApi = {
     request<{ new_message_id: string; research_session_id: string }>(
       `/chats/${chatId}/messages/${messageId}/regenerate`,
       { method: 'POST' }
+    ),
+
+  /** Re-run structured-output slots for a completed agent message. */
+  restructure: (chatId: string, messageId: string, slots?: string[]) =>
+    request<{ status: string; slots: string[] }>(
+      `/chats/${chatId}/messages/${messageId}/restructure`,
+      {
+        method: 'POST',
+        body: JSON.stringify(slots ? { slots } : {}),
+      }
     ),
 
   submitFeedback: (
@@ -476,6 +492,8 @@ export const jobsApi = {
     enabledSkills?: string[]
     enableCrossSessionMemory?: boolean
     allowLiveSearch?: boolean
+    surfaceInputs?: Record<string, string | number | boolean>
+    surfaceAction?: string
   }) =>
     request<Job>('/research/jobs', {
       method: 'POST',
@@ -499,6 +517,8 @@ export const jobsApi = {
         enabled_skills: data.enabledSkills || null,
         enable_cross_session_memory: data.enableCrossSessionMemory ?? null,
         allow_live_search: data.allowLiveSearch ?? null,
+        surface_inputs: data.surfaceInputs ?? undefined,
+        surface_action: data.surfaceAction ?? undefined,
       }),
     }),
 

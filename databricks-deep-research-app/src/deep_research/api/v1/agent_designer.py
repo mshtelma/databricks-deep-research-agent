@@ -2,6 +2,7 @@
 
 POST   /api/v1/agent-designer/validate
 GET    /api/v1/agent-designer/registry
+POST   /api/v1/agent-designer/scaffold-surface
 POST   /api/v1/agent-designer/chat
 POST   /api/v1/agent-designer/custom-tools
 GET    /api/v1/agent-designer/custom-tools
@@ -61,7 +62,11 @@ from deep_research.agent_designer.turn_registry import (
     designer_turn_registry,
 )
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
-from deep_research.agent_designer.yaml_import import YamlImportError, parse_and_validate_yaml
+from deep_research.agent_designer.yaml_import import (
+    ImportMetadataWarning,
+    YamlImportError,
+    parse_and_validate_yaml,
+)
 from deep_research.core.app_config import get_app_config
 from deep_research.core.config import get_settings
 from deep_research.db.session import get_db
@@ -71,6 +76,7 @@ from deep_research.observability.agent_designer_metrics import (
     record_registry_fetch,
     record_validation_error,
     record_yaml_export_ms,
+    record_yaml_import_metadata_warning,
     record_yaml_import_outcome,
 )
 from deep_research.services.agent_v2_service import AgentV2Service
@@ -735,6 +741,9 @@ async def probe_tools(
 class ImportYamlResponse(BaseModel):
     definition: dict[str, Any]
     workflow_summary: WorkflowSummary
+    # Structured designer-metadata warnings from the import carriage (empty on a
+    # clean round trip). Additive: older clients simply ignore the field.
+    warnings: list[ImportMetadataWarning] = Field(default_factory=list)
 
 
 @router.post("/import-yaml", response_model=ImportYamlResponse)
@@ -763,7 +772,7 @@ async def import_yaml(request: Request, _user: CurrentUser) -> ImportYamlRespons
             detail={"error_kind": "too_large", "max_bytes": max_bytes},
         )
     try:
-        definition = parse_and_validate_yaml(body)
+        result = parse_and_validate_yaml(body)
     except YamlImportError as exc:
         record_yaml_import_outcome(exc.error_kind)  # type: ignore[arg-type]
         raise HTTPException(
@@ -779,12 +788,55 @@ async def import_yaml(request: Request, _user: CurrentUser) -> ImportYamlRespons
             },
         ) from exc
     record_yaml_import_outcome("success")
+    definition = result.definition
+    for metadata_warning in result.warnings:
+        record_yaml_import_metadata_warning(
+            metadata_warning.key, metadata_warning.code
+        )
     summary = WorkflowSummary(
         node_count=_node_count(definition.get("root", {})),
         tool_count=len(definition.get("tools", []) or []),
         source_count=0,
     )
-    return ImportYamlResponse(definition=definition, workflow_summary=summary)
+    return ImportYamlResponse(
+        definition=definition,
+        workflow_summary=summary,
+        warnings=result.warnings,
+    )
+
+
+# ---------- /scaffold-surface ----------
+
+
+class ScaffoldSurfaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition: dict[str, Any]
+
+
+class ScaffoldSurfaceResponse(BaseModel):
+    surface: dict[str, Any]
+
+
+@router.post("/scaffold-surface", response_model=ScaffoldSurfaceResponse)
+async def scaffold_surface(
+    req: ScaffoldSurfaceRequest,
+    _user: CurrentUser,
+) -> ScaffoldSurfaceResponse:
+    """Derive the default declarative UI surface for a workflow definition.
+
+    Stateless: no database, no LLM. Returns a surface dict directly derived
+    from ``definition["required_inputs"]`` (plus the agent name). A
+    ``ValueError`` from the scaffold (e.g. reserved or non-identifier input
+    keys) is returned as HTTP 422.
+    """
+    from deep_research.surface.scaffold import scaffold_surface_from_workflow
+
+    try:
+        surface = scaffold_surface_from_workflow(req.definition)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ScaffoldSurfaceResponse(surface=surface)
 
 
 # ---------- /export-yaml ----------

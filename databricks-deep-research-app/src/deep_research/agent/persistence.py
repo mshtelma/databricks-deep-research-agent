@@ -247,7 +247,11 @@ def _build_verification_data(
     Returns:
         JSONB-compatible dict or None if no claims.
     """
-    if not state.claims and not state.verification_summary:
+    # Agent-surface structured-output envelope (framework path sets it on the
+    # state proxy; legacy ResearchState has no such attribute → None).
+    structured_output = getattr(state, "structured_output", None)
+
+    if not state.claims and not state.verification_summary and not structured_output:
         return None
 
     claims_data = []
@@ -269,7 +273,10 @@ def _build_verification_data(
         else _compute_summary_from_claims(state.claims)
     )
 
-    return {"claims": claims_data, "summary": summary_data}
+    data: dict[str, Any] = {"claims": claims_data, "summary": summary_data}
+    if structured_output is not None:
+        data["structured_output"] = structured_output
+    return data
 
 
 def _compute_summary_from_claims(claims: list[ClaimInfo]) -> dict[str, Any]:
@@ -1698,3 +1705,127 @@ async def persist_complete_research_independent(
         except Exception:
             await db.rollback()
             raise
+
+
+def _should_replace_structured_output(
+    existing: Any, envelope: dict[str, Any]
+) -> bool:
+    """Stale-write guard for the targeted structured-output update.
+
+    A concurrent retry/run that already wrote a NEWER envelope for the same
+    binding wins; anything else (no envelope, different binding, older or
+    unparsable timestamps) is replaced.
+    """
+    if not isinstance(existing, dict):
+        return True
+    if existing.get("binding") != envelope.get("binding"):
+        return True
+    old = existing.get("generated_at")
+    new = envelope.get("generated_at")
+    return not (isinstance(old, str) and isinstance(new, str) and old > new)
+
+
+async def update_structured_output_independent(
+    *,
+    chat_id: UUID | None,
+    research_session_id: UUID,
+    envelope: dict[str, Any],
+    storage_stack: Any | None = None,
+) -> bool:
+    """Targeted merge of ``verification_data["structured_output"]``.
+
+    Used by the post-persistence structuring wires and the restructure
+    endpoint: writes ONLY the structured_output key (claims/summary are
+    preserved), on both storage modes, via an independent session so it
+    survives request cancellation. Fail-soft: returns False (and logs)
+    instead of raising.
+    """
+    from deep_research.core.config import get_settings
+
+    settings = get_settings()
+    if (
+        settings.storage_service_impl == "cached"
+        and storage_stack is not None
+        and chat_id is not None
+    ):
+        written = False
+
+        def _apply(doc: Any) -> None:
+            nonlocal written
+            now = datetime.now(UTC)
+            for rs in doc.state.research_sessions:
+                if rs.id == research_session_id:
+                    existing_vd = dict(rs.verification_data or {})
+                    if not _should_replace_structured_output(
+                        existing_vd.get("structured_output"), envelope
+                    ):
+                        return
+                    existing_vd["structured_output"] = envelope
+                    rs.verification_data = existing_vd
+                    doc.meta.updated_at = now
+                    written = True
+                    return
+
+        try:
+            await storage_stack.cache.get(chat_id)
+            await storage_stack.cache.mutate(chat_id, _apply, dirty="both")
+            if written:
+                await storage_stack.queue.flush_chat_now(chat_id)
+        except Exception:  # noqa: BLE001 — fail-soft by contract
+            logger.exception(
+                "STRUCTURED_UPDATE_FAILED_CACHED session=%s",
+                str(research_session_id)[:8],
+            )
+            return False
+        if written:
+            logger.info(
+                "STRUCTURED_UPDATE_PERSISTED mode=cached session=%s "
+                "slots=%d",
+                str(research_session_id)[:8],
+                len((envelope.get("meta") or {}).get("slots") or {}),
+            )
+        return written
+
+    from deep_research.db.session import get_session_maker
+
+    session_maker = get_session_maker()
+    try:
+        async with session_maker() as db:
+            row = await db.execute(
+                select(
+                    ResearchSession.id, ResearchSession.verification_data
+                )
+                .where(ResearchSession.id == research_session_id)
+                .with_for_update()
+            )
+            found = row.first()
+            if found is None:
+                logger.warning(
+                    "STRUCTURED_UPDATE_NO_SESSION session=%s",
+                    str(research_session_id)[:8],
+                )
+                return False
+            existing_vd = dict(found[1] or {})
+            if not _should_replace_structured_output(
+                existing_vd.get("structured_output"), envelope
+            ):
+                return False
+            existing_vd["structured_output"] = envelope
+            await db.execute(
+                update(ResearchSession)
+                .where(ResearchSession.id == research_session_id)
+                .values(verification_data=existing_vd)
+            )
+            await db.commit()
+    except Exception:  # noqa: BLE001 — fail-soft by contract
+        logger.exception(
+            "STRUCTURED_UPDATE_FAILED session=%s",
+            str(research_session_id)[:8],
+        )
+        return False
+    logger.info(
+        "STRUCTURED_UPDATE_PERSISTED mode=legacy session=%s slots=%d",
+        str(research_session_id)[:8],
+        len((envelope.get("meta") or {}).get("slots") or {}),
+    )
+    return True

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.agent_designer.ast_normalizer import (
     apply_web_search_provider_defaults,
+    normalize_surface_in_definition,
 )
 from deep_research.agent_designer.catalog_service import CatalogService
 from deep_research.agent_designer.workflow_validation import WorkflowValidationResult
@@ -201,6 +202,10 @@ class AgentV2Service:
         # persists a self-describing tool, not a provider:databricks tool missing
         # `model` that fails at tool construction.
         apply_web_search_provider_defaults(definition)
+        # Pillar 4: fill Surface invariants (component children/props, section
+        # children) so a surface authored without them can never persist and crash
+        # the frontend renderer's `.length` reads (the `[App]` blank-screen bug).
+        normalize_surface_in_definition(definition)
         etag = _compute_etag(definition, now)
         agent = AgentV2(
             id=uuid4(),
@@ -269,6 +274,7 @@ class AgentV2Service:
             # designer normalizer) persists a self-describing tool; reassign after the
             # in-place fill so the JSON column is marked dirty for the flush.
             apply_web_search_provider_defaults(definition)
+            normalize_surface_in_definition(definition)
             agent.definition = definition
 
         agent.updated_at = datetime.now(UTC)
@@ -467,6 +473,7 @@ class AgentV2Service:
                 node_count=_node_count(agent.definition.get("root", {})),
                 in_app_active=bool(in_app_active),
                 default_verify_sources=_default_verify_sources(agent.definition),
+                has_surface=isinstance(agent.definition.get("surface"), dict),
             )
             for agent, in_app_active in rows
         ]

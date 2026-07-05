@@ -256,6 +256,8 @@ class JobManager:
         enabled_skills: list[str] | None = None,
         enable_cross_session_memory: bool | None = None,
         allow_live_search: bool | None = None,
+        surface_inputs: dict[str, Any] | None = None,
+        surface_action: str | None = None,
     ) -> ResearchSession:
         """Submit a new research job.
 
@@ -473,6 +475,8 @@ class JobManager:
                 enabled_skills=enabled_skills,
                 enable_cross_session_memory=enable_cross_session_memory,
                 allow_live_search=allow_live_search,
+                surface_inputs=surface_inputs,
+                surface_action=surface_action,
             )
         )
         self._active_tasks[session_id] = task
@@ -631,6 +635,8 @@ class JobManager:
         enabled_skills: list[str] | None = None,
         enable_cross_session_memory: bool | None = None,
         allow_live_search: bool | None = None,
+        surface_inputs: dict[str, Any] | None = None,
+        surface_action: str | None = None,
     ) -> None:
         """Execute research job in background.
 
@@ -804,6 +810,8 @@ class JobManager:
                 enabled_skills=enabled_skills,
                 enable_cross_session_memory=enable_cross_session_memory,
                 allow_live_search=allow_live_search,
+                surface_inputs=surface_inputs,
+                surface_action=surface_action,
                 user_token=user_token,  # OBO auth for enterprise tools
                 file_ids=file_ids,
                 agent_id=agent_id,

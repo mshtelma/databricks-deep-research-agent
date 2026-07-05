@@ -81,6 +81,7 @@ Developer laptop
 | `ais` | `ais` | `ais` | `deep-research-ais` | Yes | AIS production |
 | `e2e` | `ais` | `e2e` | `deep-research-e2e` | No | E2E test isolation |
 | `local-dev` | `ais` | `local` | `deep-research-local` | No | Local dev Lakebase |
+| `fevm` | `fevm` | `fevm` | `deep-research-fevm` | No | FEVM serverless-stable workspace |
 
 ### How Variables Resolve
 

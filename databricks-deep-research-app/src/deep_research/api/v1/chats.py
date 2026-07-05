@@ -8,6 +8,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Cookie, Depends, Query, Request, Response
 from fastapi.responses import PlainTextResponse
+from pydantic import BaseModel, Field, field_validator
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +46,31 @@ logger = logging.getLogger(__name__)
 
 # Cookie name for incognito session
 INCOGNITO_SESSION_COOKIE = "incognito_session"
+
+# Maximum serialized size (bytes) for a surface_state_patch body.
+_SURFACE_STATE_MAX_BYTES = 128 * 1024  # 128 KB
+
+
+class SurfaceStatePatchRequest(BaseModel):
+    """Request body for PUT /chats/{chat_id}/surface-state."""
+
+    model_config = {"extra": "forbid"}
+
+    surface_state: dict[str, Any] = Field(
+        ...,
+        description="Per-agent surface state patch. Keys are agent-id strings; "
+        "values are dicts with optional data_model, action_runs, surface_etag fields.",
+    )
+
+    @field_validator("surface_state")
+    @classmethod
+    def validate_surface_state(cls, v: dict[str, Any]) -> dict[str, Any]:
+        for key, val in v.items():
+            if not isinstance(key, str):
+                raise ValueError("surface_state keys must be strings (agent IDs)")
+            if not isinstance(val, dict):
+                raise ValueError(f"surface_state[{key!r}] must be a dict")
+        return v
 
 
 class _ChatLike(Protocol):
@@ -336,6 +362,7 @@ async def get_chat_full(
         session_schema = None
         claims = []
         verification_summary = None
+        structured_output = None
 
         rs_obj = getattr(msg, "research_session", None)
         if rs_obj:
@@ -365,6 +392,11 @@ async def get_chat_full(
                 raw_summary = verification_data.get("summary")
                 if raw_summary:
                     verification_summary = jsonb_summary_to_response(raw_summary)
+                # Agent-surface structured-output envelope — both storage
+                # impls store it inside verification_data (no migration).
+                raw_structured = verification_data.get("structured_output")
+                if isinstance(raw_structured, dict):
+                    structured_output = raw_structured
 
         # chat_id may be None on cached path — derive from the chat itself
         msg_chat_id = getattr(msg, "chat_id", None) or chat_id
@@ -379,7 +411,18 @@ async def get_chat_full(
             research_session=session_schema,
             claims=claims,
             verification_summary=verification_summary,
+            structured_output=structured_output,
         ))
+
+    # Extract surface_state from whichever storage impl returned the chat.
+    # Cached path: ChatFullViewCached.surface_state (populated from ChatState.chat.metadata).
+    # Legacy path: Chat ORM object has metadata_ JSONB; surface_state lives under that key.
+    raw_surface_state = getattr(chat, "surface_state", None)
+    if raw_surface_state is None:
+        raw_meta = getattr(chat, "metadata_", None) or {}
+        candidate = raw_meta.get("surface_state") if isinstance(raw_meta, dict) else None
+        if isinstance(candidate, dict):
+            raw_surface_state = candidate
 
     # Support both legacy Chat.id and ChatFullViewCached.id
     return ChatFullResponse(
@@ -391,6 +434,7 @@ async def get_chat_full(
         updated_at=chat.updated_at,
         messages=messages,
         message_count=len(messages),
+        surface_state=raw_surface_state,
     )
 
 
@@ -470,6 +514,46 @@ async def restore_chat(
         raise NotFoundError("Chat", str(chat_id))
     await chat_service.commit()
     return _chat_to_response(chat)
+
+
+@router.put("/{chat_id}/surface-state")
+async def update_surface_state(
+    chat_id: UUID,
+    body: SurfaceStatePatchRequest,
+    request: Request,
+    user: CurrentUser,
+    chat_service: IChatService = Depends(get_chat_service),
+) -> dict[str, Any]:
+    """Persist per-agent UI surface state for a chat.
+
+    The ``surface_state`` dict is shallow-merged per-agent into the chat's
+    persisted metadata. ``action_runs`` within each agent entry use
+    newest-updated_at-wins semantics with idempotent-replay (same session_id
+    + same status → no-op). Body is capped at 128 KB serialized.
+
+    Incognito chats are regular chats server-side; surface state is persisted
+    for them as well.
+
+    Returns ``{"ok": true}`` on success.
+    """
+    # Size guard: reject oversized payloads before touching storage.
+    raw_body = await request.body()
+    if len(raw_body) > _SURFACE_STATE_MAX_BYTES:
+        from deep_research.core.exceptions import ValidationError as AppValidationError
+        raise AppValidationError(
+            f"surface_state payload too large ({len(raw_body)} bytes); "
+            f"limit is {_SURFACE_STATE_MAX_BYTES} bytes"
+        )
+
+    result = await chat_service.update_chat(
+        chat_id=chat_id,
+        user_id=user.user_id,
+        surface_state_patch=body.surface_state,
+    )
+    if result is None:
+        raise NotFoundError("Chat", str(chat_id))
+    await chat_service.commit()
+    return {"ok": True}
 
 
 @router.get("/{chat_id}/export")

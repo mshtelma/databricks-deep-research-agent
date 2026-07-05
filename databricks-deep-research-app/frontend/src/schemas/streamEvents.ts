@@ -234,6 +234,32 @@ export const PlanReviewEventSchema = BaseEventSchema.extend({
   review_id: z.string().optional(),
 });
 
+// Custom phase events (e.g. the structured-output structuring pass)
+export const PhaseStartedEventSchema = BaseEventSchema.extend({
+  eventType: z.literal('phase_started'),
+  phase_name: z.string().optional(),
+  phaseName: z.string().optional(), // camelCase variant
+  description: z.string().optional(),
+});
+
+export const PhaseCompletedEventSchema = BaseEventSchema.extend({
+  eventType: z.literal('phase_completed'),
+  phase_name: z.string().optional(),
+  phaseName: z.string().optional(), // camelCase variant
+  duration_ms: z.number().optional(),
+  durationMs: z.number().optional(), // camelCase variant
+  sources_count: z.number().optional(),
+  sourcesCount: z.number().optional(), // camelCase variant
+});
+
+export const PhaseErrorEventSchema = BaseEventSchema.extend({
+  eventType: z.literal('phase_error'),
+  phase_name: z.string().optional(),
+  phaseName: z.string().optional(), // camelCase variant
+  error: z.string().optional(),
+  recoverable: z.boolean().optional(),
+});
+
 // Discriminated union of all known event types
 export const StreamEventSchema = z.discriminatedUnion('eventType', [
   AgentStartedEventSchema,
@@ -256,6 +282,9 @@ export const StreamEventSchema = z.discriminatedUnion('eventType', [
   StreamErrorEventSchema,
   ClarificationNeededEventSchema,
   PlanReviewEventSchema,
+  PhaseStartedEventSchema,
+  PhaseCompletedEventSchema,
+  PhaseErrorEventSchema,
 ]);
 
 // Type inferred from schema

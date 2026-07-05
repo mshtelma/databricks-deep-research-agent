@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from typing import Annotated, Any
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 import sqlalchemy.exc
 from fastapi import Depends, HTTPException, status
 from sqlalchemy import text

@@ -31,13 +31,20 @@ from databricks_deep_research import (
     build_databricks_workflow_runner,
     workflow_requires_databricks,
 )
+from databricks_deep_research.surface import (
+    build_pending_envelope,
+    build_structured_envelope,
+    collect_output_slots,
+    inject_structured_output_contract,
+    resolve_binding_for_run,
+)
 from databricks_deep_research.events.types import ToolResultEvent
 from databricks_deep_research.tools.builtins.text_table import (
     wire_statement_execution_text_table_context,
 )
 from databricks_deep_research.tracing import setup_mlflow_tracing
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sse_starlette.sse import EventSourceResponse
@@ -235,6 +242,36 @@ app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 _AGENT_YAML = Path(__file__).resolve().parent / "agent.yaml"
 _DEFINITION_DICT: dict[str, Any] = yaml.safe_load(_AGENT_YAML.read_text("utf-8"))
 _DEFINITION = load_workflow_from_dict(_DEFINITION_DICT)
+
+# ── Surface (structured-output dashboard) ────────────────────────────────
+# The agent's declarative surface (input form + Table/MetricGrid/KeyFindings/
+# Chart output slots) travels in the raw definition. When it declares output
+# slots we (1) inject the schema contract into research/synthesis prompts so
+# evidence targets every slot (Part A), and (2) after each run generate the
+# structured-output envelope the React dashboard renders — the SAME envelope
+# shape the main app persists (``verification_data["structured_output"]``).
+_SURFACE: dict[str, Any] | None = (
+    _DEFINITION_DICT.get("surface")
+    if isinstance(_DEFINITION_DICT.get("surface"), dict)
+    else None
+)
+_RESOLVED_BINDING = (
+    resolve_binding_for_run(collect_output_slots(_SURFACE), None)
+    if _SURFACE is not None
+    else None
+)
+if _RESOLVED_BINDING is not None and _RESOLVED_BINDING.slots:
+    _c_synth, _c_research = inject_structured_output_contract(
+        _DEFINITION, _RESOLVED_BINDING.slots
+    )
+    logger.info(
+        "SHELL_APP_SURFACE_CONTRACT_INJECTED binding=%s slots=%d "
+        "synthesizers=%d researchers=%d",
+        _RESOLVED_BINDING.action,
+        len(_RESOLVED_BINDING.slots),
+        _c_synth,
+        _c_research,
+    )
 
 # LLM client + base workspace client are shared across requests (lifecycle
 # is process-scoped). The base workspace client is the app SP; we derive its
@@ -756,6 +793,68 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/api/config")
+async def config() -> dict[str, Any]:
+    """Bootstrap for the React shell UI: the agent name + declarative surface.
+
+    The surface (input form + output-slot dashboard) is rendered by the SAME
+    React components the main app uses; ``surface`` is ``null`` for a plain
+    research agent (the UI then shows just the query box + report).
+    """
+    return {
+        "agent_name": _DEFINITION_DICT.get("name") or "Deep Research Agent",
+        "surface": _SURFACE,
+    }
+
+
+# Per-owner client-error rate-limit state (in-memory; single-replica shell app).
+_ERR_RATE: dict[str, list[float]] = {}
+_ERR_MAX_PER_MIN = 30
+_ERR_MAX_BODY = 24 * 1024  # 24 KiB
+
+
+@app.post("/api/observability/client-errors")
+async def client_errors(request: Request) -> dict[str, int]:
+    """Log a client-side error report so a browser crash in the deployed shell UI
+    lands in the app logs (mirrors the main app's
+    ``POST /api/v1/observability/client-errors``). Best-effort: size-capped +
+    per-owner rate-limited; never trusts client input beyond bounded logging.
+    """
+    raw = await request.body()
+    if len(raw) > _ERR_MAX_BODY:
+        raise HTTPException(status_code=413, detail="report exceeds 24 KiB")
+
+    owner = _request_owner(request)
+    now = time.time()
+    times = _ERR_RATE.setdefault(owner, [])
+    times[:] = [t for t in times if now - t <= 60]
+    if len(times) >= _ERR_MAX_PER_MIN:
+        raise HTTPException(status_code=429, detail="rate limit")
+    times.append(now)
+
+    try:
+        body: dict[str, Any] = json.loads(raw or b"{}")
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="invalid JSON") from exc
+
+    def _field(key: str, cap: int) -> str:
+        val = body.get(key)
+        return str(val)[:cap] if val is not None else "-"
+
+    logger.warning(
+        "client_error | kind=%s | boundary=%s | route=%s | bundle=%s | owner=%s "
+        "| msg=%s | stack=%s",
+        _field("kind", 48),
+        _field("boundary_name", 128),
+        _field("route", 512),
+        _field("bundle_id", 64),
+        owner,
+        _field("message", 512),
+        _field("stack", 4096),
+    )
+    return {"accepted": 1}
+
+
 @app.post("/api/chat")
 async def chat(request: Request) -> EventSourceResponse:
     """SSE endpoint — streams research events as they happen.
@@ -938,6 +1037,49 @@ async def chat(request: Request) -> EventSourceResponse:
                 len(result.output if result else ""),
                 len(sources),
             )
+            # Structured-output dashboard: emit a pending stub (skeletons) then
+            # generate the envelope over the run's evidence and emit the filled
+            # one BEFORE ``complete`` (the terminal frame). Best-effort — a
+            # generation failure leaves the report intact, dashboard empty.
+            if _RESOLVED_BINDING is not None and _RESOLVED_BINDING.slots:
+                slot_names = list(_RESOLVED_BINDING.slots)
+                yield {
+                    "event": "structured_output",
+                    "data": json.dumps(
+                        build_pending_envelope(
+                            binding=_RESOLVED_BINDING.action,
+                            agent_id=_DR_AGENT_V2_ID or None,
+                            surface_etag=None,
+                            slot_names=slot_names,
+                        )
+                    ),
+                }
+                try:
+                    envelope = await build_structured_envelope(
+                        binding=_RESOLVED_BINDING.action,
+                        agent_id=_DR_AGENT_V2_ID or None,
+                        surface_etag=None,
+                        slots=_RESOLVED_BINDING.slots,
+                        report=result.output if result else "",
+                        claims=[],
+                        sources=list(result.sources) if result else [],
+                        llm=_llm_client,
+                    )
+                    yield {
+                        "event": "structured_output",
+                        "data": json.dumps(envelope),
+                    }
+                    logger.info(
+                        "SHELL_APP_STRUCTURED_OUTPUT request_id=%s slots=%s",
+                        request_id,
+                        len(slot_names),
+                    )
+                except Exception as exc:  # noqa: BLE001 — dashboard best-effort
+                    logger.warning(
+                        "SHELL_APP_STRUCTURED_OUTPUT_FAILED request_id=%s exc=%s",
+                        request_id,
+                        str(exc)[:300],
+                    )
             yield {
                 "event": "complete",
                 "data": json.dumps(

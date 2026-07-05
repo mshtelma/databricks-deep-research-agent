@@ -194,6 +194,12 @@ export interface AgentV2Summary {
    * toggle from this; defaults to true if the backend omits it.
    */
   default_verify_sources?: boolean
+  /**
+   * True when the agent carries a declarative UI (definition.surface). The
+   * chat shows its Agent UI panel; the surface itself is read from the detail
+   * endpoint's definition.
+   */
+  has_surface?: boolean
 }
 
 /** GET /api/v1/agents-v2 response. */
@@ -401,6 +407,8 @@ export interface ArchitectSynopsis {
   tools: string[]
   outputs: string[]
   warnings: string[]
+  /** Present when the agent carries a declarative UI (definition.surface). */
+  ui?: { components: number; actions: string[] } | null
 }
 
 export interface CriticAgentFinding {

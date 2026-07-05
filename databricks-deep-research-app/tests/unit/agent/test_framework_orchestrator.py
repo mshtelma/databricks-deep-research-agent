@@ -1781,7 +1781,11 @@ class TestBuildStateProxy:
     _COMPLETE_RESEARCH_ATTRS = _COMPLETE_UPDATE_ATTRS + ["query_mode"]
 
     # persist_research_data (L89-158) — called by both above
-    _RESEARCH_DATA_ATTRS = ["sources", "claims", "verification_summary"]
+    # (structured_output: agent-surface envelope read via getattr in
+    # _build_verification_data)
+    _RESEARCH_DATA_ATTRS = [
+        "sources", "claims", "verification_summary", "structured_output",
+    ]
 
     # Union of all — the full contract
     _ALL_PERSISTENCE_ATTRS = list(set(
@@ -1832,6 +1836,16 @@ class TestBuildStateProxy:
     def test_final_report_passthrough(self) -> None:
         proxy = _build_state_proxy(_mock_config(), "My research report")
         assert proxy.final_report == "My research report"
+
+    def test_structured_output_passthrough_and_default(self) -> None:
+        """Agent-surface envelope rides the proxy into _build_verification_data."""
+        proxy = _build_state_proxy(_mock_config(), "report")
+        assert proxy.structured_output is None
+        envelope = {"version": 1, "binding": "run", "data": {"slot": []}}
+        proxy = _build_state_proxy(
+            _mock_config(), "report", structured_output=envelope
+        )
+        assert proxy.structured_output == envelope
 
     def test_sources_is_empty_list(self) -> None:
         """L183: `for source_info in state.sources:` — must be iterable."""
@@ -3339,3 +3353,279 @@ def test_effort_overlay_clamps_to_max() -> None:
     config = _mock_config(agent_id=uuid4(), research_depth="extended")
     _apply_effort_overlay(definition, config)
     assert _lane_budget(definition) == 60
+
+
+# ---------------------------------------------------------------------------
+# Tests — Structured-output stub-first ordering (v2 wires)
+# ---------------------------------------------------------------------------
+
+
+class TestStructuredSurfaceStubFirst:
+    """The pending stub is persisted WITH the run; the per-slot wires run
+    AFTER PersistenceCompletedEvent and stream phase events; any wire-block
+    failure is fail-soft (the run stays persisted, slots stay pending)."""
+
+    _SURFACE: dict[str, Any] = {
+        "version": 1,
+        "components": [
+            {"id": "root", "component": "Column", "props": {},
+             "children": ["findings", "tbl"]},
+            {"id": "findings", "component": "KeyFindings",
+             "props": {"source": {"path": "/results/run/data/key_findings"}},
+             "children": []},
+            {"id": "tbl", "component": "Table",
+             "props": {
+                 "source": {"path": "/results/run/data/comparison"},
+                 "columns": [
+                     {"key": "item", "label": "Item", "type": "string"},
+                     {"key": "score", "label": "Score", "type": "number"},
+                 ],
+             },
+             "children": []},
+        ],
+        "data_model": {"query": ""},
+        "bindings": [
+            {"action": "run", "kind": "run_agent",
+             "inputs": {"query": {"path": "/query"}}, "options": {},
+             "output": {"target": "/results/run", "mode": "report"},
+             "concurrency": "replace"},
+        ],
+    }
+
+    _FINAL_ENV: dict[str, Any] = {
+        "version": 2,
+        "binding": "run",
+        "data": {"comparison": [], "key_findings": []},
+        "meta": {
+            "duration_ms": 123.0,
+            "slots": {
+                "comparison": {"status": "ok"},
+                "key_findings": {"status": "ok"},
+            },
+        },
+    }
+
+    async def _drive(
+        self,
+        *,
+        persist_mock: AsyncMock,
+        structure_mock: AsyncMock,
+        load_surface: Any,
+    ) -> list[Any]:
+        from databricks_deep_research.events.types import (
+            WorkflowCompletedEvent as FwkWorkflowCompletedEvent,
+        )
+
+        full_report = "# Report\n\n" + "Content. " * 200
+
+        async def _mock_execute(*args: Any, **kwargs: Any) -> Any:
+            yield FwkWorkflowCompletedEvent(
+                node_id="main",
+                timestamp="2026-01-01T00:00:01Z",
+                workflow_id="wf-1",
+                duration_ms=1000.0,
+                total_tokens=100,
+                final_report=full_report,
+            )
+
+        mock_runner = MagicMock()
+        mock_runner.stream = _mock_execute
+        mock_runner.factory_context = ToolFactoryContext()
+
+        class FakeEventBuffer:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                self.events: list[Any] = []
+
+            async def add_event(self, event: Any) -> None:
+                self.events.append(event)
+
+            async def flush(self) -> None:
+                return None
+
+        config = _mock_config(
+            agent_id=str(uuid4()), surface_action=None,
+        )
+
+        with (
+            patch(
+                "deep_research.agent.framework_orchestrator.EventBuffer",
+                FakeEventBuffer,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.build_app_workflow_runner",
+                return_value=mock_runner,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_llm_client",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.create_framework_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_file_search_tool",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_enterprise_tools",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._load_existing_sources",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.translate",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator.ExecutionContext",
+                return_value=MagicMock(),
+            ),
+            # Real DomainContextTracker — exercises the real final_delta.
+            patch("deep_research.agent.framework_orchestrator.safe_mlflow_run"),
+            patch("deep_research.agent.framework_orchestrator.safe_tool_span"),
+            patch("deep_research.agent.framework_orchestrator.safe_update_trace"),
+            # agent_id + chat_id together reach the follow-up gate and the
+            # cross-session memory flag, both of which construct Settings()
+            # (impossible in the unit env) — feed a flags-off stand-in.
+            patch(
+                "deep_research.core.config.get_settings",
+                return_value=MagicMock(
+                    followup_chat_gate_enabled=False,
+                    chat_memory_unified=False,
+                    storage_service_impl="legacy",
+                ),
+            ),
+            # agent_id also routes workflow resolution through the agents_v2
+            # DB lookup — irrelevant here (runner + translate are mocked).
+            patch(
+                "deep_research.agent.framework_orchestrator._resolve_and_prepare_workflow_def",
+                new_callable=AsyncMock,
+                return_value=MagicMock(),
+            ),
+            patch(
+                "deep_research.agent.framework_orchestrator._persist_completion",
+                persist_mock,
+            ),
+            patch(
+                "deep_research.agent.structured_surface.load_agent_surface",
+                new_callable=AsyncMock,
+                return_value=load_surface,
+            ),
+            patch(
+                "deep_research.agent.structured_surface.structure_and_update",
+                structure_mock,
+            ),
+        ):
+            events: list[Any] = []
+            async for evt in stream_research_via_framework(
+                query="structured stub-first",
+                llm=MagicMock(),
+                brave_client=MagicMock(),
+                crawler=MagicMock(),
+                config=config,
+                chat_id=str(uuid4()),
+                user_id="user-1",
+            ):
+                events.append(evt)
+            return events
+
+    @pytest.mark.asyncio
+    async def test_pending_stub_persisted_and_events_ordered(self) -> None:
+        from deep_research.schemas.streaming import (
+            PhaseCompletedEvent,
+            PhaseStartedEvent,
+        )
+
+        persist_mock = AsyncMock(return_value={"sources": 1, "claims": 0})
+        structure_mock = AsyncMock(return_value=self._FINAL_ENV)
+        events = await self._drive(
+            persist_mock=persist_mock,
+            structure_mock=structure_mock,
+            load_surface=(self._SURFACE, "W/etag-1"),
+        )
+
+        # 1. The stub envelope went INTO _persist_completion.
+        persist_mock.assert_awaited_once()
+        stub = persist_mock.call_args.kwargs["structured_output"]
+        assert stub is not None
+        assert stub["version"] == 2
+        assert stub["surface_etag"] == "W/etag-1"
+        assert set(stub["meta"]["slots"]) == {"comparison", "key_findings"}
+        assert all(
+            meta == {"status": "pending"}
+            for meta in stub["meta"]["slots"].values()
+        )
+
+        # 2. persistence_completed comes BEFORE phase_started(structured_output).
+        persist_idx = next(
+            i for i, e in enumerate(events)
+            if isinstance(e, PersistenceCompletedEvent)
+        )
+        phase_start_idx = next(
+            i for i, e in enumerate(events)
+            if isinstance(e, PhaseStartedEvent)
+            and e.phase_name == "structured_output"
+        )
+        assert persist_idx < phase_start_idx
+
+        # 3. Wires ran with the run's artifacts and completed.
+        structure_mock.assert_awaited_once()
+        wire_kwargs = structure_mock.call_args.kwargs
+        assert wire_kwargs["binding"] == "run"
+        assert set(wire_kwargs["slots"]) == {"comparison", "key_findings"}
+        assert wire_kwargs["report"].startswith("# Report")
+        assert any(
+            isinstance(e, PhaseCompletedEvent)
+            and e.phase_name == "structured_output"
+            for e in events
+        )
+        assert isinstance(events[-1], ResearchCompletedEvent)
+
+    @pytest.mark.asyncio
+    async def test_wires_failure_is_fail_soft(self) -> None:
+        from deep_research.schemas.streaming import PhaseErrorEvent
+
+        persist_mock = AsyncMock(return_value={"sources": 1, "claims": 0})
+        structure_mock = AsyncMock(side_effect=RuntimeError("wires boom"))
+        events = await self._drive(
+            persist_mock=persist_mock,
+            structure_mock=structure_mock,
+            load_surface=(self._SURFACE, None),
+        )
+
+        persist_mock.assert_awaited_once()  # run persisted with the stub
+        assert any(
+            isinstance(e, PhaseErrorEvent)
+            and e.phase_name == "structured_output"
+            and e.recoverable
+            for e in events
+        )
+        assert isinstance(events[-1], ResearchCompletedEvent)
+        assert not any(isinstance(e, StreamErrorEvent) for e in events)
+
+    @pytest.mark.asyncio
+    async def test_no_surface_means_no_stub_and_no_wires(self) -> None:
+        from deep_research.schemas.streaming import PhaseStartedEvent
+
+        persist_mock = AsyncMock(return_value={"sources": 1, "claims": 0})
+        structure_mock = AsyncMock(return_value=self._FINAL_ENV)
+        events = await self._drive(
+            persist_mock=persist_mock,
+            structure_mock=structure_mock,
+            load_surface=None,
+        )
+
+        assert persist_mock.call_args.kwargs["structured_output"] is None
+        structure_mock.assert_not_awaited()
+        assert not any(
+            isinstance(e, PhaseStartedEvent)
+            and e.phase_name == "structured_output"
+            for e in events
+        )

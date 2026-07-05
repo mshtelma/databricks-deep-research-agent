@@ -17,6 +17,7 @@ import json
 from typing import Any, get_args
 
 import pytest
+from pydantic import ValidationError
 
 from deep_research.agent_designer.blueprint import (
     PLACEHOLDER_PENDING_KEY,
@@ -132,7 +133,7 @@ def test_topology_enum_parity() -> None:
 def test_coerce_topology_raises_on_unknown() -> None:
     assert WorkflowDesignBrief(topology="best_of_n").topology == "best_of_n"
     assert WorkflowDesignBrief().topology == "parallel_lanes"  # omitted -> default
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         WorkflowDesignBrief(topology="totally_unknown_topology")
 
 
@@ -174,7 +175,7 @@ def test_tool_schema_has_no_ref() -> None:
 
 @pytest.mark.parametrize("bad", [1, 11, 0, -1])
 def test_candidate_count_bounds(bad: int) -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         TaskSignature.load_from_storage(_sig(bad))
 
 

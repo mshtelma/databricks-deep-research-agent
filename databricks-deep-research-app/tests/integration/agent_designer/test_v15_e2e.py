@@ -257,6 +257,8 @@ def test_v15_full_release_chain(
     assert resp.status_code == 200, f"import-yaml failed: {resp.text}"
     imported = resp.json()
     assert "definition" in imported, "import-yaml response must include 'definition'"
+    # A metadata-free framework document imports without any carriage warnings.
+    assert imported.get("warnings") == [], imported.get("warnings")
     definition: dict[str, Any] = imported["definition"]
 
     # ------------------------------------------------------------------

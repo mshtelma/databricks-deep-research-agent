@@ -417,37 +417,33 @@ class TestTranslate:
         assert "X-Shell-App-Template-Version" in app_py
 
     @pytest.mark.asyncio
-    async def test_static_chat_ui_parses_crlf_sse_frames(self) -> None:
+    async def test_static_bundle_is_the_react_shell(self) -> None:
+        """The deployed UI is the built React shell bundle (reuses the main
+        app's surface components), packaged as a multi-file static tree
+        (index.html + hashed assets). CRLF SSE parsing + reconnect/resume now
+        live in the bundled ``useShellRun`` hook (frontend tests), not inline
+        JS. A committed vanilla ``index.html`` fallback (no assets) is tolerated
+        until ``make build`` produces the React bundle."""
         translator = ShellAppExporter()
         agent, revision = _agent_revision()
         artifact = await translator.translate(agent, revision, _valid_config())
         with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            names = zf.namelist()
             html = zf.read("static/index.html").decode("utf-8")
 
-        assert "replace(/\\r\\n/g, '\\n').replace(/\\r/g, '\\n')" in html
-        assert "streamBuffer.split(/\\n\\n+/)" in html
-        assert "const dataText = dataLines.join('\\n')" in html
-        assert "drainFrames(true)" in html
-        assert "X-Shell-App-Template-Version" in html
-        assert "2026-05-28.1" in html
-        assert "[shell-app] stream frame" in html
-        assert html.count("let streamBuffer = '';") == 1
-        assert html.index("let streamBuffer = '';") < html.index("function drainFrames")
-        # LAYER-2 reconnect/resume wiring is present in the rendered UI: the
-        # frontend tracks the run id, resumes from the last sequence, and offers
-        # a stopgap Retry when the gateway severs the stream.
-        assert "function driveReconnect" in html
-        assert "function showStopgap" in html
-        assert "encodeURIComponent(runId)" in html
-        assert "/events?since=" in html
-        assert "function renderMarkdown" in html
-        assert "function appendActivity" in html
-        assert "function renderFinalAnswer" in html
-        assert "activityPanelEl.open = false" in html
-        assert "markdown-body" in html
-        assert "latestFinalReport" in html
-        assert "renderFinalAnswer(payload.output)" in html
-        assert "appendActivity(eventName, payload)" in html
+        assert "static/index.html" in names
+        asset_js = [
+            n for n in names if n.startswith("static/assets/") and n.endswith(".js")
+        ]
+        if asset_js:
+            # React build present: a root mount + a module script that loads a
+            # hashed chunk under /static/ (StaticFiles is mounted there).
+            assert '<div id="root"></div>' in html
+            assert 'type="module"' in html
+            assert "/static/assets/" in html
+        else:
+            # Vanilla fallback still ships a working chat UI.
+            assert "<body" in html
 
     @pytest.mark.asyncio
     async def test_explicit_brave_web_search_bundle_binds_brave_secret(self) -> None:

@@ -72,3 +72,20 @@ class MessageListResponse(BaseSchema):
     total: int
     limit: int
     offset: int
+
+
+class RestructureRequest(BaseSchema):
+    """Request to re-run structured-output slots for an agent message."""
+
+    slots: list[str] | None = Field(
+        default=None,
+        max_length=32,
+        description="Slot names to re-run; omit for all declared slots.",
+    )
+
+
+class RestructureResponse(BaseSchema):
+    """202 acknowledgement: the slots are being re-structured."""
+
+    status: str
+    slots: list[str]

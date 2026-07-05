@@ -485,7 +485,8 @@ root:
                         tools: [update_block, set_model_tier, discover_sources,
                                 list_tool_kinds, inspect_assets, recommend_tools_for_assets,
                                 select_topology, inspect_ast_summary, validate,
-                                request_signature_revision]
+                                request_signature_revision,
+                                scaffold_surface, set_surface]
                         max_tool_calls: 18
                         extras:
                           suppress_planning_final_output: true
@@ -633,6 +634,43 @@ root:
                             diagnostic mid-iteration, surface that gap in the
                             synthesizer's prompt so the runtime answer flags the
                             user — do NOT invent config values.
+
+                          STEP 2b (only when the user asked for a UI):
+                            If the request includes a UI / app / form for running
+                            this agent, call ``scaffold_surface`` ONCE — it attaches
+                            the deterministic default UI (a form field per required
+                            workflow input, host-owned run-control metadata, a
+                            host-bar Run action, and a results region). Effort,
+                            Sources, Verify citations, Plan review, Report style,
+                            Memory, and Live search are platform controls; do NOT
+                            add them as ordinary domain input components unless the
+                            user explicitly asked for a domain variable with that
+                            meaning. Only when the user asked for specific
+                            fields, layout, or actions BEYOND that default, refine
+                            it with ONE ``set_surface`` call passing the FULL
+                            surface object (components come from the fixed catalog
+                            the tool documents; binding ``inputs`` must cover the
+                            workflow's ``required_inputs``; non-query input keys
+                            become ``{placeholder}`` variables usable in node
+                            prompts). STRUCTURED OUTPUT: when the user wants
+                            tables, metric cards, key findings, charts, or tabbed
+                            results that the MODEL fills after each run, add
+                            result components whose ``source``/``items`` pointer
+                            is ``<binding output target>/data/<slot_name>`` — one
+                            slot per distinct dataset; a Chart may share a Table's
+                            slot to visualize the same rows (x_key/y_keys must be
+                            that Table's column keys, y columns type ``number``);
+                            do NOT initialize slots in ``data_model``; give Table
+                            columns stable identifier keys with types matching
+                            what the agent produces; organize several result
+                            sections with ``Tabs`` of ``TabPane`` children; keep
+                            ``ReportRegion`` only if the user wants the narrative
+                            inline (the full report is always in the
+                            conversation). Unlike ``update_block``, these surface
+                            calls are REAL: the surface rides along with the final
+                            AST automatically — do NOT include it in STEP 3's
+                            ``node_patches`` JSON. If the user did not ask for a
+                            UI, skip this step entirely.
 
                           STEP 3 (always — your turn-end):
                             After all advisory tool calls, end your turn with a

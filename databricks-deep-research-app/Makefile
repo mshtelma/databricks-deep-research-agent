@@ -146,6 +146,14 @@ build: build-framework
 	@echo "Frontend built to static/"
 	@ls -la static/
 	@echo ""
+	@echo "Building shell-app UI bundle (the deployed per-agent app)..."
+	cd frontend && npm run build:shell
+	@rm -rf templates/agent-shell-app/static
+	@mkdir -p templates/agent-shell-app/static/assets
+	@cp frontend/dist-shell/assets/* templates/agent-shell-app/static/assets/
+	@cp frontend/dist-shell/shell.html templates/agent-shell-app/static/index.html
+	@echo "Shell-app UI built to templates/agent-shell-app/static/ (index.html + assets)"
+	@echo ""
 	@echo "Creating symlink for local development..."
 	@rm -f src/deep_research/static
 	@ln -s ../../static src/deep_research/static

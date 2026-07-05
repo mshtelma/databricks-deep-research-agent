@@ -111,6 +111,12 @@ export interface CustomAgentSummary {
    * toggle from this on agent selection; the toggle then overrides per run.
    */
   defaultVerifySources?: boolean;
+  /**
+   * True when the agent carries a declarative UI (definition.surface). Drives
+   * the chat's Agent UI panel + a picker badge; the surface itself comes from
+   * the agents-v2 detail endpoint's definition.
+   */
+  hasSurface?: boolean;
 }
 
 /** Agent capability for display */

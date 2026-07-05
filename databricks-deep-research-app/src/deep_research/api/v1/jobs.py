@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from deep_research.api.v1.utils import verify_chat_access
@@ -293,6 +293,73 @@ class SubmitJobRequest(BaseModel):
         default=None,
         description="Per-run override: allow the live-web-search follow-up escape hatch (None = inherit global).",
     )
+    surface_inputs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Structured inputs from an agent's UI surface (Agent UI panel). "
+            "Keys are seeded into the workflow's initial state and usable as "
+            "{placeholder} variables in node prompts. Scalar values only; "
+            "reserved pipeline keys are rejected."
+        ),
+    )
+
+    @field_validator("surface_inputs")
+    @classmethod
+    def _validate_surface_inputs(
+        cls, v: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        if v is None:
+            return None
+        # Local import: the surface module is app-level and light, but jobs.py
+        # is imported early in app startup — keep the top-level import graph
+        # unchanged.
+        from deep_research.surface.schema import is_valid_identifier
+        from deep_research.surface.validation import RESERVED_INPUT_KEYS
+
+        if len(v) > 32:
+            raise ValueError("surface_inputs supports at most 32 keys")
+        total_bytes = 0
+        for key, value in v.items():
+            if not isinstance(key, str) or not is_valid_identifier(key):
+                raise ValueError(
+                    f"surface_inputs key {key!r} must match [A-Za-z_][A-Za-z0-9_]*"
+                )
+            if key == "query" or key in RESERVED_INPUT_KEYS:
+                raise ValueError(
+                    f"surface_inputs key {key!r} collides with pipeline-owned "
+                    "state and is reserved"
+                )
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise ValueError(
+                    f"surface_inputs[{key!r}] must be a scalar (str/int/float/bool)"
+                )
+            total_bytes += len(key) + len(str(value))
+        if total_bytes > 16 * 1024:
+            raise ValueError("surface_inputs exceeds the 16KB size cap")
+        return v
+
+    surface_action: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "The surface binding action that triggered this run. Names "
+            "which binding's structured-output slots the post-synthesis "
+            "structuring pass fills."
+        ),
+    )
+
+    @field_validator("surface_action")
+    @classmethod
+    def _validate_surface_action(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        from deep_research.surface.schema import is_valid_identifier
+
+        if not is_valid_identifier(v):
+            raise ValueError(
+                "surface_action must match [A-Za-z_][A-Za-z0-9_]*"
+            )
+        return v
 
 
 class JobResponse(BaseSchema):
@@ -463,6 +530,8 @@ async def submit_job(
         enabled_skills=body.enabled_skills,
         enable_cross_session_memory=body.enable_cross_session_memory,
         allow_live_search=body.allow_live_search,
+        surface_inputs=body.surface_inputs,
+        surface_action=body.surface_action,
     )
 
     logger.info(

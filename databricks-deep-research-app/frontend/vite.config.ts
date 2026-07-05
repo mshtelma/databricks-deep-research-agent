@@ -5,6 +5,10 @@ import { fileURLToPath, URL } from 'node:url'
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react()],
+  define: {
+    // Build id carried on client error reports (see lib/clientErrors.ts).
+    __BUILD_ID__: JSON.stringify(process.env.BUILD_ID ?? String(Date.now())),
+  },
   resolve: {
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),

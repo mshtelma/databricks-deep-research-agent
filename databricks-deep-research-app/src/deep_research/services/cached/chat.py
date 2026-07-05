@@ -28,6 +28,7 @@ from deep_research.agent.chat_title import derive_chat_title_from_query
 from deep_research.services._cached_base import _CachedServiceBase
 from deep_research.services._list_cache import _UserScopedLRU
 from deep_research.services._protocols import IChatService
+from deep_research.services.storage.surface_state import merge_surface_state
 from deep_research.storage.documents import (
     ChatDocument,
     ChatMeta,
@@ -106,6 +107,8 @@ class ChatFullViewCached:
     messages: list[Any] = field(default_factory=list)
     research_sessions: list[Any] = field(default_factory=list)
     sources: list[Any] = field(default_factory=list)
+    # Per-agent UI surface state persisted in ChatState.chat.metadata["surface_state"].
+    surface_state: dict[str, Any] | None = None
 
     # Delegate attribute access for fields the endpoint reads from `chat`
     @property
@@ -272,11 +275,17 @@ class CachedChatService(_CachedServiceBase, IChatService):
         view.sources = sources
         view.research_sessions = research_sessions
 
+        raw_surface = doc.state.chat.metadata.get("surface_state")
+        surface_state: dict[str, Any] | None = (
+            dict(raw_surface) if isinstance(raw_surface, dict) else None
+        )
+
         full = ChatFullViewCached(
             chat=view,
             messages=messages,
             research_sessions=research_sessions,
             sources=sources,
+            surface_state=surface_state,
         )
         return full
 
@@ -356,8 +365,9 @@ class CachedChatService(_CachedServiceBase, IChatService):
         user_id: str,
         title: str | None = None,
         status: Any | None = None,
+        surface_state_patch: dict[str, Any] | None = None,
     ) -> ChatView | None:
-        """Update title and/or status; return updated ChatView or None."""
+        """Update title, status, and/or surface_state; return updated ChatView or None."""
         # Hydrate into cache first (required by _mutate_chat)
         doc = await self._read_chat(chat_id)
         if doc.meta.user_id != user_id or doc.meta.deleted_at is not None:
@@ -370,6 +380,13 @@ class CachedChatService(_CachedServiceBase, IChatService):
             if status is not None:
                 status_str = status.value if hasattr(status, "value") else str(status)
                 d.state.chat.metadata["status"] = status_str
+            if surface_state_patch is not None:
+                existing_surface: dict[str, Any] = dict(
+                    d.state.chat.metadata.get("surface_state") or {}
+                )
+                d.state.chat.metadata["surface_state"] = merge_surface_state(
+                    existing_surface, surface_state_patch
+                )
             d.meta.updated_at = datetime.now(UTC)
 
         await self._mutate_chat(chat_id, _apply)

@@ -1,6 +1,8 @@
 import type { AvailableSource, SourceScope } from '@/types/dataSources';
 import type { QueryMode } from '@/types';
 
+const ENABLED_ENTERPRISE_SOURCES_KEY = 'deep-research-enabled-enterprise-sources';
+
 /** VariantA retrieval channels: Web, Enterprise, and MCP. */
 export interface ComposerSources {
   web: boolean;
@@ -79,4 +81,26 @@ export function deriveEnabledMcpServerNamesForSubmit(
     names.push(name);
   }
   return names;
+}
+
+export function readEnabledEnterpriseSources(): Set<string> {
+  if (typeof window === 'undefined') return new Set<string>();
+  try {
+    const raw = localStorage.getItem(ENABLED_ENTERPRISE_SOURCES_KEY);
+    if (!raw) return new Set<string>();
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return new Set<string>();
+    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
+  } catch {
+    return new Set<string>();
+  }
+}
+
+export function writeEnabledEnterpriseSources(ids: Set<string>): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(ENABLED_ENTERPRISE_SOURCES_KEY, JSON.stringify(Array.from(ids)));
+  } catch {
+    // Ignore localStorage errors.
+  }
 }

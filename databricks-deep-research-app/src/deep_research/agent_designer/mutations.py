@@ -1222,3 +1222,26 @@ def update_workflow_meta(
     for key, val in patches.items():
         new_ast[key] = copy.deepcopy(val)
     return new_ast
+
+
+def set_surface(
+    ast: dict[str, Any], surface: dict[str, Any] | None
+) -> dict[str, Any]:
+    """Replace (or remove) the declarative UI at ``ast["surface"]``.
+
+    Pure structural mutation like every function in this module: deep-copies,
+    never mutates the input, and preserves all sibling top-level keys.
+    ``surface=None`` removes the UI. Semantic validity (catalog membership,
+    binding coverage, pointers) is the CALLER's job — the ``set_surface``
+    designer tool and the agents_v2 write gate both run
+    :func:`deep_research.surface.validation.validate_surface`, so an invalid
+    surface is rejected before or at persist time, never silently.
+    """
+    if surface is not None and not isinstance(surface, dict):
+        raise BlockMutationError("set_surface requires a dict surface or None")
+    new_ast = copy.deepcopy(ast)
+    if surface is None:
+        new_ast.pop("surface", None)
+    else:
+        new_ast["surface"] = copy.deepcopy(surface)
+    return new_ast

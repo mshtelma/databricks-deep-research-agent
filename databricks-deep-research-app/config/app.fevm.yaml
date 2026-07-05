@@ -1,0 +1,23 @@
+# fevm overlay — OVERRIDES ONLY, deep-merged onto config/app.yaml at load time.
+# Selected via APP_CONFIG_OVERLAY in the fevm bundle target (databricks.yml).
+#
+# Web search: fevm now uses the base app.yaml default — Databricks built-in web
+# search on the GEMINI endpoint (databricks-gemini-3-1-flash-lite), one fast call.
+# History: this overlay previously repointed web search at an OpenAI gpt-5 endpoint
+# because fevm had cross-region processing DISABLED, which made the Gemini grounding
+# path return HTTP 400 ("Web search for Gemini is not available when cross-region
+# processing is disabled"). Cross-region processing is now ENABLED on fevm, so the
+# Gemini default works again and no search override is needed here. (Brave is still
+# intentionally not deployed on fevm.)
+#
+# The only remaining override is the run-watchdog ceiling (below).
+
+# Heavy multi-lane agents with NLI citation verification (grounding_mode=reclaim) are
+# a genuine long-running workload — verification is the dominant cost (~seconds per
+# claim × tens-to-hundreds of claims), independent of web-search latency — and can
+# overrun the default 30-min run watchdog mid-synthesis. Raise the ceiling generously.
+# NOTE: this watchdog is a blunt TOTAL-runtime cap, not a stall guard — it kills a
+# healthy, progressing run the same as a hung one. The real fix is a no-progress/stall
+# timeout + salvaging the partial report; this large ceiling is the interim lever.
+orchestration:
+  research_timeout_seconds: 10800   # 3 hours (base default is 1800)

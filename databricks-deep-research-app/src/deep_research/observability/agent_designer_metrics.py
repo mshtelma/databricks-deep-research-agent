@@ -130,6 +130,20 @@ def record_yaml_import_outcome(
     get_sink().counter("agent_designer.yaml_import_outcome", 1, outcome=outcome)
 
 
+def record_yaml_import_metadata_warning(key: str, code: str) -> None:
+    """Increment the designer-metadata carriage warning counter for POST /import-yaml.
+
+    One increment per ``ImportMetadataWarning`` — labelled by the metadata
+    ``key`` (e.g. ``designer_signature``) and warning ``code``
+    (``invalid_shape``, ``consistency_mismatch``, ``recomputed_divergent``,
+    ``stale_entries_pruned``) so dashboards can spot documents that lose
+    metadata on the way in.
+    """
+    get_sink().counter(
+        "agent_designer.yaml_import_metadata_warning", 1, key=key, code=code
+    )
+
+
 def record_yaml_export_ms(duration_ms: float) -> None:
     """Histogram of YAML export latency for GET /{id}/yaml.
 

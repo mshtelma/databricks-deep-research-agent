@@ -465,8 +465,16 @@ class IChatService(Protocol):
         user_id: str,
         title: str | None = None,
         status: Any | None = None,
+        surface_state_patch: dict[str, Any] | None = None,
     ) -> Any | None:
-        """Update title and/or status; return updated chat or None."""
+        """Update title and/or status; return updated chat or None.
+
+        ``surface_state_patch`` is a per-agent shallow merge into
+        ``metadata["surface_state"]``. Each agent entry is shallow-merged;
+        ``action_runs`` within each entry uses newest-updated_at-wins with
+        idempotent-replay semantics. See
+        ``services.storage.surface_state.merge_surface_state`` for details.
+        """
         ...
 
     async def soft_delete(self, chat_id: UUID, user_id: str) -> bool:

@@ -1796,6 +1796,19 @@ class ParseArchitectAstTool:
             }
             self._publish_summary(normalized_blueprint, payload)
             return ToolResult(content=json.dumps(normalized_blueprint), data=payload)
+        # Designer-metadata carry: ``surface`` (declarative agent UI) is app
+        # metadata, NOT architect-owned structure. Mid-loop scaffold_surface /
+        # set_surface mutations land in the conversation cache, which patch
+        # mode otherwise ignores (patches apply to the immutable blueprint).
+        # Carry the cached surface onto the merged AST — after the fingerprint
+        # drift check, which is structural-only, so immutability is unaffected.
+        if "surface" not in merged_ast and self._state_getter is not None:
+            with suppress(Exception):  # pragma: no cover — defensive read
+                cached_ast = self._state_getter()
+                if isinstance(cached_ast, dict) and isinstance(
+                    cached_ast.get("surface"), dict
+                ):
+                    merged_ast["surface"] = cached_ast["surface"]
         normalized_merged_ast, fixes = normalize_ast(merged_ast)
         payload = {
             "current_ast": normalized_merged_ast,
@@ -3592,6 +3605,186 @@ class UpdateWorkflowMetaTool:
         return _ast_result(new_ast)
 
 
+class SetSurfaceTool:
+    """Replace (or remove) the agent's declarative UI (``surface``).
+
+    The candidate surface is validated with the SAME deterministic validator
+    the save gate uses; blocking errors are returned AS the tool result so the
+    architect can self-correct in the next call — an invalid surface never
+    lands in the AST silently.
+    """
+
+    def __init__(
+        self,
+        state_getter: StateGetter | None = None,
+        state_setter: StateSetter | None = None,
+    ) -> None:
+        self._state_getter = state_getter
+        self._state_setter = state_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        # Generated from the Python catalog so the vocabulary the LLM sees can
+        # never drift from what the validator accepts.
+        from deep_research.surface.catalog import surface_catalog_cheatsheet
+
+        return ToolDefinition(
+            name="set_surface",
+            description=(
+                "Set the agent's declarative UI (form + Run action + result "
+                "regions) by providing the FULL surface object "
+                "({version, components, data_model, bindings, optional "
+                "runtime_controls/layout}); it replaces "
+                "any existing surface wholesale. Pass surface=null to remove "
+                "the UI. Prefer calling scaffold_surface first and refining "
+                "the result. The surface is validated deterministically; on "
+                "violations the result lists them and the AST is unchanged — "
+                "fix and retry. DO NOT pass 'current_ast'.\n\n"
+                "PLATFORM RUN CONTROLS:\n"
+                "- Effort, Sources, Verify citations, Plan review, Report "
+                "style, Memory, and Live search are host-owned controls. Do "
+                "NOT add them as ordinary TextField/Select/Checkbox domain "
+                "inputs unless the user explicitly means a domain variable.\n"
+                "- Use optional runtime_controls policies and layout.sections "
+                "to request host visibility/framing. New surfaces should use "
+                "layout.actions='host_bar' when the host should render the "
+                "action button outside the generated component tree. When you "
+                "include layout.sections, each section's 'children' MUST list "
+                "the top-level component ids to show there (e.g. the form/input "
+                "container under the inputs section, the results container under "
+                "the results section); omit layout.sections entirely to let the "
+                "host auto-infer inputs vs results from the component tree.\n\n"
+                "COMPONENT CATALOG (props: name*, required; enum values in "
+                "parentheses):\n" + surface_catalog_cheatsheet() + "\n\n"
+                "STRUCTURED OUTPUT SLOTS (the model fills these after each "
+                "run):\n"
+                "- Result components (Table, MetricGrid, KeyFindings, Chart, "
+                "List) bind SLOTS: their source/items pointer must be "
+                "'<binding output target>/data/<slot_name>' — exactly one "
+                "segment after /data/ (e.g. '/results/run/data/comparison').\n"
+                "- One slot per distinct dataset. A Chart may SHARE a Table's "
+                "slot to visualize the same rows (x_key/y_keys must be that "
+                "Table's column keys; y columns must be type 'number').\n"
+                "- The structuring pass fills every slot from the verified "
+                "report after each run; do NOT initialize slots in "
+                "data_model and never point two different dataset kinds at "
+                "one slot.\n"
+                "- Give Table columns stable identifier keys with types "
+                "matching what the agent will produce.\n"
+                "- Organize several result sections with Tabs whose children "
+                "are TabPane components (each with a label).\n"
+                "- Keep ReportRegion only when the user wants the narrative "
+                "inline — the full report is always available in the "
+                "conversation."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "surface": {
+                        "type": ["object", "null"],
+                        "description": (
+                            "Full surface JSON: {version: 1, components: "
+                            "[{id, component, props, children}] (flat list, "
+                            "exactly one id='root'), data_model: {...}, "
+                            "bindings: [{action, inputs, options, output}], "
+                            "optional runtime_controls and layout}. "
+                            "null removes the UI."
+                        ),
+                    },
+                },
+                "required": ["surface"],
+            },
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        if "surface" not in arguments:
+            raise ValueError("set_surface requires 'surface' (object or null)")
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        from deep_research.surface.validation import validate_surface
+
+        ast = _resolve_current_ast(arguments, self._state_getter)
+        surface = arguments.get("surface")
+        if surface is not None and not isinstance(surface, dict):
+            return _error_result("set_surface 'surface' must be an object or null")
+        if surface is not None:
+            probe = dict(ast)
+            probe["surface"] = surface
+            blocking = [
+                f for f in validate_surface(probe) if f.severity == "blocking"
+            ]
+            if blocking:
+                return _error_result(
+                    "surface validation failed (AST unchanged; fix and retry): "
+                    + "; ".join(
+                        f"{f.path or '<surface>'}: {f.message}" for f in blocking
+                    )
+                )
+        try:
+            new_ast = mutations.set_surface(ast, surface)
+        except mutations.BlockMutationError as exc:
+            return _error_result(f"set_surface failed: {exc}")
+        new_ast = _commit_to_cache(new_ast, self._state_setter)
+        return _ast_result(new_ast)
+
+
+class ScaffoldSurfaceTool:
+    """Attach the deterministic default UI derived from the workflow.
+
+    Zero-LLM baseline: a form over ``required_inputs`` + host-owned run-control
+    metadata + a host-bar Run action + a results region. Use it first, then refine with
+    ``set_surface``.
+    """
+
+    def __init__(
+        self,
+        state_getter: StateGetter | None = None,
+        state_setter: StateSetter | None = None,
+    ) -> None:
+        self._state_getter = state_getter
+        self._state_setter = state_setter
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name="scaffold_surface",
+            description=(
+                "Generate and attach the default UI for this agent: a form "
+                "with one field per required workflow input, host-owned "
+                "runtime_controls for effort/sources/options, a host-bar Run "
+                "action, and a results region. Deterministic and always valid "
+                "— call this first when the user asks for a UI, then refine "
+                "with set_surface if they asked for anything beyond the "
+                "default. DO NOT pass 'current_ast'."
+            ),
+            parameters={"type": "object", "properties": {}},
+            source_type="builtin",
+            source_kind="builtin",
+        )
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        return arguments
+
+    async def execute(
+        self, arguments: dict[str, Any], _context: ToolContext
+    ) -> ToolResult:
+        from deep_research.surface.scaffold import scaffold_surface_from_workflow
+
+        ast = _resolve_current_ast(arguments, self._state_getter)
+        try:
+            surface = scaffold_surface_from_workflow(ast)
+            new_ast = mutations.set_surface(ast, surface)
+        except (ValueError, mutations.BlockMutationError) as exc:
+            return _error_result(f"scaffold_surface failed: {exc}")
+        new_ast = _commit_to_cache(new_ast, self._state_setter)
+        return _ast_result(new_ast)
+
+
 # Canonical toolset the EDIT-lane agent (``designer_edit_workflow.yaml``) may
 # call. Excludes ``propose_workflow``/``build_blueprint`` (build-lane only — the
 # edit agent must NOT rebuild). The YAML's ``edit_agent`` node lists exactly
@@ -3610,6 +3803,9 @@ _EDIT_AGENT_TOOL_NAMES: frozenset[str] = frozenset(
         "bind_tool_to_block",
         "set_model_tier",
         "update_pool",
+        # declarative agent UI (surface) authoring
+        "set_surface",
+        "scaffold_surface",
         # read-only inspection
         "inspect_ast_summary",
         "inspect_assets",
@@ -3763,6 +3959,15 @@ def builtin_designer_tools(
             state_setter=state_setter,
         ),
         UpdateWorkflowMetaTool(
+            state_getter=state_getter,
+            state_setter=state_setter,
+        ),
+        # Declarative agent UI (surface) authoring
+        SetSurfaceTool(
+            state_getter=state_getter,
+            state_setter=state_setter,
+        ),
+        ScaffoldSurfaceTool(
             state_getter=state_getter,
             state_setter=state_setter,
         ),

@@ -34,7 +34,7 @@ from deep_research.services.llm.types import ModelTier
 logger = logging.getLogger(__name__)
 
 EditRoute = Literal["surgical", "topology", "rebuild", "unsupported"]
-EditLevel = Literal["property", "prompt", "tool", "node"]
+EditLevel = Literal["property", "prompt", "tool", "node", "surface"]
 
 # Config fields each level may touch (used to DERIVE the allow-list; the guard
 # enforces node SCOPE, these document intent + feed the FE summary).
@@ -172,7 +172,9 @@ def _classifier_prompt(intent: str, ast_summary: Any) -> str:
         "- unsupported: the request is not an actionable workflow edit (a "
         "question, impossible, or too ambiguous). Set 'unsupported_reason'.\n\n"
         "LEVELS (list all that apply for a surgical edit): property, prompt, "
-        "tool, node.\n\n"
+        "tool, node, surface (the agent's UI — its form fields, buttons, "
+        "result regions, or adding/removing the UI itself; touches NO workflow "
+        "nodes).\n\n"
         "target_node_ids: copy the EXACT ids (verbatim) of the nodes this edit "
         "touches, from the summary below. Never invent ids. Leave empty only if "
         "truly workflow-wide.\n"

@@ -1697,7 +1697,47 @@ def normalize_ast(
     return new_ast, list(ctx.fixes)
 
 
+def normalize_surface_in_definition(definition: dict[str, Any]) -> None:
+    """Fill the ``Surface`` runtime invariants IN PLACE before persist (Pillar 4).
+
+    The declarative UI at ``definition["surface"]`` is stored as raw JSON. The
+    write-time gate (``schemas/agent_v2.py`` ``_enforce_surface_validation`` ->
+    ``surface.validation.validate_surface``) *validates* the surface but does not
+    *default* it, so a component authored/emitted without a ``children`` (or
+    ``props``) key would persist with the key absent. The frontend renderer then
+    reads it as ``undefined`` and crashes on ``component.children.length`` — the
+    top-level ``<ErrorBoundary name="App">`` blank-screen class of bug.
+
+    This mirrors the frontend read-time normalizer
+    (``frontend/src/lib/surfaceSchema.ts`` ``normalizeSurface``): every component
+    gets ``children: []`` + ``props: {}`` and every ``layout.sections`` entry gets
+    ``children: []``. It is additive (``setdefault`` only — never overwrites an
+    existing value), non-lossy (unknown keys untouched), idempotent, and tolerant
+    of malformed input (never raises; structural rejection is ``validate_surface``'s
+    job). No-op when there is no dict ``surface``.
+    """
+    surface = definition.get("surface")
+    if not isinstance(surface, dict):
+        return
+
+    components = surface.get("components")
+    if isinstance(components, list):
+        for component in components:
+            if isinstance(component, dict):
+                component.setdefault("children", [])
+                component.setdefault("props", {})
+
+    layout = surface.get("layout")
+    if isinstance(layout, dict):
+        sections = layout.get("sections")
+        if isinstance(sections, list):
+            for section in sections:
+                if isinstance(section, dict):
+                    section.setdefault("children", [])
+
+
 __all__ = [
     "NormalizationFix",
     "normalize_ast",
+    "normalize_surface_in_definition",
 ]

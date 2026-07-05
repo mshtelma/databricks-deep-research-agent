@@ -192,6 +192,21 @@ class OrchestrationConfig:
     inherit the global ``followup_live_search_enabled`` setting; ``True``/``False``
     => override for this run only."""
 
+    surface_inputs: dict[str, Any] | None = None
+    """Structured inputs from the agent's UI surface (Agent UI panel).
+
+    Validated at the API boundary (scalar values, identifier keys, reserved
+    pipeline keys rejected, size-capped) and seeded into the workflow's initial
+    state by the framework orchestrator, making each key available as a
+    ``{placeholder}`` in node prompts. ``None`` => no surface inputs."""
+
+    surface_action: str | None = None
+    """The surface binding action that triggered this run (Agent UI panel).
+
+    Names which binding's structured-output slots the post-synthesis
+    structuring pass should fill. ``None`` => fall back to the sole slotted
+    binding (first-by-order with a warning when several exist)."""
+
 
 @dataclass
 class OrchestrationResult:

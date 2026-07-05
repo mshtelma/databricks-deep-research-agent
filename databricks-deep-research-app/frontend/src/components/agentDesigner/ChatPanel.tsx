@@ -910,6 +910,17 @@ function WorkflowSynopsisCard({ synopsis }: { synopsis: ArchitectSynopsis }): Re
           </p>
         )}
 
+        {synopsis.ui && (
+          <p className="mt-2 text-[11px] leading-[1.45] text-db-gray-text">
+            <span className="font-medium text-db-navy-800">UI: </span>
+            {synopsis.ui.components} component
+            {synopsis.ui.components === 1 ? '' : 's'}
+            {synopsis.ui.actions.length > 0 &&
+              ` · actions: ${synopsis.ui.actions.join(', ')}`}
+            {' — see the Preview tab'}
+          </p>
+        )}
+
         {synopsis.warnings.length > 0 && (
           <ul className="mt-2 list-disc space-y-0.5 pl-5 text-[11px] leading-[1.4] text-db-yellow-800">
             {synopsis.warnings.map((w, idx) => (

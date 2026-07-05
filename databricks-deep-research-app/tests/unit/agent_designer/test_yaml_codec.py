@@ -8,11 +8,15 @@ NOT run in CI, which let the export/import ``registry_version`` mismatch
 
 Invariants asserted (topology-agnostic — every workflow shape, not one example):
   1. ``serialize_to_yaml`` defaults to the CURRENT ``REGISTRY_VERSION``.
-  2. ``parse_and_validate_yaml(serialize_to_yaml(D)) == load(D).model_dump()``
+  2. For metadata-free definitions the imported ``definition`` equals
+     ``load(D).model_dump()`` (the framework projection) with zero warnings —
      for sequence / parallel / nested / tool-bearing definitions.
   3. A freshly-exported document re-imports without raising (the regression).
   4. Serialisation is deterministic.
   5. No secret-like keys leak into exported YAML.
+  6. Designer metadata survives the export→import round trip LOSSLESSLY on a
+     ``build_blueprint``-stamped definition (the silent-drop regression), and
+     importing twice is a fixed point.
 """
 
 from __future__ import annotations
@@ -23,12 +27,15 @@ import pytest
 import yaml
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 
+from deep_research.agent_designer.blueprint import build_blueprint
 from deep_research.agent_designer.registry import REGISTRY_VERSION
 from deep_research.agent_designer.yaml_export import serialize_to_yaml
 from deep_research.agent_designer.yaml_import import (
     YamlImportError,
     parse_and_validate_yaml,
 )
+from deep_research.agent_designer.yaml_metadata import DESIGNER_METADATA_KEYS
+from deep_research.surface import scaffold_surface_from_workflow
 
 # ---------------------------------------------------------------------------
 # Topology fixtures — each is a minimal, structurally-valid WorkflowDefinition.
@@ -163,11 +170,71 @@ def test_default_registry_version_matches_constant() -> None:
 
 
 @_TOPOLOGIES
-def test_round_trip_preserves_definition(definition: dict[str, Any]) -> None:
-    """parse_and_validate_yaml(serialize_to_yaml(D)) == load(D).model_dump()."""
+def test_round_trip_framework_projection_equality(definition: dict[str, Any]) -> None:
+    """Metadata-free docs: imported definition == load(D).model_dump(), no warnings."""
     expected = load_workflow_from_dict(definition).model_dump()
-    round_tripped = parse_and_validate_yaml(serialize_to_yaml(definition).encode("utf-8"))
-    assert round_tripped == expected
+    result = parse_and_validate_yaml(serialize_to_yaml(definition).encode("utf-8"))
+    assert result.definition == expected
+    assert result.warnings == []
+
+
+def _stamped_blueprint() -> dict[str, Any]:
+    """A real build_blueprint AST — carries every designer metadata key.
+
+    ``surface`` is stamped via the deterministic scaffold (its writers are the
+    surface authoring tools, not the blueprint), so the round-trip guard also
+    covers a UI-carrying agent export.
+    """
+    signature = {
+        "asset_signature": "web_only",
+        "retrieval_pattern": "independent_lanes",
+        "question_class": "open_research",
+        "primary_evidence_kind": "web_articles",
+        "expected_output_shape": "structured_report",
+        "independent_workstreams_count": 2,
+        "step_dependencies_present": False,
+        "iteration_required": False,
+        "output_aggregation_kind": "cross_concern_synthesis",
+        "lane_descriptions": ["first concern", "second concern"],
+    }
+    blueprint = build_blueprint(signature, "codec round-trip fixture intent", [])
+    blueprint["surface"] = scaffold_surface_from_workflow(blueprint)
+    return blueprint
+
+
+def test_round_trip_preserves_designer_metadata() -> None:
+    """The silent-drop regression: every designer metadata key survives import.
+
+    ``structural_fingerprint`` is recomputed on import by design; for a clean
+    round trip (structure unchanged) the recomputed value equals the stamped
+    one, so plain equality still holds for all keys.
+    """
+    source = _stamped_blueprint()
+    metadata_keys = [spec.key for spec in DESIGNER_METADATA_KEYS]
+    for key in metadata_keys:
+        assert key in source, f"blueprint fixture must stamp {key}"
+    result = parse_and_validate_yaml(serialize_to_yaml(source).encode("utf-8"))
+    assert result.warnings == []
+    for key in metadata_keys:
+        assert result.definition[key] == source[key], key
+
+
+def test_stamped_export_has_no_secret_keys() -> None:
+    """The no-secrets export invariant holds for metadata-bearing documents too."""
+    text = serialize_to_yaml(_stamped_blueprint()).lower()
+    for needle in ("password", "secret", "api_key", "access_token", "client_secret"):
+        assert needle not in text, f"unexpected secret-like key {needle!r} in export"
+
+
+def test_import_is_a_fixed_point() -> None:
+    """export→import→export→import converges: the second pass changes nothing."""
+    source = _stamped_blueprint()
+    first = parse_and_validate_yaml(serialize_to_yaml(source).encode("utf-8"))
+    second = parse_and_validate_yaml(
+        serialize_to_yaml(first.definition).encode("utf-8")
+    )
+    assert second.warnings == []
+    assert second.definition == first.definition
 
 
 # ---------------------------------------------------------------------------
@@ -227,9 +294,9 @@ def test_missing_registry_version_is_accepted() -> None:
     assert "registry_version" not in _SEQUENCE  # fixture really omits the key
     body = yaml.safe_dump(_SEQUENCE, sort_keys=True).encode("utf-8")
     result = parse_and_validate_yaml(body)
-    assert result["id"] == _SEQUENCE["id"]
+    assert result.definition["id"] == _SEQUENCE["id"]
     # The envelope key is stripped and never echoed back into the definition.
-    assert "registry_version" not in result
+    assert "registry_version" not in result.definition
 
 
 def test_null_registry_version_is_accepted() -> None:
@@ -238,7 +305,7 @@ def test_null_registry_version_is_accepted() -> None:
         {"registry_version": None, **_SEQUENCE}, sort_keys=True
     ).encode("utf-8")
     result = parse_and_validate_yaml(body)
-    assert result["id"] == _SEQUENCE["id"]
+    assert result.definition["id"] == _SEQUENCE["id"]
 
 
 def test_matching_registry_version_is_accepted() -> None:
@@ -247,7 +314,7 @@ def test_matching_registry_version_is_accepted() -> None:
         {"registry_version": REGISTRY_VERSION, **_SEQUENCE}, sort_keys=True
     ).encode("utf-8")
     result = parse_and_validate_yaml(body)
-    assert result["id"] == _SEQUENCE["id"]
+    assert result.definition["id"] == _SEQUENCE["id"]
 
 
 def test_mismatched_registry_version_is_rejected_with_guidance() -> None:

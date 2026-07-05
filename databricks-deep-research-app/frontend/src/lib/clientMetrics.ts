@@ -17,6 +17,7 @@ export const CLIENT_SIGNAL_NAMES = [
   'revisions_tab_opened',
   'agent_run_clicked',
   'agent_visibility_changed',
+  'surface_preview_real_run',
 ] as const
 
 export type ClientSignalName = (typeof CLIENT_SIGNAL_NAMES)[number]

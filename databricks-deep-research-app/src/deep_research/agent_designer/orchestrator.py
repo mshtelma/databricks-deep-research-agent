@@ -1167,6 +1167,27 @@ def _build_architect_synopsis(
     else:
         headline = f"Built a {topo_display} workflow"
 
+    # Declarative UI summary — present only when the AST carries a surface.
+    ui: dict[str, Any] | None = None
+    surface = safe_ast.get("surface") if isinstance(safe_ast, dict) else None
+    if isinstance(surface, dict):
+        surface_components = surface.get("components")
+        surface_bindings = surface.get("bindings")
+        ui = {
+            "components": (
+                len(surface_components)
+                if isinstance(surface_components, list)
+                else 0
+            ),
+            "actions": [
+                str(b.get("action"))
+                for b in (
+                    surface_bindings if isinstance(surface_bindings, list) else []
+                )
+                if isinstance(b, dict) and b.get("action")
+            ],
+        }
+
     return ArchitectSynopsisEvent(
         headline=headline,
         topology=topology,
@@ -1176,6 +1197,7 @@ def _build_architect_synopsis(
         tools=tool_names,
         outputs=outputs,
         warnings=warnings,
+        ui=ui,
     )
 
 

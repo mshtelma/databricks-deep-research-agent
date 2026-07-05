@@ -190,11 +190,13 @@ def _is_permission_denied_error(exc: BaseException) -> bool:
 _TEMPLATE_DIR = resolve_package_data_dir(Path(__file__), "agent-shell-app")
 
 # Files copied verbatim into the zip. Keys are template-relative paths;
-# values are output paths inside the zip (often the same).
+# values are output paths inside the zip (often the same). The ``static/``
+# tree (the built React shell bundle: index.html + assets/*) is bundled
+# separately by a recursive walk below — a single-file entry can't express the
+# multi-file build.
 _VERBATIM_FILES: tuple[tuple[str, str], ...] = (
     ("app.py", "app.py"),
     ("entrypoint.sh", "entrypoint.sh"),
-    ("static/index.html", "static/index.html"),
 )
 
 # .j2 templates rendered with str-format-style Jinja (StrictUndefined catches
@@ -663,6 +665,19 @@ class ShellAppExporter:
                 info.compress_type = zipfile.ZIP_DEFLATED
                 info.external_attr = _zip_mode_bits(dst)
                 zf.writestr(info, _load_template(src))
+            # Static bundle: recursive, SORTED walk of the built React shell
+            # (index.html + assets/*) → deterministic multi-file packaging.
+            # Read as bytes (hashed assets are opaque); the committed fallback
+            # is a single index.html until `make build` replaces it.
+            static_root = _TEMPLATE_DIR / "static"
+            for path in sorted(static_root.rglob("*")):
+                if not path.is_file():
+                    continue
+                rel = path.relative_to(_TEMPLATE_DIR).as_posix()
+                info = zipfile.ZipInfo(rel, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = _zip_mode_bits(rel)
+                zf.writestr(info, path.read_bytes())
             for src, dst in _JINJA_FILES:
                 info = zipfile.ZipInfo(dst, date_time=(1980, 1, 1, 0, 0, 0))
                 info.compress_type = zipfile.ZIP_DEFLATED
