@@ -1,0 +1,66 @@
+{
+  "title": "Agent Designer V4",
+  "panels": [
+    {
+      "title": "Token Refresh Rate",
+      "type": "graph",
+      "targets": [
+        {"expr": "rate(agent_designer.token_refresh_attempt[5m])", "legendFormat": "attempts"}
+      ]
+    },
+    {
+      "title": "Token Refresh Failures",
+      "type": "graph",
+      "targets": [
+        {"expr": "rate(agent_designer.token_refresh_failure[5m])", "legendFormat": "{{error_kind}}"}
+      ]
+    },
+    {
+      "title": "Validation Errors",
+      "type": "graph",
+      "targets": [
+        {"expr": "rate(agent_designer.validation_error[5m])", "legendFormat": "{{error_kind}}"}
+      ]
+    },
+    {
+      "title": "ETag Conflicts",
+      "type": "graph",
+      "targets": [
+        {"expr": "rate(agent_designer.save_etag_conflict[5m])", "legendFormat": "conflicts"}
+      ]
+    },
+    {
+      "title": "Registry Fetch p99",
+      "type": "graph",
+      "targets": [
+        {"expr": "histogram_quantile(0.99, agent_designer.registry_fetch_ms_bucket)", "legendFormat": "p99"}
+      ]
+    },
+    {
+      "title": "Save Latency p95",
+      "type": "graph",
+      "targets": [
+        {"expr": "histogram_quantile(0.95, agent_designer.designer_save_latency_bucket)", "legendFormat": "p95"}
+      ]
+    },
+    {
+      "title": "Chat Mutations",
+      "type": "graph",
+      "targets": [
+        {"expr": "rate(agent_designer.chat_mutation[5m])", "legendFormat": "{{outcome}}"}
+      ]
+    }
+  ],
+  "alerts": [
+    {
+      "name": "TokenRefreshFailuresHigh",
+      "expr": "rate(agent_designer.token_refresh_failure[5m]) > 0.1",
+      "for": "5m"
+    },
+    {
+      "name": "ValidationErrorsHigh",
+      "expr": "rate(agent_designer.validation_error[5m]) / rate(agent_designer.validate_total[5m]) > 0.05",
+      "for": "5m"
+    }
+  ]
+}
