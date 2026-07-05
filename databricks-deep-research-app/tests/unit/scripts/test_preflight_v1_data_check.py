@@ -37,7 +37,10 @@ count_rows = _mod.count_rows
 # Fixtures
 # ---------------------------------------------------------------------------
 
-FAKE_DSN = "postgresql://user:pass@localhost:5432/testdb"
+POSTGRESQL_SCHEME = "postgresql://"
+ASYNC_PG_SCHEME = "postgresql+asyncpg://"
+
+FAKE_DSN = f"{POSTGRESQL_SCHEME}user:pass@localhost:5432/testdb"
 
 SAMPLE_ROWS = [
     {"id": 1, "name": "agent-alpha", "config": '{"k": "v"}'},
@@ -222,9 +225,11 @@ async def test_jsonl_roundtrip(tmp_path: Path) -> None:
 
 def test_resolve_connection_string_cli_override(monkeypatch: pytest.MonkeyPatch) -> None:
     """--connection-string takes precedence over DATABASE_URL."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql://env-host/envdb")
-    result = resolve_connection_string("postgresql://cli-host/clidb")
-    assert result == "postgresql://cli-host/clidb"
+    env_dsn = f"{POSTGRESQL_SCHEME}env-host/envdb"
+    cli_dsn = f"{POSTGRESQL_SCHEME}cli-host/clidb"
+    monkeypatch.setenv("DATABASE_URL", env_dsn)
+    result = resolve_connection_string(cli_dsn)
+    assert result == cli_dsn
 
 
 # ---------------------------------------------------------------------------
@@ -233,6 +238,6 @@ def test_resolve_connection_string_cli_override(monkeypatch: pytest.MonkeyPatch)
 
 def test_resolve_connection_string_strips_asyncpg_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
     """DATABASE_URL with +asyncpg driver is normalised for asyncpg.connect()."""
-    monkeypatch.setenv("DATABASE_URL", "postgresql+asyncpg://u:p@host/db")
+    monkeypatch.setenv("DATABASE_URL", f"{ASYNC_PG_SCHEME}u:p@host/db")
     result = resolve_connection_string(None)
-    assert result == "postgresql://u:p@host/db"
+    assert result == f"{POSTGRESQL_SCHEME}u:p@host/db"

@@ -68,7 +68,7 @@ Run this script **before** applying migration 024 to any non-development environ
 
 | Argument | Type | Description |
 |---|---|---|
-| `--connection-string DSN` | string, optional | asyncpg-compatible PostgreSQL DSN. Overrides `DATABASE_URL` env var. Format: `postgresql://user:pass@host:port/db` |
+| `--connection-string DSN` | string, optional | asyncpg-compatible PostgreSQL DSN. Overrides `DATABASE_URL` env var. Use a secret-manager value rather than an inline literal. |
 | `--export-path PATH` | path, optional | Write existing rows to this file as JSONL before the drop. Required when the table is non-empty and `--check-only` is not set. |
 | `--check-only` | flag | Count rows and report only — never export. Exits 2 if the table is non-empty regardless of `--export-path`. |
 
@@ -91,7 +91,7 @@ Exits 0 with `OK: custom_agents is empty; safe to drop` if the table is empty.
 **2. Export rows before dropping (production):**
 ```bash
 python scripts/preflight_v1_data_check.py \
-  --connection-string "postgresql://app_user:secret@prod-host:5432/deep_research" \
+  --connection-string "$PROD_DATABASE_URL" \
   --export-path /tmp/custom_agents_backup.jsonl
 ```
 Exits 0 with `EXPORTED N row(s) to /tmp/custom_agents_backup.jsonl; safe to drop after backup verified`.
