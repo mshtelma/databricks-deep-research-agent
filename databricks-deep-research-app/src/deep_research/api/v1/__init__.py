@@ -19,6 +19,7 @@ from deep_research.api.v1 import (
     jobs,
     messages,
     metrics,
+    observability,
     preferences,
     research,
     skill_folders,
@@ -62,6 +63,10 @@ router.include_router(config.router, tags=["Config"])
 router.include_router(hitl.router, tags=["HITL"])
 # Client metrics ingest endpoint (US-614)
 router.include_router(metrics.router, prefix="/metrics", tags=["Metrics"])
+# Client-side error reports -> server logs (Pillar 3 observability)
+router.include_router(
+    observability.router, prefix="/observability", tags=["Observability"]
+)
 # Agent Designer routes (US-106)
 router.include_router(agent_designer.router, prefix="/agent-designer", tags=["Agent Designer"])
 # AgentV2 CRUD routes (US-105)

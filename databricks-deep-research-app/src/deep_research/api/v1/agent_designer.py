@@ -2,6 +2,7 @@
 
 POST   /api/v1/agent-designer/validate
 GET    /api/v1/agent-designer/registry
+POST   /api/v1/agent-designer/scaffold-surface
 POST   /api/v1/agent-designer/chat
 POST   /api/v1/agent-designer/custom-tools
 GET    /api/v1/agent-designer/custom-tools
@@ -802,6 +803,40 @@ async def import_yaml(request: Request, _user: CurrentUser) -> ImportYamlRespons
         workflow_summary=summary,
         warnings=result.warnings,
     )
+
+
+# ---------- /scaffold-surface ----------
+
+
+class ScaffoldSurfaceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    definition: dict[str, Any]
+
+
+class ScaffoldSurfaceResponse(BaseModel):
+    surface: dict[str, Any]
+
+
+@router.post("/scaffold-surface", response_model=ScaffoldSurfaceResponse)
+async def scaffold_surface(
+    req: ScaffoldSurfaceRequest,
+    _user: CurrentUser,
+) -> ScaffoldSurfaceResponse:
+    """Derive the default declarative UI surface for a workflow definition.
+
+    Stateless: no database, no LLM. Returns a surface dict directly derived
+    from ``definition["required_inputs"]`` (plus the agent name). A
+    ``ValueError`` from the scaffold (e.g. reserved or non-identifier input
+    keys) is returned as HTTP 422.
+    """
+    from deep_research.surface.scaffold import scaffold_surface_from_workflow
+
+    try:
+        surface = scaffold_surface_from_workflow(req.definition)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return ScaffoldSurfaceResponse(surface=surface)
 
 
 # ---------- /export-yaml ----------

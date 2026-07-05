@@ -471,3 +471,96 @@ class TestChatServiceUpdateTitleFromMessage:
         assert chat_without_title.title is not None
         assert len(chat_without_title.title) <= 103  # 100 + "..."
         assert chat_without_title.title.endswith("...")
+
+
+class TestChatServiceUpdateChatSurfaceState:
+    """Tests for ChatService.update_chat surface_state_patch parameter."""
+
+    @pytest.mark.asyncio
+    async def test_surface_state_patch_persisted(
+        self, mock_db_session: AsyncMock, chat_factory
+    ):
+        """Providing surface_state_patch merges it into metadata_."""
+        chat_id = uuid4()
+        user_id = "test-user-123"
+        existing_chat = chat_factory(id=chat_id, user_id=user_id)
+        existing_chat.metadata_ = {}
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_chat
+        mock_db_session.execute.return_value = mock_result
+
+        service = ChatService(mock_db_session)
+
+        patch = {
+            "agent-1": {
+                "data_model": {"key": "value"},
+                "surface_etag": "etag-1",
+            }
+        }
+
+        result = await service.update_chat(
+            chat_id=chat_id, user_id=user_id, surface_state_patch=patch
+        )
+
+        assert result is not None
+        assert result.metadata_["surface_state"]["agent-1"]["data_model"] == {"key": "value"}
+        assert result.metadata_["surface_state"]["agent-1"]["surface_etag"] == "etag-1"
+
+    @pytest.mark.asyncio
+    async def test_surface_state_patch_merges_into_existing(
+        self, mock_db_session: AsyncMock, chat_factory
+    ):
+        """A second patch merges with the existing surface_state rather than replacing it."""
+        chat_id = uuid4()
+        user_id = "test-user-123"
+        existing_chat = chat_factory(id=chat_id, user_id=user_id)
+        existing_chat.metadata_ = {
+            "surface_state": {
+                "agent-1": {"surface_etag": "existing-etag"},
+            }
+        }
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_chat
+        mock_db_session.execute.return_value = mock_result
+
+        service = ChatService(mock_db_session)
+
+        patch = {"agent-2": {"data_model": {"new": True}}}
+
+        result = await service.update_chat(
+            chat_id=chat_id, user_id=user_id, surface_state_patch=patch
+        )
+
+        assert result is not None
+        ss = result.metadata_["surface_state"]
+        # original agent-1 preserved
+        assert ss["agent-1"]["surface_etag"] == "existing-etag"
+        # new agent-2 added
+        assert ss["agent-2"]["data_model"] == {"new": True}
+
+    @pytest.mark.asyncio
+    async def test_surface_state_none_leaves_metadata_unchanged(
+        self, mock_db_session: AsyncMock, chat_factory
+    ):
+        """When surface_state_patch is None, metadata_ is untouched."""
+        chat_id = uuid4()
+        user_id = "test-user-123"
+        existing_chat = chat_factory(id=chat_id, user_id=user_id, title="Old")
+        existing_chat.metadata_ = {"other_key": "value"}
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = existing_chat
+        mock_db_session.execute.return_value = mock_result
+
+        service = ChatService(mock_db_session)
+
+        result = await service.update_chat(
+            chat_id=chat_id, user_id=user_id, title="New", surface_state_patch=None
+        )
+
+        assert result is not None
+        # other_key still there, no surface_state injected
+        assert result.metadata_["other_key"] == "value"
+        assert "surface_state" not in result.metadata_

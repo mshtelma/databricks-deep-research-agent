@@ -509,6 +509,12 @@ async def create_agent(
     # blocked at request parse; the LLM critic stays advisory/background.
     _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
+    # Reload the DB-generated timestamps inside the async session: created_at
+    # (server_default) / updated_at (onupdate=now()) are expired after the write
+    # regardless of expire_on_commit, so the synchronous
+    # AgentV2Response.model_validate(agent) below would otherwise lazy-load them
+    # outside the greenlet → MissingGreenlet (a 500 on an otherwise-durable save).
+    await session.refresh(agent, attribute_names=["created_at", "updated_at"])
     if needs_bg:
         background_tasks.add_task(
             _validate_in_background,
@@ -604,6 +610,12 @@ async def update_agent(
         # Deterministic coverage gate (force-overridable) — only on a definition change.
         _raise_if_coverage_blocks(agent.definition, force=force)
     await session.commit()
+    # Reload the DB-generated timestamps inside the async session: created_at
+    # (server_default) / updated_at (onupdate=now()) are expired after the write
+    # regardless of expire_on_commit, so the synchronous
+    # AgentV2Response.model_validate(agent) below would otherwise lazy-load them
+    # outside the greenlet → MissingGreenlet (a 500 on an otherwise-durable save).
+    await session.refresh(agent, attribute_names=["created_at", "updated_at"])
     if needs_bg:
         background_tasks.add_task(
             _validate_in_background,

@@ -35,6 +35,7 @@ from deep_research.agent_designer.yaml_import import (
     parse_and_validate_yaml,
 )
 from deep_research.agent_designer.yaml_metadata import DESIGNER_METADATA_KEYS
+from deep_research.surface import scaffold_surface_from_workflow
 
 # ---------------------------------------------------------------------------
 # Topology fixtures — each is a minimal, structurally-valid WorkflowDefinition.
@@ -178,7 +179,12 @@ def test_round_trip_framework_projection_equality(definition: dict[str, Any]) ->
 
 
 def _stamped_blueprint() -> dict[str, Any]:
-    """A real build_blueprint AST — carries every designer metadata key."""
+    """A real build_blueprint AST — carries every designer metadata key.
+
+    ``surface`` is stamped via the deterministic scaffold (its writers are the
+    surface authoring tools, not the blueprint), so the round-trip guard also
+    covers a UI-carrying agent export.
+    """
     signature = {
         "asset_signature": "web_only",
         "retrieval_pattern": "independent_lanes",
@@ -191,7 +197,9 @@ def _stamped_blueprint() -> dict[str, Any]:
         "output_aggregation_kind": "cross_concern_synthesis",
         "lane_descriptions": ["first concern", "second concern"],
     }
-    return build_blueprint(signature, "codec round-trip fixture intent", [])
+    blueprint = build_blueprint(signature, "codec round-trip fixture intent", [])
+    blueprint["surface"] = scaffold_surface_from_workflow(blueprint)
+    return blueprint
 
 
 def test_round_trip_preserves_designer_metadata() -> None:

@@ -96,6 +96,9 @@ class ArchitectSynopsisEvent(_SSEBase):
     outputs: list[str] = []
     # e.g. "1 lane still uses a default prompt" (from placeholder_pending_nodes).
     warnings: list[str] = []
+    # Present when the agent carries a declarative UI (``definition.surface``):
+    # {components: int, actions: list[str]}. None when there is no UI.
+    ui: dict[str, Any] | None = None
 
 
 class CriticReviewEvent(_SSEBase):

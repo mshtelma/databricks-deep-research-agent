@@ -74,6 +74,21 @@ const ENTERPRISE_SOURCE_TYPES = new Set(['genie', 'vector_search', 'knowledge_as
  * status contract), render it from the shared status->label map. Events
  * without a status keep their existing per-eventType formatting below.
  */
+/** Humanized label for custom research phases (e.g. the structured-output pass). */
+function formatPhase(event: StreamEvent, verb: string): string {
+  const raw =
+    (event as { phaseName?: unknown }).phaseName ??
+    (event as { phase_name?: unknown }).phase_name
+  const name = typeof raw === 'string' ? raw : ''
+  if (name === 'structured_output') {
+    if (verb === 'Running') return 'Structuring results...'
+    if (verb === 'Finished') return 'Results structured'
+    return 'Structured output skipped'
+  }
+  const pretty = name.replace(/_/g, ' ') || 'phase'
+  return `${verb} ${pretty}...`
+}
+
 export function formatActivityLabel(event: StreamEvent): string {
   const status = (event as { status?: unknown }).status
   if (typeof status === 'string' && status in RUN_STATUS_LABELS) {
@@ -118,6 +133,12 @@ export function formatActivityLabel(event: StreamEvent): string {
       return 'Content revised'
     case 'persistence_completed':
       return 'Saved to database'
+    case 'phase_started':
+      return formatPhase(event, 'Running')
+    case 'phase_completed':
+      return formatPhase(event, 'Finished')
+    case 'phase_error':
+      return formatPhase(event, 'Skipped')
     case 'claim_verified':
       return 'Claim verified'
     case 'verification_summary':

@@ -60,4 +60,11 @@ export interface QuerySubmission {
    * undefined => inherit the global followup_live_search flag.
    */
   allowLiveSearch?: boolean;
+  /**
+   * Declarative-UI surface inputs seeded into the workflow's initial state.
+   * Keys are safe non-reserved identifiers usable as {placeholders} in prompts.
+   */
+  surfaceInputs?: Record<string, string | number | boolean>;
+  /** Surface binding action that triggered this run (structured-output slots). */
+  surfaceAction?: string;
 }

@@ -5,7 +5,8 @@ import { Message, Source, ResearchPlan } from '@/types';
 import { cn } from '@/lib/utils';
 import { Card, CardContent } from '@/components/ui/card';
 import { safeOpenUrl } from '@/utils/urlSafety';
-import { MarkdownRenderer, CitationContext } from '@/components/common';
+import { buildCitationDataMap } from '@/lib/citations';
+import { MarkdownRenderer } from '@/components/common';
 import { ActiveCitationContext, EvidenceCard, SourceGroupedCitations } from '@/components/citations';
 import { MessageExportMenu } from './MessageExportMenu';
 import type { Claim, VerificationSummary } from '@/types/citation';
@@ -90,31 +91,10 @@ export function AgentMessage({
   }, [structuredOutput]);
 
   // Build citation data map for MarkdownRenderer using ALL citation keys
-  // This allows multi-marker sentences like "[Arxiv][Arxiv-2]" to resolve correctly
+  // (shared with agent-surface structured-output cells via lib/citations).
   const citationData = React.useMemo(() => {
-    if (!enableCitations || claims.length === 0) return undefined;
-
-    const map = new Map<string, CitationContext>();
-    claims.forEach((claim) => {
-      // Get all keys: prefer citationKeys array, fallback to single citationKey
-      const keys = claim.citationKeys || (claim.citationKey ? [claim.citationKey] : []);
-      if (keys.length === 0) return; // Skip claims without citation keys
-
-      // Extract URL from the primary citation's evidence span
-      const primaryCitation = claim.citations[0];
-      const url = primaryCitation?.evidenceSpan?.source?.url ||
-                  (primaryCitation?.evidenceSpan as { sourceUrl?: string })?.sourceUrl;
-
-      // Map ALL keys to the same claim context
-      for (const key of keys) {
-        map.set(key, {
-          claim,
-          verdict: claim.verificationVerdict,
-          url,
-        });
-      }
-    });
-    return map;
+    if (!enableCitations) return undefined;
+    return buildCitationDataMap(claims);
   }, [claims, enableCitations]);
 
   // Citation evidence-card popover: hover opens, click pins, a hover-bridge keeps

@@ -605,6 +605,18 @@ export function useStreamingQuery(
         break;
       }
 
+      case 'phase_completed': {
+        // The structured-output wires run AFTER persistence and write the
+        // filled slots via a targeted update; refetch chatFull so the panel
+        // swaps its pending skeletons for the real data.
+        const phaseEvent = data as { phaseName?: string; phase_name?: string };
+        const phaseName = phaseEvent.phaseName ?? phaseEvent.phase_name;
+        if (phaseName === 'structured_output' && chatId) {
+          queryClient.invalidateQueries({ queryKey: [...CHAT_FULL_KEY, chatId] });
+        }
+        break;
+      }
+
       case 'error': {
         const errorEvent = data as StreamErrorEvent;
         const err = new Error(errorEvent.errorMessage || 'Research failed');
@@ -625,7 +637,7 @@ export function useStreamingQuery(
         break;
       }
     }
-  }, [isDuplicateEvent]);
+  }, [isDuplicateEvent, chatId, queryClient]);
 
   /**
    * Handle a single job event from the SSE stream.
@@ -792,6 +804,8 @@ export function useStreamingQuery(
         enabledSkills,
         enableCrossSessionMemory,
         allowLiveSearch,
+        surfaceInputs,
+        surfaceAction,
       } = submission;
 
       stopRequestedRef.current = false;
@@ -866,6 +880,8 @@ export function useStreamingQuery(
           enabledSkills: enabledSkills,
           enableCrossSessionMemory: enableCrossSessionMemory,
           allowLiveSearch: allowLiveSearch,
+          surfaceInputs: surfaceInputs,
+          surfaceAction: surfaceAction,
         });
         sessionId = job.sessionId;
         setActiveSessionId(sessionId);

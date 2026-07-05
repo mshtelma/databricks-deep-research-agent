@@ -38,13 +38,20 @@ import {
   type WorkflowValidationResult,
   type AgentV2Response,
 } from '@/api/agentsV2';
-import { getRegistry, validateWorkflow, exportYamlFromDefinition } from '@/api/agentDesigner';
+import {
+  getRegistry,
+  validateWorkflow,
+  exportYamlFromDefinition,
+} from '@/api/agentDesigner';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
+import { SurfacePreviewPanel } from '@/components/surface/SurfacePreviewPanel';
+import { useSurfacePreviewRun } from '@/hooks/useSurfacePreviewRun';
 import { buildDesignerSavePayload } from '@/lib/agentDesignerSave';
 import { slugifyFilename } from '@/lib/download';
 import { AppShell } from '@/components/layout/AppShell';
 import { ErrorBoundary } from '@/components/common/ErrorBoundary';
 import { BlockEditor } from '@/components/agentDesigner/BlockEditor';
+import { SchemaEditorPanel } from '@/components/agentDesigner/SchemaEditorPanel';
 import { ConfigPanel } from '@/components/agentDesigner/ConfigPanel';
 import { EtagConflictModal } from '@/components/agentDesigner/EtagConflictModal';
 import {
@@ -104,7 +111,10 @@ interface DesignerInnerProps {
   registry: RegistryResponse;
 }
 
-function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement {
+function DesignerInner({
+  id,
+  registry,
+}: DesignerInnerProps): React.ReactElement {
   const navigate = useNavigate();
   const isNew = id === 'new';
 
@@ -113,7 +123,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   const etag = useAgentEditorStore((s) => s.etag);
   const isDirty = useAgentEditorStore((s) => s.isDirty);
   const validationErrors = useAgentEditorStore((s) => s.validationErrors);
-  const pendingValidationAgentId = useAgentEditorStore((s) => s.pendingValidationAgentId);
+  const pendingValidationAgentId = useAgentEditorStore(
+    (s) => s.pendingValidationAgentId,
+  );
   const { load, markClean, markValidationErrors, setPendingValidationAgentId } =
     useAgentEditorStore.getState();
 
@@ -132,13 +144,15 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
 
   // Tab state: 'edit' | 'revisions' | 'settings' | 'deployments'
   const [activeTab, setActiveTab] = React.useState<
-    'edit' | 'revisions' | 'settings' | 'deployments'
+    'edit' | 'schema' | 'preview' | 'revisions' | 'settings' | 'deployments'
   >('edit');
   const [selectedRevId, setSelectedRevId] = React.useState<string | null>(null);
 
   // Save-flash state for the top bar status pill
   const [savedFlash, setSavedFlash] = React.useState(false);
-  const [deploySyncError, setDeploySyncError] = React.useState<string | null>(null);
+  const [deploySyncError, setDeploySyncError] = React.useState<string | null>(
+    null,
+  );
   // Non-blocking save notice: shown after a successful save with advisory
   // critic verdict, or after a save failure (non-conflict errors).
   const [saveNotice, setSaveNotice] = React.useState<{
@@ -185,7 +199,10 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     (agentId: string): void => {
       if (validationPollRef.current === agentId) return;
       validationPollRef.current = agentId;
-      setSaveNotice({ kind: 'warning', message: 'Saved ✓ · validating workflow…' });
+      setSaveNotice({
+        kind: 'warning',
+        message: 'Saved ✓ · validating workflow…',
+      });
       void (async () => {
         try {
           for (let i = 0; i < 40; i++) {
@@ -207,7 +224,8 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               'Saved ✓ — validation is still running. Ask the designer chat to re-check it.',
           });
         } finally {
-          if (validationPollRef.current === agentId) validationPollRef.current = null;
+          if (validationPollRef.current === agentId)
+            validationPollRef.current = null;
         }
       })();
     },
@@ -221,7 +239,12 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
       setPendingValidationAgentId(null);
       startValidationPoll(pendingValidationAgentId);
     }
-  }, [pendingValidationAgentId, id, setPendingValidationAgentId, startValidationPoll]);
+  }, [
+    pendingValidationAgentId,
+    id,
+    setPendingValidationAgentId,
+    startValidationPoll,
+  ]);
 
   React.useEffect(() => {
     if (activeTab === 'revisions') {
@@ -270,12 +293,15 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   // -------------------------------------------------------------------------
 
   const agentName = isNew ? localName : (agentQuery.data?.agent.name ?? '');
-  const agentDescription = isNew ? localDescription : (agentQuery.data?.agent.description ?? '');
+  const agentDescription = isNew
+    ? localDescription
+    : (agentQuery.data?.agent.description ?? '');
   const agentIdFull = agentQuery.data?.agent.id ?? '';
   const agentUpdatedAt = agentQuery.data?.agent.updated_at ?? null;
-  const agentIdShort = !isNew && agentQuery.data?.agent.id
-    ? agentQuery.data.agent.id.slice(0, 16)
-    : 'new-draft';
+  const agentIdShort =
+    !isNew && agentQuery.data?.agent.id
+      ? agentQuery.data.agent.id.slice(0, 16)
+      : 'new-draft';
 
   // Export the LIVE canvas (including unsaved edits and brand-new agents) as
   // YAML. Uses the SAME buildDesignerSavePayload transform as Save, so the
@@ -328,7 +354,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
       });
       const { definition } = payload;
 
-      const result = await validateWorkflow(definition as unknown as Record<string, unknown>);
+      const result = await validateWorkflow(
+        definition as unknown as Record<string, unknown>,
+      );
       if (!result.valid) {
         const errs = result.errors as import('@/types/ast').ValidationError[];
         // Coverage-only failures are force-overridable ("Save as draft anyway");
@@ -403,11 +431,16 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
           typeof criticError.critique?.summary === 'string'
             ? criticError.critique.summary
             : criticError.message;
-        setSaveNotice({ kind: 'error', message: `Save blocked by critic: ${summary}` });
+        setSaveNotice({
+          kind: 'error',
+          message: `Save blocked by critic: ${summary}`,
+        });
         return;
       }
       const message =
-        error instanceof Error ? error.message : 'Save failed. Please try again.';
+        error instanceof Error
+          ? error.message
+          : 'Save failed. Please try again.';
       setSaveNotice({ kind: 'error', message });
     },
   });
@@ -443,7 +476,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
         // localStorage may be unavailable (private mode); the chat will fall
         // back to the default agent selection. Not fatal.
       }
-      clientMetrics.emit('agent_run_clicked', undefined, { agent_id: targetAgentId });
+      clientMetrics.emit('agent_run_clicked', undefined, {
+        agent_id: targetAgentId,
+      });
       return targetAgentId;
     },
     onSuccess: (targetAgentId) => {
@@ -456,6 +491,37 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
   function handleRun(): void {
     runMutation.mutate();
   }
+
+  // -------------------------------------------------------------------------
+  // Preview "Run for real" — save-first gate + page-level run controller.
+  // The controller lives HERE (not in the Preview tab panel) because the tab
+  // content unmounts on tab switches and the run's SSE must survive them.
+  //
+  // NOTE: after a first save of /designer/new, saveMutation.onSuccess
+  // navigates to /designer/{id}; react-router re-renders this component
+  // in place (same Route, no key), so the continuation below — and any run
+  // staged in useSurfacePreviewRun — survives. If a `key={id}` remount is
+  // ever introduced, a staged-but-unsubmitted run would be dropped silently
+  // (benign: no job submitted, button re-enables); use the
+  // pendingValidationAgentId store-relay pattern above to carry it across.
+  // -------------------------------------------------------------------------
+
+  const ensureSavedAgentId = React.useCallback(async (): Promise<
+    string | null
+  > => {
+    if (!isNew && !isDirty) return id;
+    // onError already surfaces banners/modals; validation failures resolve
+    // to null without throwing (mutationFn returns null).
+    const result = await saveMutation.mutateAsync().catch(() => null);
+    return result ? result.agent.id : null;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, isNew, isDirty, saveMutation.mutateAsync]);
+
+  const previewRun = useSurfacePreviewRun({
+    agentId: isNew ? null : id,
+    agentName: agentName || 'Untitled agent',
+    ensureSavedAgentId,
+  });
 
   // -------------------------------------------------------------------------
   // Phase 2-B: DeployDropdown — surfaces all 4 deployment modes.
@@ -483,7 +549,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
    *   - ``null`` when validation failed or there's nothing to save (the
    *     deploy dropdown will abort opening any wizard)
    */
-  const ensureSavedRevisionId = React.useCallback(async (): Promise<string | null> => {
+  const ensureSavedRevisionId = React.useCallback(async (): Promise<
+    string | null
+  > => {
     setDeploySyncError(null);
     if (!ast) {
       setDeploySyncError('No workflow canvas is loaded to deploy.');
@@ -504,7 +572,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     if (isNew || isDirty) {
       const result = await saveMutation.mutateAsync();
       if (!result) {
-        setDeploySyncError('Save or validation failed. Fix the workflow before deploying.');
+        setDeploySyncError(
+          'Save or validation failed. Fix the workflow before deploying.',
+        );
         return null;
       }
       resolvedAgentId = result.agent.id;
@@ -525,7 +595,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
       visible_agent_description: agentDescription,
       visible_workflow_name: visiblePayload.definition.name,
       visible_workflow_description: visiblePayload.definition.description,
-      visible_root_child_summary: summarizeRootChildren(visiblePayload.definition),
+      visible_root_child_summary: summarizeRootChildren(
+        visiblePayload.definition,
+      ),
       resolved_revision_id: resolvedRevisionId,
       revision_workflow_name: revision.definition.name,
       revision_workflow_description: revision.definition.description,
@@ -533,7 +605,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
       dirty_at_click: dirtyAtClick,
     });
 
-    if (!deploymentIdentityMatches(revision.definition, visiblePayload.definition)) {
+    if (
+      !deploymentIdentityMatches(revision.definition, visiblePayload.definition)
+    ) {
       setDeploySyncError(
         'The saved revision does not match the visible canvas. Save again before deploying.',
       );
@@ -585,7 +659,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     let cancelled = false;
     void getAgentV2WithEtag(id).then(({ agent }) => {
       if (cancelled) return;
-      setConflictServerAst(agent.definition as unknown as import('@/types/ast').AST);
+      setConflictServerAst(
+        agent.definition as unknown as import('@/types/ast').AST,
+      );
     });
     return () => {
       cancelled = true;
@@ -701,7 +777,8 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
         className="inline-flex items-center gap-1 rounded-db-pill bg-db-lava-100 px-2 py-0.5 font-db-mono text-[11px] font-semibold uppercase tracking-[0.04em] text-db-lava-700"
         aria-label={`${validationErrors.length} validation error${validationErrors.length === 1 ? '' : 's'}`}
       >
-        {validationErrors.length} error{validationErrors.length === 1 ? '' : 's'}
+        {validationErrors.length} error
+        {validationErrors.length === 1 ? '' : 's'}
       </span>
     );
   } else if (isDirty) {
@@ -714,7 +791,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
     statusEl = (
       <span
         className={`inline-flex items-center gap-1 text-[12px] ${
-          savedFlash ? 'text-db-green-700 db-anim-saveFlash' : 'text-db-gray-text'
+          savedFlash
+            ? 'text-db-green-700 db-anim-saveFlash'
+            : 'text-db-gray-text'
         }`}
       >
         <Check size={13} /> Saved
@@ -750,7 +829,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               Agents
             </button>
             <span className="text-db-navy-300">/</span>
-            <span className="font-medium text-db-navy-800">{agentName || 'Untitled Agent'}</span>
+            <span className="font-medium text-db-navy-800">
+              {agentName || 'Untitled Agent'}
+            </span>
           </div>
           <span className="inline-flex items-center gap-1.5 rounded-db-pill bg-db-oat-medium px-2 py-0.5 font-db-mono text-[11px] text-db-gray-text">
             <span className="h-[5px] w-[5px] rounded-full bg-db-green-700" />
@@ -793,7 +874,9 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               <button
                 type="button"
                 onClick={() =>
-                  setActiveTab((t) => (t === 'revisions' ? 'edit' : 'revisions'))
+                  setActiveTab((t) =>
+                    t === 'revisions' ? 'edit' : 'revisions',
+                  )
                 }
                 aria-pressed={activeTab === 'revisions'}
                 className={`inline-flex items-center gap-1.5 rounded-db-md border px-3 py-1.5 text-[13px] font-medium transition-colors ${
@@ -822,7 +905,8 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
               }
               className="inline-flex items-center gap-1.5 rounded-db-md bg-db-navy-800 px-3 py-1.5 text-[13px] font-medium text-white transition-colors hover:bg-db-navy-900 disabled:cursor-not-allowed disabled:opacity-55"
             >
-              <Play size={11} /> {runMutation.isPending ? 'Starting…' : 'Test run'}
+              <Play size={11} />{' '}
+              {runMutation.isPending ? 'Starting…' : 'Test run'}
             </button>
             {/* DeployDropdown surfaces all 4 deployment modes (D1: legacy
                 visibility-flip button removed; chat-picker visibility is
@@ -870,59 +954,65 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
                 <span>{saveNotice.message}</span>
-                {saveNotice.validation && Array.isArray(saveNotice.validation.directives) && saveNotice.validation.directives.length > 0 && (
-                  <ul className="mt-1.5 space-y-0.5">
-                    {saveNotice.validation.directives.map((d, idx) => (
-                      <li
-                        key={`${d.node_path}-${idx}`}
-                        className={`flex items-baseline gap-1 leading-[1.4] ${
-                          d.severity === 'blocking'
-                            ? 'font-medium'
-                            : 'opacity-85'
-                        }`}
-                      >
-                        <span aria-hidden="true">•</span>
-                        <span>
-                          <span className="font-db-mono">{d.node_path}</span>
-                          {': '}
-                          {d.issue}
-                          {' → '}
-                          {d.suggested_action}
-                          {d.severity === 'blocking' && (
-                            <span className="ml-1 rounded-sm bg-current/20 px-1 py-px text-[10px] font-semibold uppercase tracking-[0.04em]">
-                              blocking
-                            </span>
-                          )}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                )}
+                {saveNotice.validation &&
+                  Array.isArray(saveNotice.validation.directives) &&
+                  saveNotice.validation.directives.length > 0 && (
+                    <ul className="mt-1.5 space-y-0.5">
+                      {saveNotice.validation.directives.map((d, idx) => (
+                        <li
+                          key={`${d.node_path}-${idx}`}
+                          className={`flex items-baseline gap-1 leading-[1.4] ${
+                            d.severity === 'blocking'
+                              ? 'font-medium'
+                              : 'opacity-85'
+                          }`}
+                        >
+                          <span aria-hidden="true">•</span>
+                          <span>
+                            <span className="font-db-mono">{d.node_path}</span>
+                            {': '}
+                            {d.issue}
+                            {' → '}
+                            {d.suggested_action}
+                            {d.severity === 'blocking' && (
+                              <span className="ml-1 rounded-sm bg-current/20 px-1 py-px text-[10px] font-semibold uppercase tracking-[0.04em]">
+                                blocking
+                              </span>
+                            )}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
               </div>
               <div className="flex shrink-0 items-center gap-2">
-                {saveNotice.validation && saveNotice.validation.verdict !== 'pass' && (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const v = saveNotice.validation!;
-                      const lines = [
-                        `Please fix these validation issues from the last save (verdict=${v.verdict}): ${v.summary}`,
-                        ...(v.directives ?? []).map(
-                          (d) => `- [${d.node_path}] ${d.issue} — ${d.suggested_action}`,
-                        ),
-                      ];
-                      useAgentEditorStore.getState().setPendingChatSeed(lines.join('\n'));
-                      setSaveNotice(null);
-                    }}
-                    className={`rounded-db-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                      saveNotice.kind === 'error'
-                        ? 'border-db-lava-400 bg-white text-db-lava-700 hover:bg-db-lava-100'
-                        : 'border-db-yellow-500 bg-white text-db-yellow-800 hover:bg-db-yellow-100'
-                    }`}
-                  >
-                    Ask designer to fix
-                  </button>
-                )}
+                {saveNotice.validation &&
+                  saveNotice.validation.verdict !== 'pass' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const v = saveNotice.validation!;
+                        const lines = [
+                          `Please fix these validation issues from the last save (verdict=${v.verdict}): ${v.summary}`,
+                          ...(v.directives ?? []).map(
+                            (d) =>
+                              `- [${d.node_path}] ${d.issue} — ${d.suggested_action}`,
+                          ),
+                        ];
+                        useAgentEditorStore
+                          .getState()
+                          .setPendingChatSeed(lines.join('\n'));
+                        setSaveNotice(null);
+                      }}
+                      className={`rounded-db-md border px-2.5 py-1 text-[11px] font-medium transition-colors ${
+                        saveNotice.kind === 'error'
+                          ? 'border-db-lava-400 bg-white text-db-lava-700 hover:bg-db-lava-100'
+                          : 'border-db-yellow-500 bg-white text-db-yellow-800 hover:bg-db-yellow-100'
+                      }`}
+                    >
+                      Ask designer to fix
+                    </button>
+                  )}
                 <button
                   type="button"
                   aria-label="Dismiss save notice"
@@ -964,14 +1054,20 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                 />
                 <div className="mt-3 flex items-center gap-3 text-[11px] text-db-gray-text">
                   {agentIdFull && (
-                    <span className="inline-flex items-center gap-1.5" title={agentIdFull}>
+                    <span
+                      className="inline-flex items-center gap-1.5"
+                      title={agentIdFull}
+                    >
                       <HashIcon size={11} />
-                      <span className="truncate font-db-mono">{agentIdFull}</span>
+                      <span className="truncate font-db-mono">
+                        {agentIdFull}
+                      </span>
                     </span>
                   )}
                   {agentUpdatedAt && (
                     <span className="inline-flex items-center gap-1.5">
-                      <HistoryIcon size={11} /> Modified {formatRelativeShort(agentUpdatedAt)}
+                      <HistoryIcon size={11} /> Modified{' '}
+                      {formatRelativeShort(agentUpdatedAt)}
                     </span>
                   )}
                   <span className="inline-flex items-center gap-1 rounded-db-pill bg-db-blue-100 px-2 py-0.5 font-db-mono text-[10px] font-medium tracking-[0.02em] text-db-blue-700">
@@ -986,6 +1082,16 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                   active={activeTab === 'edit'}
                   onClick={() => setActiveTab('edit')}
                   label="Edit"
+                />
+                <TabButton
+                  active={activeTab === 'schema'}
+                  onClick={() => setActiveTab('schema')}
+                  label="Schema"
+                />
+                <TabButton
+                  active={activeTab === 'preview'}
+                  onClick={() => setActiveTab('preview')}
+                  label="Preview"
                 />
                 {!isNew && (
                   <TabButton
@@ -1014,6 +1120,25 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                   <BlockEditor registry={registry} />
                 </ErrorBoundary>
               )}
+              {activeTab === 'schema' && (
+                <ErrorBoundary name="SchemaEditor">
+                  <SchemaEditorPanel />
+                </ErrorBoundary>
+              )}
+              {activeTab === 'preview' && (
+                <ErrorBoundary name="SurfacePreview">
+                  <SurfacePreviewPanel
+                    ast={ast}
+                    agentName={agentName || 'This agent'}
+                    previewRun={previewRun}
+                    onTryInChat={handleRun}
+                    tryInChatPending={
+                      runMutation.isPending || saveMutation.isPending
+                    }
+                    tryInChatDisabled={isNew && !localName.trim()}
+                  />
+                </ErrorBoundary>
+              )}
               {activeTab === 'revisions' && !isNew && (
                 <div className="flex min-h-[400px] gap-4 rounded-db-md border border-db-gray-lines bg-white p-4">
                   <div className="w-72 shrink-0 overflow-auto">
@@ -1040,19 +1165,21 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                     Research depth
                   </p>
                   <p className="mb-3 max-w-prose text-[12px] leading-[1.5] text-db-gray-text">
-                    Scales how deeply this agent's researchers dig — their tool-call
-                    budgets and any loop / plan-and-execute iteration counts.{' '}
-                    <strong>Standard</strong> keeps the saved budgets;{' '}
-                    <strong>Deep</strong> raises them for more thorough research;{' '}
-                    <strong>Light</strong> reduces them for faster, shallower runs.
-                    A per-chat selection overrides this saved default.
+                    Scales how deeply this agent's researchers dig — their
+                    tool-call budgets and any loop / plan-and-execute iteration
+                    counts. <strong>Standard</strong> keeps the saved budgets;{' '}
+                    <strong>Deep</strong> raises them for more thorough
+                    research; <strong>Light</strong> reduces them for faster,
+                    shallower runs. A per-chat selection overrides this saved
+                    default.
                   </p>
                   <select
                     aria-label="Research depth"
                     value={ast?.research_effort ?? 'standard'}
                     onChange={(e) => {
                       if (!ast) return;
-                      const value = e.target.value as 'light' | 'standard' | 'deep';
+                      const value = e.target.value as
+                        'light' | 'standard' | 'deep';
                       useAgentEditorStore
                         .getState()
                         .setAst({ ...ast, research_effort: value });
@@ -1065,8 +1192,8 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
                     <option value="deep">Deep — slower, more thorough</option>
                   </select>
                   <p className="mt-4 text-[12px] text-db-gray-text">
-                    More agent-level settings (visibility, run-as principal, output
-                    schema) coming soon.
+                    More agent-level settings (visibility, run-as principal,
+                    output schema) coming soon.
                   </p>
                 </div>
               )}
@@ -1079,7 +1206,12 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
           {/* Inspector — Direction 1 (Tabbed Inspector): Configure · Tools ·
               Approvals · Co-pilot. The co-pilot is the 4th tab (the separate
               Designer Chat column was removed). */}
-          <ConfigPanel registry={registry} chatSessionId={isNew ? undefined : id} />
+          <ErrorBoundary name="Inspector">
+            <ConfigPanel
+              registry={registry}
+              chatSessionId={isNew ? undefined : id}
+            />
+          </ErrorBoundary>
         </div>
 
         {/* ETag conflict modal */}
@@ -1101,7 +1233,6 @@ function DesignerInner({ id, registry }: DesignerInnerProps): React.ReactElement
             void handleConflictMergeSave(mergedAst, etag);
           }}
         />
-
       </div>
     </AppShell>
   );

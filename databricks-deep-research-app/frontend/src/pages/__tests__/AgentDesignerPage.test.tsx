@@ -7,7 +7,7 @@
 
 import '@testing-library/jest-dom/vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 
@@ -70,7 +70,8 @@ vi.mock('@/components/agentDesigner/ToolsPanel', () => ({
 // Imports (after mocks are set up)
 // ---------------------------------------------------------------------------
 
-import { getAgentV2WithEtag, updateAgentV2, EtagConflictError, AgentCriticError } from '@/api/agentsV2'
+import { getAgentV2WithEtag, createAgentV2, updateAgentV2, EtagConflictError, AgentCriticError } from '@/api/agentsV2'
+import { chatsApi, jobsApi } from '@/api/client'
 import { getRegistry, validateWorkflow } from '@/api/agentDesigner'
 import { useAgentEditorStore, initialState } from '@/stores/agentEditorStore'
 import { createDraftWorkflow } from '@/lib/workflowAst'
@@ -682,5 +683,252 @@ describe('AgentDesignerPage', () => {
     expect(pendingChatSeed).toContain('[root.children.0]')
     expect(pendingChatSeed).toContain('No web_search tool bound')
     expect(pendingChatSeed).toContain('Bind web_search to the Researcher agent')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Surface preview "Run for real" — page-level controller integration
+// (real SurfacePreviewPanel + real useSurfacePreviewRun; api/client spied)
+// ---------------------------------------------------------------------------
+
+class FakeEventSource {
+  static instances: FakeEventSource[] = []
+
+  onmessage: ((event: MessageEvent) => void) | null = null
+  onerror: ((event: Event) => void) | null = null
+  readyState = 1
+  close = vi.fn(() => {
+    this.readyState = 2
+  })
+
+  constructor(public readonly url: string) {
+    FakeEventSource.instances.push(this)
+  }
+}
+
+/** Scaffold-shaped surface so the Preview tab renders a runnable form. */
+const SURFACE_FIXTURE = {
+  version: 1,
+  components: [
+    {
+      id: 'root',
+      component: 'Column',
+      props: {},
+      children: ['q_field', 'run_btn', 'results'],
+    },
+    {
+      id: 'q_field',
+      component: 'TextField',
+      props: { label: 'Query', value: { path: '/query' }, placeholder: 'Enter topic' },
+      children: [],
+    },
+    { id: 'run_btn', component: 'Button', props: { label: 'Run', action: 'run' }, children: [] },
+    {
+      id: 'results',
+      component: 'ReportRegion',
+      props: { source: { path: '/results/run' }, empty_text: 'No results yet.' },
+      children: [],
+    },
+  ],
+  data_model: { query: '' },
+  bindings: [
+    {
+      action: 'run',
+      kind: 'run_agent',
+      inputs: { query: { path: '/query' } },
+      options: {},
+      output: { target: '/results/run', mode: 'report' },
+      concurrency: 'replace',
+    },
+  ],
+}
+
+const FAKE_AST_WITH_SURFACE = {
+  ...(FAKE_AST as unknown as Record<string, unknown>),
+  surface: SURFACE_FIXTURE,
+} as unknown as AST
+
+const FAKE_AGENT_WITH_SURFACE: AgentV2Response = {
+  ...FAKE_AGENT,
+  definition: FAKE_AST_WITH_SURFACE as unknown as Record<string, unknown>,
+}
+
+describe('AgentDesignerPage surface preview run', () => {
+  beforeEach(() => {
+    FakeEventSource.instances = []
+    vi.stubGlobal('EventSource', FakeEventSource)
+    vi.spyOn(chatsApi, 'create').mockResolvedValue({
+      id: 'preview-chat-1',
+      title: 'Preview run — Test Agent',
+    } as Awaited<ReturnType<typeof chatsApi.create>>)
+    vi.spyOn(chatsApi, 'getFull').mockResolvedValue({
+      messages: [],
+    } as unknown as Awaited<ReturnType<typeof chatsApi.getFull>>)
+    vi.spyOn(jobsApi, 'submit').mockResolvedValue({
+      sessionId: 'session-1',
+      status: 'in_progress',
+    } as Awaited<ReturnType<typeof jobsApi.submit>>)
+    vi.spyOn(jobsApi, 'streamUrl').mockReturnValue('/stream/session-1')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    vi.restoreAllMocks()
+  })
+
+  /** Open the Preview tab, click the surface action, then "Run for real". */
+  async function clickRunForReal(): Promise<void> {
+    fireEvent.click(screen.getByRole('tab', { name: 'Preview' }))
+    const actionBtn = await screen.findByTestId('surface-action-run')
+    fireEvent.click(actionBtn)
+    fireEvent.click(await screen.findByTestId('surface-preview-run-real'))
+  }
+
+  it('saves a dirty agent before submitting the preview run', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT_WITH_SURFACE,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: true,
+      errors: [],
+      workflow_summary: null,
+    })
+    vi.mocked(updateAgentV2).mockResolvedValue({
+      agent: FAKE_AGENT_WITH_SURFACE,
+      etag: '"etag-v2"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST_WITH_SURFACE)
+    })
+
+    await clickRunForReal()
+
+    await waitFor(() => {
+      expect(jobsApi.submit).toHaveBeenCalledTimes(1)
+    })
+    expect(updateAgentV2).toHaveBeenCalledTimes(1)
+    const updateOrder = vi.mocked(updateAgentV2).mock.invocationCallOrder[0]!
+    const submitOrder = vi.mocked(jobsApi.submit).mock.invocationCallOrder[0]!
+    expect(updateOrder).toBeLessThan(submitOrder)
+    expect(jobsApi.submit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: 'preview-chat-1',
+        agentId: 'agent-abc',
+        queryMode: 'deep_research',
+        turnIntent: 'research',
+      }),
+    )
+  })
+
+  it('on /designer/new the create-navigate happens in place and the run still submits', async () => {
+    const createdAgent: AgentV2Response = {
+      ...FAKE_AGENT_WITH_SURFACE,
+      id: 'agent-new-1',
+      name: 'My New Agent',
+    }
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: true,
+      errors: [],
+      workflow_summary: null,
+    })
+    vi.mocked(createAgentV2).mockResolvedValue({
+      agent: createdAgent,
+      etag: '"etag-v1"',
+    })
+    // After navigate(`/designer/agent-new-1`) the edit-flow query loads the agent.
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: createdAgent,
+      etag: '"etag-v1"',
+    })
+
+    renderPage('/designer/new')
+    await screen.findByTestId('block-editor')
+
+    fireEvent.change(screen.getByLabelText('Agent name'), {
+      target: { value: 'My New Agent' },
+    })
+    act(() => {
+      // Non-empty workflow (the save gate rejects empty drafts) + a surface.
+      useAgentEditorStore.getState().setAst(FAKE_AST_WITH_SURFACE)
+    })
+
+    await clickRunForReal()
+
+    // The create → in-place navigate → continuation chain must still submit
+    // the job with the CREATED agent id (remount-race regression test).
+    await waitFor(() => {
+      expect(createAgentV2).toHaveBeenCalledTimes(1)
+      expect(jobsApi.submit).toHaveBeenCalledTimes(1)
+    })
+    expect(jobsApi.submit).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: 'agent-new-1' }),
+    )
+    // And we did NOT bounce to /chat (that is the Test-run flow, not this one).
+    expect(screen.queryByTestId('chat-route-sentinel')).toBeNull()
+  })
+
+  it('does not submit when the save-first gate fails validation', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT_WITH_SURFACE,
+      etag: '"etag-v1"',
+    })
+    vi.mocked(validateWorkflow).mockResolvedValue({
+      valid: false,
+      errors: [{ message: 'root is required', path: null, line: null, kind: 'validation' }],
+      workflow_summary: null,
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+    act(() => {
+      useAgentEditorStore.getState().setAst(FAKE_AST_WITH_SURFACE)
+    })
+
+    await clickRunForReal()
+
+    await waitFor(() => {
+      expect(validateWorkflow).toHaveBeenCalled()
+      expect(useAgentEditorStore.getState().validationErrors).toHaveLength(1)
+    })
+    expect(updateAgentV2).not.toHaveBeenCalled()
+    expect(chatsApi.create).not.toHaveBeenCalled()
+    expect(jobsApi.submit).not.toHaveBeenCalled()
+  })
+
+  it('a running preview run survives switching tabs (page-level controller)', async () => {
+    vi.mocked(getAgentV2WithEtag).mockResolvedValue({
+      agent: FAKE_AGENT_WITH_SURFACE,
+      etag: '"etag-v1"',
+    })
+
+    renderPage('/designer/agent-abc')
+    await screen.findByTestId('block-editor')
+    // Clean agent: ensureSavedAgentId short-circuits to the route id.
+    await waitFor(() => {
+      expect(useAgentEditorStore.getState().agentId).toBe('agent-abc')
+    })
+
+    await clickRunForReal()
+    await waitFor(() => {
+      expect(jobsApi.submit).toHaveBeenCalledTimes(1)
+    })
+    expect(
+      await screen.findByTestId('surface-preview-real-running'),
+    ).toBeInTheDocument()
+
+    // Away to Edit (Preview content unmounts) and back — the run state lives
+    // in the page-level hook, so the region still shows the running run.
+    fireEvent.click(screen.getByRole('tab', { name: 'Edit' }))
+    await screen.findByTestId('block-editor')
+    expect(screen.queryByTestId('surface-preview-real-running')).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Preview' }))
+    expect(
+      await screen.findByTestId('surface-preview-real-running'),
+    ).toBeInTheDocument()
   })
 })

@@ -3,9 +3,11 @@
 import builtins
 import logging
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import and_, delete, func, select
+from sqlalchemy.orm import attributes as orm_attributes
 from sqlalchemy.orm import selectinload
 
 from deep_research.agent.chat_title import derive_chat_title_from_query
@@ -13,6 +15,7 @@ from deep_research.models.chat import Chat, ChatStatus, ChatType
 from deep_research.models.message import Message
 from deep_research.models.research_session import ResearchSession
 from deep_research.services.base import BaseRepository
+from deep_research.services.storage.surface_state import merge_surface_state
 
 logger = logging.getLogger(__name__)
 
@@ -179,6 +182,7 @@ class ChatService(BaseRepository[Chat]):
         user_id: str,
         title: str | None = None,
         status: ChatStatus | None = None,
+        surface_state_patch: dict[str, Any] | None = None,
     ) -> Chat | None:
         """Update a chat.
 
@@ -187,6 +191,10 @@ class ChatService(BaseRepository[Chat]):
             user_id: User ID.
             title: New title.
             status: New status.
+            surface_state_patch: Per-agent surface state patch. Each agent
+                entry is shallow-merged into ``metadata_["surface_state"]``;
+                ``action_runs`` within each entry uses newest-updated_at-wins
+                semantics with idempotent-replay.
 
         Returns:
             Updated chat or None if not found.
@@ -199,6 +207,13 @@ class ChatService(BaseRepository[Chat]):
             chat.title = title
         if status is not None:
             chat.status = status
+
+        if surface_state_patch is not None:
+            metadata: dict[str, Any] = dict(chat.metadata_ or {})
+            existing_surface: dict[str, Any] = dict(metadata.get("surface_state") or {})
+            metadata["surface_state"] = merge_surface_state(existing_surface, surface_state_patch)
+            chat.metadata_ = metadata
+            orm_attributes.flag_modified(chat, "metadata_")
 
         chat.updated_at = datetime.now(UTC)
         chat = await super().update(chat)

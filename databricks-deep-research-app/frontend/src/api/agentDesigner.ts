@@ -153,6 +153,37 @@ export async function validateWorkflow(
   return response.json() as Promise<ValidateResponse>
 }
 
+/**
+ * Generate the deterministic default UI (surface) for a workflow definition.
+ * Stateless: nothing is persisted; the caller applies the returned surface to
+ * the editor AST (marking it dirty) or discards it.
+ */
+export async function scaffoldSurface(
+  definition: AST | Record<string, unknown>
+): Promise<{ surface: Record<string, unknown> }> {
+  const response = await fetch(`${API_BASE_URL}/agent-designer/scaffold-surface`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ definition }),
+  })
+
+  if (!response.ok) {
+    let errorData: { code?: string; message?: string } = {}
+    try {
+      errorData = (await response.json()) as typeof errorData
+    } catch {
+      errorData = { code: 'UNKNOWN', message: response.statusText }
+    }
+    throw new ApiError(
+      response.status,
+      errorData.code ?? 'UNKNOWN',
+      errorData.message ?? 'Surface scaffold request failed'
+    )
+  }
+
+  return response.json() as Promise<{ surface: Record<string, unknown> }>
+}
+
 // ---------------------------------------------------------------------------
 // YAML import / export
 // ---------------------------------------------------------------------------

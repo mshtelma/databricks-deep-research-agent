@@ -15,6 +15,26 @@ from deep_research.agent_designer.semantic_validation import (
 )
 from deep_research.agent_designer.workflow_validation import WorkflowValidationResult
 from deep_research.models.visibility import AgentVisibility
+from deep_research.surface.validation import validate_surface
+
+
+def _enforce_surface_validation(definition: dict[str, Any]) -> None:
+    """Gate ``definition["surface"]`` (declarative agent UI) at write time.
+
+    Same W10 rationale as semantic validation below: running the deterministic
+    surface validator inside the schema validator covers EVERY writer — the
+    Designer save, the chat UI, and direct API callers — so a surface with
+    broken bindings/catalog references can never be persisted. Absent surface
+    is always valid (surfaces are optional); warnings never block.
+    """
+    blocking = [
+        e for e in validate_surface(definition) if e.severity == "blocking"
+    ]
+    if blocking:
+        detail = "; ".join(
+            f"{e.path or '<surface>'}: {e.message}" for e in blocking
+        )
+        raise ValueError(f"Surface validation failed: {detail}")
 
 
 def _enforce_semantic_validation(definition: dict[str, Any]) -> None:
@@ -65,6 +85,8 @@ class CreateAgentV2Request(BaseModel):
         # /agent-designer/validate endpoint, leaving direct API callers free
         # to persist runtime-broken ASTs.
         _enforce_semantic_validation(v)
+        # Surface (declarative agent UI) gate — deterministic, write-time.
+        _enforce_surface_validation(v)
         return v
 
 
@@ -91,6 +113,8 @@ class UpdateAgentV2Request(BaseModel):
         except Exception as exc:
             raise ValueError(f"Invalid workflow definition: {exc}") from exc
         _enforce_semantic_validation(v)
+        # Surface (declarative agent UI) gate — deterministic, write-time.
+        _enforce_surface_validation(v)
         return v
 
 
@@ -155,6 +179,15 @@ class AgentV2Summary(BaseModel):
             "for classical_lite/none (cite-only). The chat composer seeds the "
             "'Verify sources' toggle from this so it reflects the agent's intent; "
             "the toggle then fully overrides it per run."
+        ),
+    )
+    has_surface: bool = Field(
+        default=False,
+        description=(
+            "True when the agent carries a declarative UI "
+            "(definition['surface']); the chat shows its Agent UI panel and the "
+            "picker can badge it. The surface itself is read from the detail "
+            "endpoint's definition."
         ),
     )
 

@@ -9,3 +9,7 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
+
+/** Build identifier injected by Vite `define` (git sha or timestamp); carried on
+ * client error reports so a logged crash can be tied to a specific bundle. */
+declare const __BUILD_ID__: string

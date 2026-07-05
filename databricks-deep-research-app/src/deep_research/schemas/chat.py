@@ -1,6 +1,7 @@
 """Chat-related Pydantic schemas."""
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import Field
@@ -87,6 +88,14 @@ class MessageInline(BaseSchema):
     research_session: ResearchSessionInline | None = None
     claims: list[ClaimResponse] = Field(default_factory=list)
     verification_summary: VerificationSummary | None = None
+    structured_output: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Agent-surface structured-output envelope ({version, binding, "
+            "data, meta}) from the post-synthesis structuring pass; None "
+            "for runs without surface output slots."
+        ),
+    )
 
 
 class ChatFullResponse(BaseSchema, TimestampMixin):
@@ -98,3 +107,4 @@ class ChatFullResponse(BaseSchema, TimestampMixin):
     chat_type: ChatType = ChatType.REGULAR
     messages: list[MessageInline] = Field(default_factory=list)
     message_count: int = 0
+    surface_state: dict[str, Any] | None = None

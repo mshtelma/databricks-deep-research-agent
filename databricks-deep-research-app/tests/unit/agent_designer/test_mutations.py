@@ -17,6 +17,7 @@ from deep_research.agent_designer.mutations import (
     move_block,
     remove_tool,
     set_model_tier,
+    set_surface,
     update_block,
 )
 from deep_research.agent_designer.registry import model_tiers_payload
@@ -511,3 +512,105 @@ def test_set_model_tier_non_agent_raises() -> None:
     ast = _minimal_ast("sequence")
     with pytest.raises(BlockMutationError, match="agent"):
         set_model_tier(ast, "root", "analytical")
+
+
+# ---------------------------------------------------------------------------
+# set_surface tests
+# ---------------------------------------------------------------------------
+
+
+def _ast_with_extras() -> dict[str, Any]:
+    """Minimal AST that also has sibling top-level keys beyond the standard set."""
+    ast = _minimal_ast()
+    ast["lane_keys"] = ["lane_a", "lane_b"]
+    ast["designer_signature"] = {"topology": "parallel_lanes"}
+    return ast
+
+
+def _minimal_surface() -> dict[str, Any]:
+    """A valid minimal surface dict (version, components, data_model, bindings)."""
+    return {
+        "version": 1,
+        "components": [
+            {
+                "id": "root",
+                "component": "Column",
+                "props": {"gap": "md"},
+                "children": ["run_button"],
+            },
+            {
+                "id": "run_button",
+                "component": "Button",
+                "props": {"label": "Run", "action": "run", "variant": "primary"},
+                "children": [],
+            },
+        ],
+        "data_model": {"results": {"run": None}},
+        "bindings": [
+            {
+                "action": "run",
+                "kind": "run_agent",
+                "inputs": {"query": "What should I research?"},
+                "options": {},
+                "output": {"target": "/results/run", "mode": "report"},
+                "concurrency": "replace",
+            }
+        ],
+    }
+
+
+def test_set_surface_sets_key_on_copy_preserves_siblings() -> None:
+    """set_surface returns a new dict with surface set; sibling keys are preserved."""
+    ast = _ast_with_extras()
+    original = copy.deepcopy(ast)
+    surface = _minimal_surface()
+
+    new_ast = set_surface(ast, surface)
+
+    # Input not mutated.
+    assert ast == original
+    assert "surface" not in ast
+
+    # New AST carries the surface.
+    assert new_ast["surface"] == surface
+
+    # Sibling top-level keys are preserved.
+    assert new_ast["lane_keys"] == ["lane_a", "lane_b"]
+    assert new_ast["designer_signature"] == {"topology": "parallel_lanes"}
+
+    # Standard fields still present.
+    assert "root" in new_ast
+    assert "tools" in new_ast
+
+
+def test_set_surface_none_removes_surface() -> None:
+    """set_surface(ast, None) removes an existing surface key."""
+    ast = _ast_with_extras()
+    ast["surface"] = _minimal_surface()
+
+    new_ast = set_surface(ast, None)
+
+    assert "surface" not in new_ast
+    # Input not mutated.
+    assert "surface" in ast
+    # Other keys preserved.
+    assert new_ast["lane_keys"] == ["lane_a", "lane_b"]
+
+
+def test_set_surface_none_on_ast_without_surface_is_noop() -> None:
+    """set_surface(ast, None) on an AST without a surface is a no-op (no error)."""
+    ast = _minimal_ast()
+    assert "surface" not in ast
+    new_ast = set_surface(ast, None)
+    assert "surface" not in new_ast
+
+
+def test_set_surface_non_dict_raises_block_mutation_error() -> None:
+    """Non-dict surface value raises BlockMutationError."""
+    ast = _minimal_ast()
+    with pytest.raises(BlockMutationError):
+        set_surface(ast, "not a dict")  # type: ignore[arg-type]
+    with pytest.raises(BlockMutationError):
+        set_surface(ast, ["components"])  # type: ignore[arg-type]
+    with pytest.raises(BlockMutationError):
+        set_surface(ast, 42)  # type: ignore[arg-type]

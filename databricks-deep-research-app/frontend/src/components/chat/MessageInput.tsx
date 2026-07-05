@@ -35,8 +35,10 @@ import {
   deriveQueryModeFromComposerState,
   deriveSourceScopeFromComposerSources,
   isEnterpriseAvailableSource,
+  readEnabledEnterpriseSources,
   type ComposerMode,
   type ComposerSources,
+  writeEnabledEnterpriseSources,
 } from './sourceRouting';
 
 interface MessageInputProps {
@@ -51,9 +53,10 @@ interface MessageInputProps {
   sessionId?: string;
   /** Plugin-provided input configuration (overrides individual props) */
   inputConfig?: InputConfig;
+  /** Called whenever the selected agent changes (including null for deselect). */
+  onSelectedAgentChange?: (agent: CustomAgentSummary | null) => void;
 }
 
-const ENABLED_ENTERPRISE_SOURCES_KEY = 'deep-research-enabled-enterprise-sources';
 const SELECTED_AGENT_KEY = 'deep-research-selected-agent';
 // VariantA composer model (declutter redesign): a 2-mode picker (Answer/Deep)
 // plus a Web/Enterprise/MCP source checkbox set. These persist independently of
@@ -79,28 +82,6 @@ function writeSelectedAgentId(agentId: string | null): void {
     } else {
       localStorage.removeItem(SELECTED_AGENT_KEY);
     }
-  } catch {
-    // Ignore localStorage errors
-  }
-}
-
-function readEnabledEnterpriseSources(): Set<string> {
-  if (typeof window === 'undefined') return new Set<string>();
-  try {
-    const raw = localStorage.getItem(ENABLED_ENTERPRISE_SOURCES_KEY);
-    if (!raw) return new Set<string>();
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return new Set<string>();
-    return new Set(parsed.filter((id): id is string => typeof id === 'string'));
-  } catch {
-    return new Set<string>();
-  }
-}
-
-function writeEnabledEnterpriseSources(ids: Set<string>): void {
-  if (typeof window === 'undefined') return;
-  try {
-    localStorage.setItem(ENABLED_ENTERPRISE_SOURCES_KEY, JSON.stringify(Array.from(ids)));
   } catch {
     // Ignore localStorage errors
   }
@@ -163,6 +144,7 @@ function agentV2ToSelectorSummary(agent: AgentV2Summary): CustomAgentSummary {
     ownerId: agent.visibility === 'system' ? 'system' : agent.owner_id,
     inAppActive: agent.in_app_active,
     defaultVerifySources: agent.default_verify_sources,
+    hasSurface: agent.has_surface,
   };
 }
 
@@ -176,6 +158,7 @@ export function MessageInput({
   showDepthSelector = true,
   sessionId,
   inputConfig,
+  onSelectedAgentChange,
 }: MessageInputProps) {
   const [message, setMessage] = React.useState('');
 
@@ -367,7 +350,10 @@ export function MessageInput({
     const savedId = readSelectedAgentId();
     if (savedId && !selectedAgent) {
       const found = agents.find((a) => a.id === savedId);
-      if (found) setSelectedAgent(found);
+      if (found) {
+        setSelectedAgent(found);
+        onSelectedAgentChange?.(found);
+      }
     }
   }, [agents]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -376,8 +362,9 @@ export function MessageInput({
     (agent: CustomAgentSummary | null) => {
       setSelectedAgent(agent);
       writeSelectedAgentId(agent?.id ?? null);
+      onSelectedAgentChange?.(agent);
     },
-    []
+    [onSelectedAgentChange]
   );
 
   // Show source scope selector when deep_research or web_search is selected (not for simple mode)

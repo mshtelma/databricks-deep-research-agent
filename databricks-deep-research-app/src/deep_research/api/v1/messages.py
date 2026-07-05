@@ -3,14 +3,20 @@
 from typing import Any
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 
+from deep_research.agent.structured_evidence import load_run_artifacts
 from deep_research.core.deps import (
     get_chat_service,
     get_feedback_service,
     get_message_service,
+    get_storage_optional,
 )
-from deep_research.core.exceptions import NotFoundError
+from deep_research.core.exceptions import (
+    ConflictError,
+    NotFoundError,
+    ValidationError,
+)
 from deep_research.middleware.auth import CurrentUser
 from deep_research.models.message import MessageRole
 from deep_research.schemas.feedback import FeedbackRequest, FeedbackResponse
@@ -20,6 +26,8 @@ from deep_research.schemas.message import (
     MessageListResponse,
     MessageResponse,
     RegenerateResponse,
+    RestructureRequest,
+    RestructureResponse,
     SendMessageRequest,
     SendMessageResponse,
 )
@@ -311,3 +319,224 @@ async def get_message_content(
         raise NotFoundError("Message", str(message_id))
 
     return {"content": message.content}
+
+
+# ---------------------------------------------------------------------------
+# Structured-output restructure (per-slot retry)
+# ---------------------------------------------------------------------------
+
+_RESTRUCTURE_IN_PROGRESS_WINDOW_S = 300  # 409 while a recent run is pending
+
+
+def _now_iso() -> str:
+    from datetime import UTC, datetime
+
+    return datetime.now(UTC).isoformat()
+
+
+def _recent(generated_at: Any, window_s: int) -> bool:
+    from datetime import UTC, datetime
+
+    if not isinstance(generated_at, str):
+        return False
+    try:
+        stamp = datetime.fromisoformat(generated_at)
+    except ValueError:
+        return False
+    if stamp.tzinfo is None:
+        stamp = stamp.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - stamp).total_seconds() < window_s
+
+
+async def _restructure_in_background(
+    *,
+    chat_id: UUID,
+    message_id: UUID,
+    user_id: str,
+    requested: set[str],
+    storage_stack: Any | None,
+    llm: Any | None,
+    marked_envelope: dict[str, Any],
+    artifacts: Any,
+) -> None:
+    """Re-run the requested slot wires; NEVER leaves slots stuck pending."""
+    import copy
+    import logging
+
+    from deep_research.agent.orchestration_config import OrchestrationConfig
+    from deep_research.agent.persistence import (
+        update_structured_output_independent,
+    )
+    from deep_research.agent.structured_surface import (
+        load_agent_surface,
+        structure_and_update,
+    )
+    from deep_research.surface.output_schema import (
+        collect_output_slots,
+        resolve_binding_for_run,
+    )
+
+    logger = logging.getLogger(__name__)
+    binding = str(marked_envelope.get("binding") or "")
+    agent_id = marked_envelope.get("agent_id")
+
+    try:
+        loaded = (
+            await load_agent_surface(
+                OrchestrationConfig(agent_id=str(agent_id)), user_id, None
+            )
+            if agent_id
+            else None
+        )
+        resolved = None
+        fresh_etag: str | None = None
+        if loaded is not None:
+            surface, fresh_etag = loaded
+            resolved = resolve_binding_for_run(
+                collect_output_slots(surface), binding
+            )
+        if resolved is None:
+            raise RuntimeError(
+                "agent surface or binding is no longer available"
+            )
+
+        runnable = requested & set(resolved.slots)
+        prior = marked_envelope
+        if requested - runnable:
+            prior = copy.deepcopy(marked_envelope)
+            for slot in requested - runnable:
+                prior["meta"]["slots"][slot] = {
+                    "status": "failed",
+                    "error": "slot is no longer declared by the surface",
+                }
+        if not runnable:
+            prior["generated_at"] = _now_iso()
+            await update_structured_output_independent(
+                chat_id=chat_id,
+                research_session_id=artifacts.research_session_id,
+                envelope=prior,
+                storage_stack=storage_stack,
+            )
+            return
+
+        await structure_and_update(
+            binding=binding,
+            agent_id=str(agent_id) if agent_id else None,
+            surface_etag=fresh_etag,
+            slots=resolved.slots,
+            report=artifacts.report,
+            claims=artifacts.claims,
+            sources=artifacts.sources,
+            chat_id=chat_id,
+            research_session_id=artifacts.research_session_id,
+            storage_stack=storage_stack,
+            llm=llm,
+            only_slots=runnable,
+            prior_envelope=prior,
+        )
+    except Exception as exc:  # noqa: BLE001 — never-stuck-pending guarantee
+        logger.exception(
+            "RESTRUCTURE_BACKGROUND_FAILED message=%s", str(message_id)[:8]
+        )
+        failed = copy.deepcopy(marked_envelope)
+        slots_meta = failed.get("meta", {}).get("slots") or {}
+        for slot in requested:
+            if slots_meta.get(slot, {}).get("status") == "pending":
+                slots_meta[slot] = {
+                    "status": "failed",
+                    "error": str(exc)[:200],
+                }
+        failed["generated_at"] = _now_iso()
+        try:
+            await update_structured_output_independent(
+                chat_id=chat_id,
+                research_session_id=artifacts.research_session_id,
+                envelope=failed,
+                storage_stack=storage_stack,
+            )
+        except Exception:  # noqa: BLE001 — best effort; FE has stale-pending
+            logger.exception(
+                "RESTRUCTURE_FAILED_STUB_WRITE_FAILED message=%s",
+                str(message_id)[:8],
+            )
+
+
+@router.post(
+    "/chats/{chat_id}/messages/{message_id}/restructure",
+    response_model=RestructureResponse,
+    status_code=202,
+)
+async def restructure_message(
+    chat_id: UUID,
+    message_id: UUID,
+    request: RestructureRequest,
+    user: CurrentUser,
+    background_tasks: BackgroundTasks,
+    fastapi_request: Request,
+    chat_service: IChatService = Depends(get_chat_service),
+) -> RestructureResponse:
+    """Re-run structured-output slots for a completed agent message.
+
+    Marks the requested slots ``pending`` (persisted immediately so the UI
+    shows skeletons), schedules the per-slot wires in the background, and
+    returns 202. The frontend polls the chat until no slot is pending.
+    """
+    import copy
+
+    chat = await chat_service.get_for_user(chat_id, user.user_id)
+    if not chat:
+        raise NotFoundError("Chat", str(chat_id))
+
+    storage_stack = get_storage_optional(fastapi_request)
+    artifacts = await load_run_artifacts(chat_id, message_id, storage_stack)
+    if artifacts is None or not isinstance(artifacts.envelope, dict):
+        raise NotFoundError("StructuredOutput", str(message_id))
+
+    envelope = artifacts.envelope
+    slots_meta = envelope.get("meta", {}).get("slots") or {}
+    if not slots_meta:
+        raise NotFoundError("StructuredOutput", str(message_id))
+
+    requested = set(request.slots) if request.slots else set(slots_meta)
+    unknown = requested - set(slots_meta)
+    if unknown:
+        raise ValidationError(
+            f"unknown slot(s): {', '.join(sorted(unknown)[:5])}"
+        )
+    if any(
+        slots_meta.get(slot, {}).get("status") == "pending"
+        for slot in requested
+    ) and _recent(
+        envelope.get("generated_at"), _RESTRUCTURE_IN_PROGRESS_WINDOW_S
+    ):
+        raise ConflictError(
+            "a restructure for this message is already in progress"
+        )
+
+    marked = copy.deepcopy(envelope)
+    for slot in requested:
+        marked["meta"]["slots"][slot] = {"status": "pending"}
+    marked["generated_at"] = _now_iso()
+    from deep_research.agent.persistence import (
+        update_structured_output_independent,
+    )
+
+    await update_structured_output_independent(
+        chat_id=chat_id,
+        research_session_id=artifacts.research_session_id,
+        envelope=marked,
+        storage_stack=storage_stack,
+    )
+
+    background_tasks.add_task(
+        _restructure_in_background,
+        chat_id=chat_id,
+        message_id=message_id,
+        user_id=user.user_id,
+        requested=requested,
+        storage_stack=storage_stack,
+        llm=getattr(fastapi_request.app.state, "llm_client", None),
+        marked_envelope=marked,
+        artifacts=artifacts,
+    )
+    return RestructureResponse(status="accepted", slots=sorted(requested))

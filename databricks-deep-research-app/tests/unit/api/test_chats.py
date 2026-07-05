@@ -392,3 +392,119 @@ class TestResearchSessionInlineFromCachedView:
         assert result is not None
         assert result.plan is None
         assert result.query_classification is None
+
+
+class TestUpdateSurfaceState:
+    """Tests for PUT /api/v1/chats/{chat_id}/surface-state."""
+
+    def test_put_surface_state_happy_path(
+        self, client: TestClient, mock_chat: Chat, mock_chat_service: MagicMock
+    ):
+        """A valid surface_state patch returns 200 and {"ok": true}."""
+        mock_chat_service.update_chat = AsyncMock(return_value=mock_chat)
+
+        payload = {
+            "surface_state": {
+                "agent-1": {
+                    "data_model": {"counter": 1},
+                    "surface_etag": "etag-1",
+                }
+            }
+        }
+        response = client.put(f"/api/v1/chats/{mock_chat.id}/surface-state", json=payload)
+
+        assert response.status_code == 200
+        assert response.json() == {"ok": True}
+
+        # Verify service was called with the right patch
+        call_kwargs = mock_chat_service.update_chat.call_args.kwargs
+        assert call_kwargs["chat_id"] == mock_chat.id
+        assert call_kwargs["user_id"] == "test-user-123"
+        assert call_kwargs["surface_state_patch"] == payload["surface_state"]
+
+    def test_put_surface_state_not_found(
+        self, client: TestClient, mock_chat_service: MagicMock
+    ):
+        """When service returns None the endpoint returns 404."""
+        mock_chat_service.update_chat = AsyncMock(return_value=None)
+
+        payload = {"surface_state": {"agent-1": {"data_model": {}}}}
+        response = client.put(f"/api/v1/chats/{uuid4()}/surface-state", json=payload)
+
+        assert response.status_code == 404
+
+    def test_put_surface_state_extra_fields_rejected(
+        self, client: TestClient, mock_chat_service: MagicMock
+    ):
+        """Extra top-level fields in the body (extra='forbid') should 422."""
+        payload = {
+            "surface_state": {"agent-1": {}},
+            "unknown_field": "should_fail",
+        }
+        response = client.put(f"/api/v1/chats/{uuid4()}/surface-state", json=payload)
+
+        assert response.status_code == 422
+
+    def test_put_surface_state_non_dict_value_rejected(
+        self, client: TestClient, mock_chat_service: MagicMock
+    ):
+        """Agent entry that is not a dict must fail validator (422)."""
+        payload = {"surface_state": {"agent-1": "not-a-dict"}}
+        response = client.put(f"/api/v1/chats/{uuid4()}/surface-state", json=payload)
+
+        assert response.status_code == 422
+
+
+class TestGetChatFullSurfaceState:
+    """Tests that GET /chats/{id}/full returns surface_state from metadata."""
+
+    @staticmethod
+    def _make_chat_with_metadata(chat_id, surface_state_val=None):
+        """Build a Chat ORM-like object with metadata_ containing surface_state."""
+        from datetime import UTC, datetime
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id=chat_id,
+            user_id="test-user-123",
+            title="Chat With Surface",
+            status=ChatStatus.ACTIVE,
+            chat_type=None,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+            deleted_at=None,
+            incognito_session_id=None,
+            messages=[],
+            metadata_={"surface_state": surface_state_val} if surface_state_val else {},
+        )
+
+    def test_get_full_returns_surface_state(
+        self, client: TestClient, mock_chat_service: MagicMock
+    ):
+        """surface_state in metadata_ is included in the /full response."""
+        chat_id = uuid4()
+        surface = {"agent-1": {"data_model": {"v": 42}, "surface_etag": "etag-1"}}
+        fake_chat = self._make_chat_with_metadata(chat_id, surface_state_val=surface)
+        mock_chat_service.get_full = AsyncMock(return_value=fake_chat)
+
+        response = client.get(f"/api/v1/chats/{chat_id}/full")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["surfaceState"] == {
+            "agent-1": {"data_model": {"v": 42}, "surface_etag": "etag-1"}
+        }
+
+    def test_get_full_returns_null_surface_state_when_absent(
+        self, client: TestClient, mock_chat_service: MagicMock
+    ):
+        """When no surface_state key in metadata_, surfaceState is null."""
+        chat_id = uuid4()
+        fake_chat = self._make_chat_with_metadata(chat_id, surface_state_val=None)
+        mock_chat_service.get_full = AsyncMock(return_value=fake_chat)
+
+        response = client.get(f"/api/v1/chats/{chat_id}/full")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["surfaceState"] is None

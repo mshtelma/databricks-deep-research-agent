@@ -98,6 +98,35 @@ class _UnparsedJSONOutput(str):
     """Marker for JSON-configured agent output that could not be parsed."""
 
 
+def _provider_text_blocks_to_text(content: Any) -> str | None:
+    """Extract final text from provider content blocks.
+
+    Some providers return message content as a list of typed blocks, e.g.
+    ``[{"type": "text", "text": "{...json...}"}]``. For JSON-output nodes,
+    that is transport shape rather than structured workflow state, so feed the
+    text through the existing JSON parser. Arbitrary structured lists are left
+    untouched.
+    """
+
+    if not isinstance(content, list) or not content:
+        return None
+
+    text_parts: list[str] = []
+    for block in content:
+        if not isinstance(block, Mapping):
+            return None
+        block_type = block.get("type")
+        if not isinstance(block_type, str):
+            return None
+        block_text = block.get("text")
+        if block_type == "text" and isinstance(block_text, str) and block_text.strip():
+            text_parts.append(block_text)
+
+    if not text_parts:
+        return None
+    return "\n".join(text_parts)
+
+
 # ---------------------------------------------------------------------------
 # json_repair sanity checks
 # ---------------------------------------------------------------------------
@@ -1449,6 +1478,23 @@ def _build_messages(agent_input: AgentInput) -> list[dict[str, Any]]:
 
 def _parse_output(content: Any, config: AgentNodeConfig) -> Any:
     """Parse agent output based on config.output_format."""
+    if config.output_format == "json" and not isinstance(content, str):
+        normalized = _provider_text_blocks_to_text(content)
+        if normalized is not None:
+            block_types = ",".join(
+                str(block.get("type"))
+                for block in content
+                if isinstance(block, Mapping)
+            )
+            logger.info(
+                "AGENT_OUTPUT_PARSE_NORMALIZED provider_blocks=true "
+                "format=json input_type=%s text_len=%d block_types=%s",
+                type(content).__name__,
+                len(normalized),
+                block_types,
+            )
+            content = normalized
+
     # Already a Pydantic model (structured output)
     if not isinstance(content, str):
         logger.info(

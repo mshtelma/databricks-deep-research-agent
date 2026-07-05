@@ -123,3 +123,86 @@ async def test_update_fills_databricks_web_tool_model(
     cfg = updated.definition["tools"][0]["config"]
     assert cfg["provider"] == "databricks"
     assert cfg["model"] == "databricks-gpt-5"
+
+
+# ---------------------------------------------------------------------------
+# Pillar 4: surface components/sections get children/props defaults at save,
+# so a surface authored without them can never persist and crash the frontend
+# renderer's `.length` reads (the `[App]` blank-screen bug).
+# ---------------------------------------------------------------------------
+
+
+def _surface_def_missing_children() -> dict:
+    return {
+        "id": "wf",
+        "name": "Surfaced",
+        "version": 1,
+        "root": {"id": "root", "type": "sequence", "config": {}, "children": []},
+        "surface": {
+            "version": 1,
+            "components": [
+                {"id": "root", "component": "Column"},  # no children / props
+                {"id": "field", "component": "TextField"},
+            ],
+            "data_model": {},
+            "bindings": [],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_create_normalizes_surface_children(
+    mock_db_session: AsyncMock,
+) -> None:
+    request = CreateAgentV2Request.model_construct(
+        name="Surfaced",
+        description=None,
+        avatar_url=None,
+        visibility="private",
+        definition=_surface_def_missing_children(),
+    )
+    service = AgentV2Service(mock_db_session)
+
+    agent = await service.create("user-1", request)
+
+    comps = agent.definition["surface"]["components"]
+    assert all(isinstance(c["children"], list) for c in comps)
+    assert all("props" in c for c in comps)
+
+
+@pytest.mark.asyncio
+async def test_update_normalizes_surface_children(
+    mock_db_session: AsyncMock,
+) -> None:
+    agent_id = uuid4()
+    existing = AgentV2(
+        owner_id="user-1",
+        name="Surfaced",
+        description=None,
+        visibility="private",
+        definition={"root": {}},
+        schema_version=1,
+        etag="etag-1",
+    )
+    existing.id = agent_id
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = existing
+    mock_db_session.execute.return_value = result
+
+    request = UpdateAgentV2Request.model_construct(
+        name=None,
+        description=None,
+        avatar_url=None,
+        visibility=None,
+        definition=_surface_def_missing_children(),
+    )
+    service = AgentV2Service(mock_db_session)
+
+    updated = await service.update(
+        agent_id, "user-1", request, if_match_etag="etag-1"
+    )
+
+    assert updated is not None
+    comps = updated.definition["surface"]["components"]
+    assert all(isinstance(c["children"], list) for c in comps)
+    assert all("props" in c for c in comps)

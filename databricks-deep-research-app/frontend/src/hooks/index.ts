@@ -5,6 +5,12 @@ export { useMessages } from './useMessages';
 export { usePrefetchMessages } from './usePrefetchMessages';
 export { useStreamingQuery } from './useStreamingQuery';
 export type { ToolActivity, ErrorDetails } from './useStreamingQuery';
+export { useSurfacePreviewRun } from './useSurfacePreviewRun';
+export type {
+  PreviewRunReference,
+  SurfacePreviewRunApi,
+  SurfacePreviewRunOptions,
+} from './useSurfacePreviewRun';
 export { useCitations } from './useCitations';
 export { useChatFull, usePrefetchChatFull, CHAT_FULL_KEY } from './useChatFull';
 export { useDraftChats } from './useDraftChats';

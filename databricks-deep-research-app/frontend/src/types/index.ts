@@ -173,6 +173,34 @@ export type StreamEventType =
   | 'persistence_completed'
   // Plan review event
   | 'plan_review'
+  // Custom research phases (e.g. structured-output structuring pass)
+  | 'phase_started'
+  | 'phase_completed'
+  | 'phase_error'
+
+/** Custom research phase events (e.g. the structured-output structuring pass). */
+export interface PhaseStartedEvent extends BaseStreamEvent {
+  eventType: 'phase_started'
+  phaseName?: string
+  phase_name?: string
+  description?: string
+}
+
+export interface PhaseCompletedEvent extends BaseStreamEvent {
+  eventType: 'phase_completed'
+  phaseName?: string
+  phase_name?: string
+  durationMs?: number
+  duration_ms?: number
+}
+
+export interface PhaseErrorEvent extends BaseStreamEvent {
+  eventType: 'phase_error'
+  phaseName?: string
+  phase_name?: string
+  error?: string
+  recoverable?: boolean
+}
 
 export interface BaseStreamEvent {
   eventType: StreamEventType
@@ -319,6 +347,58 @@ export interface ContentRevisedEvent extends BaseStreamEvent {
 // Import citation types for ChatFullResponse
 import type { Claim, VerificationSummary } from './citation';
 
+/** One evidence source in the envelope legend; source_refs index into these. */
+export interface StructuredSourceRef {
+  ref: string;
+  url: string;
+  title?: string | null;
+}
+
+/** Per-slot fill status (v2 native per-slot wire generation). */
+export type SlotStatus = 'ok' | 'failed' | 'pending' | 'empty';
+
+export interface SlotMeta {
+  status: SlotStatus;
+  error?: string;
+  attempts?: number;
+  duration_ms?: number;
+  dropped_unsourced?: number;
+}
+
+/**
+ * Agent-surface structured-output envelope (per-slot wire generation).
+ *
+ * Stored verbatim in `verification_data["structured_output"]` and passed
+ * through the API as a raw `dict`, so — unlike the rest of this module — its
+ * keys are SNAKE_CASE on the wire (the same convention as the surface JSON in
+ * `types/surface.ts`). The `data` payload carries arbitrary user-defined
+ * column keys plus each item's `source_refs`, and is never camelized.
+ */
+export interface StructuredOutputEnvelope {
+  version: number;
+  /** The surface binding action whose slots this payload fills. */
+  binding: string;
+  /** Owning agent id — the restructure endpoint reloads the surface from it. */
+  agent_id?: string | null;
+  surface_etag?: string | null;
+  generated_at?: string;
+  /** Slot name → payload (table rows / metric cards / string items). */
+  data: Record<string, unknown>;
+  meta?: {
+    /** Per-slot state machine: pending → ok/empty/failed. */
+    slots?: Record<string, SlotMeta>;
+    /** Legend resolving item source_refs to their URL/title. */
+    sources?: StructuredSourceRef[];
+    warnings?: { code: string; message: string; slot?: string }[];
+    stripped_citation_keys?: string[];
+    truncated_slots?: string[];
+    attempts?: number;
+    duration_ms?: number;
+    model_tier?: string;
+    evidence?: string;
+  };
+}
+
 /** Message with inline claims (from /chats/{id}/full endpoint) */
 export interface FullMessage {
   id: string;
@@ -330,6 +410,22 @@ export interface FullMessage {
   researchSession: ResearchSession | null;
   claims: Claim[];
   verificationSummary: VerificationSummary | null;
+  structuredOutput?: StructuredOutputEnvelope | null;
+}
+
+/** Per-action run reference persisted in surface_state.action_runs. */
+export interface PersistedActionRun {
+  session_id?: string;
+  message_id?: string;
+  status?: string;
+  updated_at?: string;
+}
+
+/** Per-agent surface state entry persisted server-side. */
+export interface SurfaceStateEntry {
+  data_model?: Record<string, unknown>;
+  action_runs?: Record<string, PersistedActionRun>;
+  surface_etag?: string | null;
 }
 
 /** Complete chat payload from GET /chats/{id}/full */
@@ -342,6 +438,8 @@ export interface ChatFullResponse {
   updatedAt: string;
   messages: FullMessage[];
   messageCount: number;
+  /** Per-agent surface state keyed by agent id. Wire name: surfaceState (camelCase). */
+  surfaceState?: Record<string, SurfaceStateEntry> | null;
 }
 
 // Re-export citation stream events from citation types
@@ -390,3 +488,7 @@ export type StreamEvent =
   | PlanReviewEvent
   // Persistence events
   | PersistenceCompletedEvent
+  // Custom research phases (e.g. structured-output structuring pass)
+  | PhaseStartedEvent
+  | PhaseCompletedEvent
+  | PhaseErrorEvent

@@ -137,6 +137,7 @@ describe('emit()', () => {
       'revisions_tab_opened',
       'agent_run_clicked',
       'agent_visibility_changed',
+      'surface_preview_real_run',
     ] as const
 
     for (const name of expected) {

@@ -5,6 +5,11 @@ from __future__ import annotations
 import pytest
 
 from databricks_deep_research.errors import WorkflowValidationError
+from databricks_deep_research.workflow.conditions import (
+    ConditionEvaluationError,
+    StateCondition,
+    evaluate_condition_strict,
+)
 from databricks_deep_research.workflow.loader import load_workflow_from_dict
 from databricks_deep_research.workflow.runtime_keys import RUNTIME_INJECTED_KEYS
 
@@ -92,6 +97,37 @@ def test_accepts_declared_nested_builtin_output_field() -> None:
     }
 
     assert load_workflow_from_dict(_workflow(root)).root.id == "root"
+
+
+def test_strict_condition_reads_parsed_coverage_review_decision() -> None:
+    condition = StateCondition(
+        key="coverage_review.decision",
+        operator="eq",
+        value="adjust",
+    )
+
+    assert evaluate_condition_strict(
+        condition,
+        {"coverage_review": {"decision": "adjust"}},
+    )
+
+
+def test_strict_condition_rejects_raw_provider_coverage_review_list() -> None:
+    condition = StateCondition(
+        key="coverage_review.decision",
+        operator="eq",
+        value="adjust",
+    )
+
+    with pytest.raises(ConditionEvaluationError):
+        evaluate_condition_strict(
+            condition,
+            {
+                "coverage_review": [
+                    {"type": "text", "text": '{"decision": "adjust"}'}
+                ]
+            },
+        )
 
 
 def test_rejects_missing_nested_builtin_output_field() -> None:

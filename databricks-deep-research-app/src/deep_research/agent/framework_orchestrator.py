@@ -77,6 +77,9 @@ from deep_research.schemas.streaming import (
     AgentCompletedEvent,
     AgentStartedEvent,
     PersistenceCompletedEvent,
+    PhaseCompletedEvent,
+    PhaseErrorEvent,
+    PhaseStartedEvent,
     ResearchCompletedEvent,
     ResearchStartedEvent,
     StreamErrorEvent,
@@ -778,6 +781,7 @@ async def _resolve_and_prepare_workflow_def(
             or _resolve_workflow(config, tool_names, plugin_manager)
         )
     workflow_def = _apply_runtime_overlays_to_workflow(workflow_def, config)
+    await _inject_structured_output_contract(workflow_def, config, user_id, db)
     workflow_def = _apply_source_scope_to_workflow_declarations(workflow_def, config)
     # Heal node-bound-but-undeclared builtin web tools BEFORE the databricks-fill
     # so a freshly auto-declared (provider-inheriting) web tool also picks up the
@@ -785,6 +789,63 @@ async def _resolve_and_prepare_workflow_def(
     _ensure_node_tools_declared(workflow_def)
     _fill_databricks_tool_defaults(workflow_def, search_cfg)
     return workflow_def
+
+
+async def _inject_structured_output_contract(
+    workflow_def: WorkflowDefinition,
+    config: OrchestrationConfig,
+    user_id: str | None,
+    db: Any | None,
+) -> None:
+    """Make research + synthesis schema-aware for agents with output slots.
+
+    Two append-only, brace-sanitized injections derived from the SAME declared
+    slots:
+    - synthesizer: cover every slot with concrete, citable content (so the
+      per-slot structuring wires become a near-mechanical projection);
+    - planner/researcher: gather evidence for every slot, so research is driven
+      by the schema and slots don't render empty for want of evidence.
+    Only designer-authored ``user_prompt_template``s are touched (builtin
+    default prompts are left as-is). Fail-soft — any problem leaves the
+    workflow unchanged.
+    """
+    if not config.agent_id:
+        return
+    try:
+        from databricks_deep_research.surface import (
+            inject_structured_output_contract as _inject_contract,
+        )
+
+        from deep_research.agent.structured_surface import load_agent_surface
+        from deep_research.surface.output_schema import (
+            collect_output_slots,
+            resolve_binding_for_run,
+        )
+
+        loaded = await load_agent_surface(config, user_id, db)
+        if loaded is None:
+            return
+        surface_dict, _etag = loaded
+        resolved = resolve_binding_for_run(
+            collect_output_slots(surface_dict), config.surface_action
+        )
+        if resolved is None:
+            return
+        injected_synth, injected_research = _inject_contract(
+            workflow_def, resolved.slots
+        )
+        logger.info(
+            "FWK_STRUCTURED_CONTRACT_INJECTED binding=%s slots=%d "
+            "synthesizers=%d researchers=%d",
+            resolved.action,
+            len(resolved.slots),
+            injected_synth,
+            injected_research,
+        )
+    except Exception as exc:  # noqa: BLE001 — never block the run
+        logger.warning(
+            "FWK_STRUCTURED_CONTRACT_INJECT_FAILED error=%s", str(exc)[:200]
+        )
 
 
 def _apply_source_scope_to_workflow_declarations(
@@ -1736,6 +1797,24 @@ async def stream_workflow_via_framework(
                     for key, value in extra_state.items():
                         wf_state.append("init", key, value)
 
+                # Agent-UI surface inputs (Agent UI panel form fields):
+                # validated at the API boundary (scalars, identifier keys,
+                # size caps); seeded as init state keys so node prompts can
+                # reference them as {placeholders}. Reserved keys re-filtered
+                # here as defense in depth — the API validator is the gate.
+                if config.surface_inputs:
+                    from deep_research.surface.validation import (
+                        RESERVED_INPUT_KEYS as _SURFACE_RESERVED,
+                    )
+
+                    for key, value in config.surface_inputs.items():
+                        if key == "query" or key in _SURFACE_RESERVED:
+                            logger.warning(
+                                "SURFACE_INPUT_RESERVED_SKIPPED key=%s", key
+                            )
+                            continue
+                        wf_state.append("init", key, value)
+
                 # Load existing sources for follow-up queries (Step 4)
                 existing_sources = await _load_existing_sources(
                     storage_stack, db, chat_id,
@@ -2130,6 +2209,81 @@ async def stream_workflow_via_framework(
                             citation_corrections=td.get("corrected_citations", 0),
                         )
 
+                    # -----------------------------------------------------
+                    # Structured-output slots (agent surfaces), stub-first:
+                    # a version-2 envelope with every slot "pending" is
+                    # persisted WITH the run (no LLM cost); the per-slot
+                    # wires run AFTER PersistenceCompletedEvent below and
+                    # write results via a targeted update. Fail-soft by
+                    # contract — the report and claims persist unchanged
+                    # when anything here fails.
+                    # -----------------------------------------------------
+                    structured_envelope: dict[str, Any] | None = None
+                    surface_resolved = None
+                    surface_etag: str | None = None
+                    if config.agent_id:
+                        try:
+                            from deep_research.agent.structured_surface import (
+                                MIN_REPORT_CHARS,
+                                build_pending_envelope,
+                                load_agent_surface,
+                            )
+                            from deep_research.surface.output_schema import (
+                                collect_output_slots,
+                                resolve_binding_for_run,
+                            )
+
+                            loaded = (
+                                await load_agent_surface(config, user_id, db)
+                                if len(final_report) >= MIN_REPORT_CHARS
+                                else None
+                            )
+                            if loaded is not None:
+                                surface_dict, surface_etag = loaded
+                                surface_resolved = resolve_binding_for_run(
+                                    collect_output_slots(surface_dict),
+                                    config.surface_action,
+                                )
+                            if surface_resolved is not None:
+                                if config.output_schema or (
+                                    config.output_format
+                                    and config.output_format != "markdown"
+                                ):
+                                    # The plugin output_type rail REPLACES the
+                                    # report content with JSON — combining it
+                                    # with surface slots is almost certainly
+                                    # unintended; keep both but say so.
+                                    # (output_format="markdown" is the plain
+                                    # default, not the plugin rail.)
+                                    logger.warning(
+                                        "FWK_STRUCTURED_SURFACE_OUTPUT_TYPE_ADJACENCY "
+                                        "agent_id=%s output_format=%s",
+                                        config.agent_id,
+                                        config.output_format,
+                                    )
+                                if surface_resolved.ambiguous:
+                                    logger.warning(
+                                        "FWK_STRUCTURED_SURFACE_AMBIGUOUS_BINDING "
+                                        "agent_id=%s picked=%s",
+                                        config.agent_id,
+                                        surface_resolved.action,
+                                    )
+                                structured_envelope = build_pending_envelope(
+                                    binding=surface_resolved.action,
+                                    agent_id=config.agent_id,
+                                    surface_etag=surface_etag,
+                                    slot_names=list(surface_resolved.slots),
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            surface_resolved = None
+                            structured_envelope = None
+                            logger.warning(
+                                "FWK_STRUCTURING_PASS_GUARD_FAILED error=%s "
+                                "— persisting the run without structured "
+                                "output",
+                                str(exc)[:200],
+                            )
+
                     counts = await _persist_completion(
                         config, chat_id_uuid, user_id, query, final_report, event_buffer,
                         wf_state,
@@ -2137,6 +2291,7 @@ async def stream_workflow_via_framework(
                         verification_summary=effective_summary,
                         storage_stack=storage_stack,
                         promotion_trace=promotion_collector.build(query_shape=query),
+                        structured_output=structured_envelope,
                     )
                     if counts:
                         chat_title = derive_chat_title_from_query(query)
@@ -2151,6 +2306,121 @@ async def stream_workflow_via_framework(
                         yield persistence_evt
                         await _buffer_event(persistence_evt, event_buffer)
                         await _flush_event_buffer(event_buffer)
+
+                        # -------------------------------------------------
+                        # Per-slot structured-output wires — AFTER the run
+                        # is persisted (the report is already on screen and
+                        # safe), streaming phase events while they fill the
+                        # pending stub via a targeted update. Fail-soft: a
+                        # failure leaves the stub for the restructure
+                        # endpoint to retry.
+                        # -------------------------------------------------
+                        if (
+                            structured_envelope is not None
+                            and surface_resolved is not None
+                            and config.research_session_id is not None
+                        ):
+                            phase_start = PhaseStartedEvent(
+                                phase_name="structured_output",
+                                description=(
+                                    "Structuring results into the "
+                                    "agent's UI"
+                                ),
+                            )
+                            yield phase_start
+                            await _buffer_event(phase_start, event_buffer)
+                            try:
+                                from deep_research.agent.structured_surface import (
+                                    structure_and_update,
+                                )
+
+                                final_env = await structure_and_update(
+                                    binding=surface_resolved.action,
+                                    agent_id=config.agent_id,
+                                    surface_etag=surface_etag,
+                                    slots=surface_resolved.slots,
+                                    report=final_report,
+                                    claims=extracted_claims or [],
+                                    sources=pool_sources,
+                                    chat_id=chat_id_uuid,
+                                    research_session_id=(
+                                        config.research_session_id
+                                    ),
+                                    storage_stack=storage_stack,
+                                )
+                                slots_meta = (
+                                    final_env.get("meta") or {}
+                                ).get("slots") or {}
+                                failed_slots = [
+                                    name
+                                    for name, meta in slots_meta.items()
+                                    if meta.get("status") == "failed"
+                                ]
+                                ok_slots = [
+                                    name
+                                    for name, meta in slots_meta.items()
+                                    if meta.get("status") in ("ok", "empty")
+                                ]
+                                logger.info(
+                                    "FWK_STRUCTURED_SURFACE_FILLED "
+                                    "binding=%s ok=%d failed=%d "
+                                    "duration_ms=%.0f",
+                                    surface_resolved.action,
+                                    len(ok_slots),
+                                    len(failed_slots),
+                                    float(
+                                        (final_env.get("meta") or {}).get(
+                                            "duration_ms"
+                                        )
+                                        or 0.0
+                                    ),
+                                )
+                                if ok_slots or not failed_slots:
+                                    phase_done = PhaseCompletedEvent(
+                                        phase_name="structured_output",
+                                        duration_ms=float(
+                                            (final_env.get("meta") or {}).get(
+                                                "duration_ms"
+                                            )
+                                            or 0.0
+                                        ),
+                                    )
+                                    yield phase_done
+                                    await _buffer_event(
+                                        phase_done, event_buffer
+                                    )
+                                else:
+                                    phase_err = PhaseErrorEvent(
+                                        phase_name="structured_output",
+                                        error=(
+                                            "structuring failed for: "
+                                            + ", ".join(failed_slots[:4])
+                                        )[:300],
+                                        recoverable=True,
+                                    )
+                                    yield phase_err
+                                    await _buffer_event(
+                                        phase_err, event_buffer
+                                    )
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning(
+                                    "FWK_STRUCTURING_WIRES_GUARD_FAILED "
+                                    "error=%s — slots stay pending; the "
+                                    "restructure endpoint can retry",
+                                    str(exc)[:200],
+                                )
+                                phase_err = PhaseErrorEvent(
+                                    phase_name="structured_output",
+                                    error=str(exc)[:300],
+                                    recoverable=True,
+                                )
+                                yield phase_err
+                                with contextlib.suppress(Exception):
+                                    await _buffer_event(
+                                        phase_err, event_buffer
+                                    )
+                            with contextlib.suppress(Exception):
+                                await _flush_event_buffer(event_buffer)
                 else:
                     logger.warning(
                         "FWK_PERSISTENCE_GUARD_FAILED "
@@ -3108,6 +3378,7 @@ async def _persist_completion(
     verification_summary: Any | None = None,
     storage_stack: Any = None,
     promotion_trace: dict[str, Any] | None = None,
+    structured_output: dict[str, Any] | None = None,
 ) -> dict[str, int] | None:
     """Persist final research session completion.
 
@@ -3127,6 +3398,7 @@ async def _persist_completion(
                 config, final_report, wf_state,
                 claims=claims, verification_summary=verification_summary,
                 promotion_trace=promotion_trace,
+                structured_output=structured_output,
             )
 
             assert config.research_session_id is not None
@@ -3157,6 +3429,7 @@ async def _persist_completion(
                 config, final_report, wf_state,
                 claims=claims, verification_summary=verification_summary,
                 promotion_trace=promotion_trace,
+                structured_output=structured_output,
             )
 
             assert config.message_id is not None
@@ -3329,6 +3602,7 @@ def _build_state_proxy(
     claims: list[Any] | None = None,
     verification_summary: Any | None = None,
     promotion_trace: dict[str, Any] | None = None,
+    structured_output: dict[str, Any] | None = None,
 ) -> Any:
     """Build a minimal object that satisfies the persistence layer's state interface.
 
@@ -3414,6 +3688,9 @@ def _build_state_proxy(
         claims=claims or [],         # L112, L120, L253: iteration + len
         verification_summary=verification_summary,   # L249, L266: .to_dict() if truthy
         promotion_trace=promotion_trace,   # spec 6.1: value-free run trace
+        # Agent-surface structured-output envelope, read via getattr by
+        # _build_verification_data (both storage modes).
+        structured_output=structured_output,
     )
 
 

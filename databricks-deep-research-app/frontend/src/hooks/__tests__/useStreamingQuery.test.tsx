@@ -175,3 +175,95 @@ describe('useStreamingQuery handleSseError terminal-status check', () => {
     });
   });
 });
+
+describe('useStreamingQuery surfaceInputs forwarding', () => {
+  let client: QueryClient;
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    vi.spyOn(jobsApi, 'streamUrl').mockReturnValue('/stream/session-1');
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('forwards surfaceInputs to jobsApi.submit', async () => {
+    const submitSpy = vi.spyOn(jobsApi, 'submit').mockResolvedValue({
+      sessionId: 'session-1',
+      status: 'in_progress',
+    } as Awaited<ReturnType<typeof jobsApi.submit>>);
+
+    const { result } = renderHook(() => useStreamingQuery('chat-1'), {
+      wrapper: makeWrapper(client),
+    });
+
+    await act(async () => {
+      await result.current.sendQuery({
+        message: 'test query',
+        queryMode: 'deep_research',
+        surfaceInputs: { ticker: 'AAPL', year: 2024 },
+      });
+    });
+
+    expect(submitSpy).toHaveBeenCalledOnce();
+    const callArg = submitSpy.mock.calls[0]?.[0];
+    expect(callArg).toMatchObject({
+      surfaceInputs: { ticker: 'AAPL', year: 2024 },
+    });
+  });
+});
+
+describe('useStreamingQuery structured-output phase invalidation', () => {
+  let client: QueryClient;
+
+  beforeEach(() => {
+    FakeEventSource.instances = [];
+    vi.stubGlobal('EventSource', FakeEventSource);
+    client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('phase_completed(structured_output) invalidates chatFull', () => {
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
+    const { result } = renderHook(() => useStreamingQuery('chat-1'), {
+      wrapper: makeWrapper(client),
+    });
+
+    act(() => {
+      result.current.processExternalEvent({
+        eventType: 'phase_completed',
+        phaseName: 'structured_output',
+      } as unknown as Parameters<typeof result.current.processExternalEvent>[0]);
+    });
+
+    expect(invalidateSpy).toHaveBeenCalledWith({
+      queryKey: ['chatFull', 'chat-1'],
+    });
+  });
+
+  it('a non-structured phase does NOT invalidate chatFull', () => {
+    const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
+    const { result } = renderHook(() => useStreamingQuery('chat-1'), {
+      wrapper: makeWrapper(client),
+    });
+
+    act(() => {
+      result.current.processExternalEvent({
+        eventType: 'phase_completed',
+        phaseName: 'some_other_phase',
+      } as unknown as Parameters<typeof result.current.processExternalEvent>[0]);
+    });
+
+    expect(invalidateSpy).not.toHaveBeenCalledWith({
+      queryKey: ['chatFull', 'chat-1'],
+    });
+  });
+});

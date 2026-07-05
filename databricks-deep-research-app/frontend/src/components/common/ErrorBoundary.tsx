@@ -1,5 +1,7 @@
 import React, { Component, ErrorInfo, ReactNode } from 'react';
 
+import { reportClientError } from '@/lib/clientErrors';
+
 interface Props {
   children: ReactNode;
   /** Fallback component to render when an error occurs */
@@ -48,6 +50,17 @@ export class ErrorBoundary extends Component<Props, State> {
 
     // Call optional error callback
     onError?.(error, errorInfo);
+
+    // Best-effort: ship the crash to the backend so it lands in the server logs
+    // (a client render crash is otherwise invisible to `make logs`). The boundary
+    // name is the highest-signal field (meaningful even without sourcemaps).
+    reportClientError({
+      kind: 'render',
+      message: error.message,
+      stack: error.stack,
+      componentStack: errorInfo.componentStack,
+      boundaryName: name ?? null,
+    });
   }
 
   private handleReset = (): void => {

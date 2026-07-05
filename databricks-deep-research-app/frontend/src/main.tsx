@@ -7,6 +7,10 @@ import './styles/globals.css'
 // External plugin entry point - child projects override via Vite alias
 import { registerExternalPlugins } from '@plugins/external'
 import { startClientMetricsPipeline } from './lib/clientMetrics'
+import {
+  configureClientErrorReporting,
+  installGlobalErrorReporting,
+} from './lib/clientErrors'
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -26,6 +30,14 @@ try {
 } catch (error) {
   console.error('[plugins] Failed to register external plugins:', error)
 }
+
+// Ship uncaught client errors to the backend so a browser crash lands in the
+// server logs (otherwise invisible to `make logs`).
+configureClientErrorReporting({
+  endpoint: '/api/v1/observability/client-errors',
+  bundleId: __BUILD_ID__,
+})
+installGlobalErrorReporting()
 
 // Start client-side metrics pipeline (no-op when flag is off)
 startClientMetricsPipeline()

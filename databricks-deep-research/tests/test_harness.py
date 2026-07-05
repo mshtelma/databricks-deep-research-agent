@@ -23,6 +23,7 @@ from databricks_deep_research.agents.harness import (
     _parse_output,
     _serialize_for_context,
     _serialize_source_for_pool,
+    _UnparsedJSONOutput,
     execute_agent,
 )
 from databricks_deep_research.agents.isolation import AgentInput
@@ -252,6 +253,38 @@ def test_parse_output_markdown_json_multiple_blocks() -> None:
     assert _parse_output(raw, config) == {"a": 1}
 
 
+def test_parse_output_json_provider_text_block_list() -> None:
+    config = _make_config(output_format="json")
+    raw = [
+        {
+            "type": "text",
+            "text": '{\n  "decision": "adjust", "reasoning": "needs work"\n}',
+        }
+    ]
+
+    assert _parse_output(raw, config) == {
+        "decision": "adjust",
+        "reasoning": "needs work",
+    }
+
+
+def test_parse_output_json_provider_text_block_markdown_json() -> None:
+    config = _make_config(output_format="json")
+    raw = [{"type": "text", "text": '```json\n{"decision": "complete"}\n```'}]
+
+    assert _parse_output(raw, config) == {"decision": "complete"}
+
+
+def test_parse_output_json_provider_text_blocks_ignore_non_text_blocks() -> None:
+    config = _make_config(output_format="json")
+    raw = [
+        {"type": "reasoning", "text": "internal notes that are not final JSON"},
+        {"type": "text", "text": '{"decision": "adjust"}'},
+    ]
+
+    assert _parse_output(raw, config) == {"decision": "adjust"}
+
+
 def test_serialize_source_for_pool_preserves_full_content() -> None:
     """Source pool admission should keep full tool content, not only snippets."""
     item = _serialize_source_for_pool(
@@ -274,6 +307,21 @@ def test_parse_output_non_string_passthrough() -> None:
     config = _make_config(output_format="json")
     obj = {"already": "parsed"}
     assert _parse_output(obj, config) is obj
+
+
+def test_parse_output_json_non_provider_list_passthrough() -> None:
+    config = _make_config(output_format="json")
+    obj = [{"already": "structured"}]
+
+    assert _parse_output(obj, config) is obj
+
+
+def test_parse_output_json_provider_text_block_failure_returns_unparsed_json() -> None:
+    config = _make_config(output_format="json")
+    result = _parse_output([{"type": "text", "text": "not valid json"}], config)
+
+    assert isinstance(result, _UnparsedJSONOutput)
+    assert str(result) == "not valid json"
 
 
 # ---------------------------------------------------------------------------

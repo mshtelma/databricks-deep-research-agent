@@ -27,7 +27,9 @@ from deep_research.agent_designer.framework_tools import (
     ProposeWorkflowTool,
     RecommendToolsForAssetsTool,
     RemoveToolTool,
+    ScaffoldSurfaceTool,
     SetModelTierTool,
+    SetSurfaceTool,
     UpdateBlockTool,
     ValidateTool,
     _ast_prompts_payload,
@@ -37,6 +39,7 @@ from deep_research.agent_designer.framework_tools import (
     register_designer_tools,
 )
 from deep_research.agent_designer.structural_gate import StructuralGateTool
+from deep_research.surface.scaffold import scaffold_surface_from_workflow
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -1294,3 +1297,245 @@ def test_coerce_critic_verdict_dict_from_repr_string() -> None:
 def test_coerce_critic_verdict_dict_garbage_is_empty_valid() -> None:
     for junk in (None, 12345, "not a verdict", ["x"]):
         assert _coerce_critic_verdict_dict(junk) == {"approve": False, "directives": []}
+
+
+# ---------------------------------------------------------------------------
+# set_surface tool
+# ---------------------------------------------------------------------------
+
+
+def _simple_ast_for_surface() -> dict[str, Any]:
+    """Minimal valid AST suitable for surface tool tests."""
+    return {
+        "id": "wf",
+        "name": "Test Workflow",
+        "description": "A test workflow.",
+        "version": 1,
+        "root": {
+            "id": "root",
+            "type": "agent",
+            "label": "Agent",
+            "config": {
+                "subtype": "researcher",
+                "input_keys": ["query"],
+                "output_key": "out",
+            },
+            "children": [],
+        },
+        "tools": [],
+        "pools": [],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["out"],
+    }
+
+
+@pytest.mark.asyncio
+async def test_set_surface_tool_valid_surface_updates_cache(ctx: ToolContext) -> None:
+    """SetSurfaceTool with a valid surface writes it to current_ast and the cache."""
+    ast = _simple_ast_for_surface()
+    cached: Any = None
+
+    def get_cached() -> Any:
+        return cached
+
+    def set_cached(value: Any) -> None:
+        nonlocal cached
+        cached = value
+
+    # Build a valid scaffolded surface so we know it passes validation.
+    surface = scaffold_surface_from_workflow(ast)
+
+    tool = SetSurfaceTool(state_getter=get_cached, state_setter=set_cached)
+    result = await tool.execute({"surface": surface}, ctx)
+
+    assert result.success is True
+    returned_ast = result.data["current_ast"]
+    assert returned_ast["surface"] == surface
+    # The cache must have been updated.
+    assert cached is not None
+    assert cached["surface"] == surface
+
+
+@pytest.mark.asyncio
+async def test_set_surface_tool_invalid_surface_returns_error_ast_unchanged(
+    ctx: ToolContext,
+) -> None:
+    """SetSurfaceTool with an invalid surface returns an error ToolResult; cache is unchanged."""
+    ast = _simple_ast_for_surface()
+    cached: Any = ast
+
+    def get_cached() -> Any:
+        return cached
+
+    def set_cached(value: Any) -> None:
+        nonlocal cached
+        cached = value
+
+    # Provide a surface with an unknown component — should fail validation.
+    bad_surface = {
+        "version": 1,
+        "components": [
+            {
+                "id": "root",
+                "component": "NotARealComponent",
+                "props": {},
+                "children": [],
+            }
+        ],
+        "data_model": {},
+        "bindings": [],
+    }
+
+    tool = SetSurfaceTool(state_getter=get_cached, state_setter=set_cached)
+    result = await tool.execute({"surface": bad_surface}, ctx)
+
+    assert result.success is False
+    assert "surface validation failed" in result.content.lower()
+    # The cached AST must be untouched.
+    assert cached is ast
+    assert "surface" not in cached
+
+
+@pytest.mark.asyncio
+async def test_set_surface_tool_null_removes_existing_surface(ctx: ToolContext) -> None:
+    """SetSurfaceTool with surface=null removes an existing surface from the AST."""
+    ast = _simple_ast_for_surface()
+    surface = scaffold_surface_from_workflow(ast)
+    ast["surface"] = surface
+    cached: Any = ast
+
+    def get_cached() -> Any:
+        return cached
+
+    def set_cached(value: Any) -> None:
+        nonlocal cached
+        cached = value
+
+    tool = SetSurfaceTool(state_getter=get_cached, state_setter=set_cached)
+    result = await tool.execute({"surface": None}, ctx)
+
+    assert result.success is True
+    assert "surface" not in result.data["current_ast"]
+    assert "surface" not in cached
+
+
+# ---------------------------------------------------------------------------
+# scaffold_surface tool
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_scaffold_surface_tool_binds_all_required_inputs(ctx: ToolContext) -> None:
+    """ScaffoldSurfaceTool derives one binding input per required_input."""
+    ast = _simple_ast_for_surface()
+    ast["required_inputs"] = ["query", "ticker"]
+    # Add a TextField component placeholder for 'ticker' — the scaffold builds
+    # it automatically, so we just need the AST to have the right required_inputs.
+    cached: Any = None
+
+    def get_cached() -> Any:
+        return cached
+
+    def set_cached(value: Any) -> None:
+        nonlocal cached
+        cached = value
+
+    # Seed the state cache with the AST (the tool reads from state_getter).
+    cached = ast
+
+    tool = ScaffoldSurfaceTool(state_getter=get_cached, state_setter=set_cached)
+    result = await tool.execute({}, ctx)
+
+    assert result.success is True
+    surface = result.data["current_ast"]["surface"]
+    # There must be exactly one binding and it must cover both inputs.
+    assert len(surface["bindings"]) == 1
+    binding_inputs = set(surface["bindings"][0]["inputs"].keys())
+    assert binding_inputs == {"query", "ticker"}
+
+
+# ---------------------------------------------------------------------------
+# ParseArchitectAstTool — patch-mode surface carry
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_parse_architect_ast_patch_mode_carries_surface_from_cache(
+    ctx: ToolContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """In patch mode, a surface on the cached AST is carried into the merged result."""
+    # Enable deterministic blueprint mode.
+    monkeypatch.setenv("DESIGNER_DETERMINISTIC_BLUEPRINT", "1")
+
+    from deep_research.agent_designer.blueprint import compute_structural_fingerprint
+
+    # Build a minimal blueprint (the "immutable" structure).
+    blueprint: dict[str, Any] = {
+        "id": "wf",
+        "name": "Blueprint WF",
+        "description": "Test blueprint for surface carry.",
+        "version": 1,
+        "root": {
+            "id": "root",
+            "type": "sequence",
+            "label": "Pipeline",
+            "config": {},
+            "children": [
+                {
+                    "id": "lane_research",
+                    "type": "agent",
+                    "label": "Researcher",
+                    "config": {
+                        "subtype": "researcher",
+                        "input_keys": ["query"],
+                        "output_key": "out",
+                        "system_prompt": "Research the topic.",
+                        "user_prompt_template": "Research {query}.",
+                    },
+                    "children": [],
+                }
+            ],
+        },
+        "tools": [],
+        "pools": [],
+        "sources": [],
+        "models": {},
+        "required_inputs": ["query"],
+        "output_keys": ["out"],
+    }
+    fp = compute_structural_fingerprint(blueprint)
+    blueprint["structural_fingerprint"] = fp
+
+    # Build a surface from the blueprint definition and attach it to the cached AST.
+    surface = scaffold_surface_from_workflow(blueprint)
+    cached_ast = dict(blueprint)
+    cached_ast["surface"] = surface
+
+    def get_cached() -> Any:
+        return cached_ast
+
+    def get_blueprint() -> Any:
+        return blueprint
+
+    def get_fingerprint() -> Any:
+        return fp
+
+    tool = ParseArchitectAstTool(
+        state_getter=get_cached,
+        blueprint_getter=get_blueprint,
+        fingerprint_getter=get_fingerprint,
+    )
+
+    # Emit an empty patch document — all structure is unchanged so fingerprint
+    # check passes, and the surface from the cached AST must be carried over.
+    raw_message = "```json\n{\"node_patches\": {}}\n```"
+    result = await tool.execute({"raw_message": raw_message}, ctx)
+
+    assert result.data["parse_ok"] is True
+    assert result.data.get("parse_mode") == "patches"
+    merged = result.data["current_ast"]
+    assert "surface" in merged, "surface must be carried from the cached AST"
+    assert merged["surface"]["bindings"][0]["action"] == "run"

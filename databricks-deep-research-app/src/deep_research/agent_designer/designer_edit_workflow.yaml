@@ -118,6 +118,7 @@ root:
                 add_block, delete_block, move_block,
                 declare_tool, remove_tool, bind_tool_to_block,
                 set_model_tier, update_pool,
+                set_surface, scaffold_surface,
                 inspect_ast_summary, inspect_assets, recommend_tools_for_assets,
                 list_tool_kinds, validate]
         max_tool_calls: 12
@@ -160,6 +161,34 @@ root:
             write a new node from scratch.
           - Remove a lane/candidate/node: ``delete_block``.
           - Workflow name / description / run-as: ``update_workflow_meta``.
+          - UI (the agent's form + Run + results surface): to ADD a default UI
+            call ``scaffold_surface`` (deterministic: one form field per
+            required workflow input, host-owned run-control metadata, host-bar
+            Run action, and results region). Effort, Sources, Verify citations,
+            Plan review, Report style, Memory, and Live search are platform
+            controls; do NOT model them as ordinary domain fields unless the
+            user explicitly asks for that domain variable. To change
+            fields/layout/actions, call ``set_surface`` with
+            the FULL updated surface object (it replaces wholesale — re-emit
+            everything you keep); read the current one via
+            ``inspect_ast_summary`` context or the conversation. To remove the
+            UI, call ``set_surface`` with ``surface=null``. Binding ``inputs``
+            must cover ``required_inputs``; non-query input keys become
+            ``{placeholder}`` variables usable in node prompts.
+          - STRUCTURED OUTPUT (tables, metric cards, key findings, charts,
+            tabs the MODEL fills after each run): add result components whose
+            ``source``/``items`` pointer is
+            ``<binding output target>/data/<slot_name>`` — one slot per
+            distinct dataset (e.g. ``/results/run/data/comparison``). A Chart
+            may share a Table's slot to visualize the same rows (x_key/y_keys
+            must be that Table's column keys; y columns type ``number``). Do
+            NOT initialize slots in ``data_model``. Give Table columns stable
+            identifier keys with types matching what the agent produces.
+            Organize several result sections with ``Tabs`` whose children are
+            ``TabPane`` components. Keep ``ReportRegion`` only if the user
+            wants the narrative inline — the full report is always available
+            in the conversation. The ``set_surface`` tool description lists
+            the complete component catalog.
 
           ## Addressing
           Target nodes by their ``id`` (preferred) exactly as shown in
