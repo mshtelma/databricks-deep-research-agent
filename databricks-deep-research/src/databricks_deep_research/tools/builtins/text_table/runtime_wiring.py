@@ -185,7 +185,7 @@ def wire_statement_execution_text_table_context(
             "TEXT_TABLE_WIRING_INCOMPLETE warehouse_id=MISSING "
             "reason=STORAGE_WAREHOUSE_ID and TABLE_TOOLS_WAREHOUSE_ID are unset. "
             "Workflows declaring table_search/table_read/table_neighbors/table_load/"
-            "table_aggregate will fail strict tool resolution."
+            "table_aggregate/uc_function will fail strict tool resolution."
         )
 
     return ctx

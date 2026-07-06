@@ -26,6 +26,13 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
+from databricks_deep_research.tools.code_executor import (
+    ALLOWED_MODULES,
+    DATA_LIBS,
+    SkillScriptPolicyError,
+    validate_script_source,
+)
+
 from deep_research.agent_designer.registry import tool_kinds_payload
 from deep_research.core.app_config import get_app_config
 
@@ -174,15 +181,135 @@ def semantic_validation_errors(
                         )
                     )
 
+        # registered: the key must exist in the operator catalog — a save that
+        # can only fail at run time is a trap.
+        if kind == "registered":
+            key_value = config.get("key")
+            if isinstance(key_value, str) and key_value.strip():
+                from deep_research.agent.tools.registered_catalog import (
+                    registered_tool_keys,
+                )
+
+                available = registered_tool_keys()
+                if key_value not in available:
+                    errors.append(
+                        SemanticValidationError(
+                            message=(
+                                f"Tool '{name or idx}' config.key {key_value!r} "
+                                f"is not in the registered catalog. "
+                                f"Available: {available or '(none configured)'}"
+                            ),
+                            path=f"tools[{idx}].config.key",
+                            kind="schema",
+                        )
+                    )
+
+        # python_function: fail the save on policy-violating code (same check
+        # the runtime factory applies) and on gated backends when the operator
+        # trust switch is off — a save that can only fail at run time is a trap.
+        if kind == "python_function":
+            code_value = config.get("code")
+            if isinstance(code_value, str) and code_value.strip():
+                extra = frozenset(
+                    m
+                    for m in (config.get("extra_allowed_modules") or [])
+                    if isinstance(m, str)
+                )
+                try:
+                    validate_script_source(
+                        code_value,
+                        allowed_modules=ALLOWED_MODULES | (extra & DATA_LIBS),
+                    )
+                except SkillScriptPolicyError as exc:
+                    errors.append(
+                        SemanticValidationError(
+                            message=f"Tool '{name or idx}' config.code: {exc}",
+                            path=f"tools[{idx}].config.code",
+                            kind="schema",
+                        )
+                    )
+            if not get_app_config().execution.allow_inprocess_python_function:
+                if config.get("backend") == "restricted":
+                    errors.append(
+                        SemanticValidationError(
+                            message=(
+                                f"Tool '{name or idx}': backend 'restricted' is "
+                                "disabled on this workspace (in-process execution "
+                                "is not a hard boundary); use 'subprocess' or ask "
+                                "the operator to enable "
+                                "execution.allow_inprocess_python_function."
+                            ),
+                            path=f"tools[{idx}].config.backend",
+                            kind="schema",
+                        )
+                    )
+                if config.get("data_lib_mode") == "live":
+                    errors.append(
+                        SemanticValidationError(
+                            message=(
+                                f"Tool '{name or idx}': data_lib_mode 'live' "
+                                "requires the operator trust switch; use the "
+                                "default 'facade' mode."
+                            ),
+                            path=f"tools[{idx}].config.data_lib_mode",
+                            kind="schema",
+                        )
+                    )
+
+        # uc_function is invoked via SQL: the FQN is backtick-quoted per part
+        # and requires a strict catalog.schema.function of [A-Za-z0-9_] (the
+        # UCFunctionTool applies the same regex at runtime — hyphenated catalog
+        # names are unsupported in v1).
+        if kind == "uc_function":
+            fqn = config.get("function")
+            fqn_str = fqn.strip() if isinstance(fqn, str) else ""
+            if fqn_str and not re.fullmatch(
+                r"[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+", fqn_str
+            ):
+                errors.append(
+                    SemanticValidationError(
+                        message=(
+                            f"Tool '{name or idx}' config.function must be a fully "
+                            f"qualified catalog.schema.function (letters, digits, "
+                            f"underscores); got {fqn_str!r}."
+                        ),
+                        path=f"tools[{idx}].config.function",
+                        kind="schema",
+                    )
+                )
+
     # Valid MCP server names: the workflow's top-level ``mcp_servers`` PLUS any
     # ``kind == 'mcp'`` tool cards not yet lifted (so the rule holds pre- and
     # post-normalization). Agents bind to these by name via ``config.mcp_servers``
     # (B2) — separate from the declared-tools rule, since discovered MCP tool
     # names are not statically known at author time.
     mcp_server_names: set[str] = set()
+    # Tool-node refs of type 'mcp' resolve against runtime-discovered tool
+    # names. Allow lists make those names statically known; a server WITHOUT
+    # an allow list exposes an unknowable set, so ref validation must stay
+    # permissive when one exists.
+    mcp_allowed_tool_names: set[str] = set()
+    has_open_mcp_server = False
+
+    def _collect_mcp_allow(server_cfg: dict[str, Any]) -> None:
+        nonlocal has_open_mcp_server
+        allow = server_cfg.get("allow")
+        prefix = server_cfg.get("name_prefix")
+        prefix = prefix if isinstance(prefix, str) else ""
+        if isinstance(allow, list) and allow:
+            for entry in allow:
+                if isinstance(entry, str) and entry:
+                    mcp_allowed_tool_names.add(entry)
+                    if prefix:
+                        mcp_allowed_tool_names.add(f"{prefix}{entry}")
+        else:
+            has_open_mcp_server = True
+
     for server in definition.get("mcp_servers", []) or []:
-        if isinstance(server, dict) and isinstance(server.get("name"), str):
-            mcp_server_names.add(server["name"])
+        if isinstance(server, dict):
+            if isinstance(server.get("name"), str):
+                mcp_server_names.add(server["name"])
+            _collect_mcp_allow(server)
     for tool in tools:
         if isinstance(tool, dict) and tool.get("kind") == "mcp":
             cfg = tool.get("config")
@@ -190,6 +317,7 @@ def semantic_validation_errors(
             mcp_name = cfg.get("name") or tool.get("name")
             if isinstance(mcp_name, str) and mcp_name:
                 mcp_server_names.add(mcp_name)
+            _collect_mcp_allow(cfg)
 
     def validate_agent_tools(config: dict[str, Any], path: str) -> None:
         raw_tools = config.get("tools", [])
@@ -222,6 +350,29 @@ def semantic_validation_errors(
                     )
                 )
 
+    def validate_tool_node_ref(config: dict[str, Any], path: str) -> None:
+        ref = config.get("ref")
+        if not isinstance(ref, dict):
+            return  # shape errors are ToolNodeConfig's (pydantic) job
+        ref_name = ref.get("name")
+        if not isinstance(ref_name, str) or not ref_name:
+            return
+        ref_type = ref.get("type", "builtin")
+        if ref_name in declared_tool_names or ref_name in mcp_allowed_tool_names:
+            return
+        if ref_type == "mcp" and has_open_mcp_server:
+            return  # tools of allow-less servers are only discoverable at runtime
+        errors.append(
+            SemanticValidationError(
+                message=(
+                    f"Tool node references unknown tool '{ref_name}' "
+                    f"(type '{ref_type}'); declare it in the workflow's tools "
+                    "or expose it via an mcp_servers allow list."
+                ),
+                path=f"{path}.config.ref",
+            )
+        )
+
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, dict):
             return
@@ -231,6 +382,8 @@ def semantic_validation_errors(
         if node.get("type") == "agent":
             validate_agent_tools(config, path)
             validate_agent_mcp_servers(config, path)
+        if node.get("type") == "tool":
+            validate_tool_node_ref(config, path)
         if node.get("type") == "plan_and_execute":
             for nested_key in ("planner", "evaluator"):
                 nested = config.get(nested_key)

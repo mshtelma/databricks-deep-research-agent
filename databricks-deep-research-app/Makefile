@@ -1006,3 +1006,11 @@ logs:
 		{ echo "ERROR: Unknown target '$(TARGET)'. Valid targets:"; uv run python3 -c "import yaml;[print(f'  {k}') for k in yaml.safe_load(open('databricks.yml'))['targets']]"; exit 1; }; \
 	APP_NAME=$$(databricks bundle summary -t $(TARGET) --output json 2>/dev/null | jq -r '.resources.apps.deep_research_agent.name // empty'); \
 	./scripts/download-app-logs.sh "$$APP_NAME" "$$PROFILE" $(FOLLOW) $(SEARCH)
+
+# Run e2e against a DEPLOYED app. DEPLOY_PROFILE = CLI profile (default ais),
+# DEPLOY_APP = app name. E2E_ARGS passes through to playwright (e.g. a spec file).
+DEPLOY_PROFILE ?= ais
+DEPLOY_APP ?= deep-research-agent-ais
+e2e-deployed:
+	@echo "Running e2e against DEPLOYED app '$(DEPLOY_APP)' (profile $(DEPLOY_PROFILE))..."
+	@cd e2e && PROFILE=$(DEPLOY_PROFILE) APP_NAME=$(DEPLOY_APP) ./run-deployed.sh $(E2E_ARGS)

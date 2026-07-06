@@ -1057,6 +1057,11 @@ async def stream_workflow_via_framework(
     structured_output: dict[str, Any] | None = None
     simple_response: str | None = None
     _synthesis_chunks: list[str] = []
+    # Positive-completion flag: set True ONLY on a real WorkflowCompletedEvent.
+    # Excludes RESEARCH_TIMEOUT (caught below, no such event) and exceptions
+    # (routed to the failure handler). Gates the report-less completion path so
+    # it can never mark a timed-out or failed run COMPLETED.
+    _workflow_completed = False
     wf_state: WorkflowState | None = None
 
     # ------------------------------------------------------------------
@@ -1594,8 +1599,18 @@ async def stream_workflow_via_framework(
                 from databricks_deep_research.tools.factories.databricks import (
                     DatabricksToolFactory,
                 )
+                from databricks_deep_research.tools.factories.decorated import (
+                    DecoratedToolFactory,
+                )
+                from databricks_deep_research.tools.factories.registered import (
+                    RegisteredToolFactory,
+                )
                 from databricks_deep_research.tools.resolver import (
                     ToolResolver,
+                )
+
+                from deep_research.agent.tools.registered_catalog import (
+                    get_registered_tool_catalog,
                 )
 
                 if (
@@ -1675,13 +1690,41 @@ async def stream_workflow_via_framework(
                 # on-demand by the factory chain. The resolver shares the
                 # runner's factory_context — both must see the same
                 # BRAVE_API_KEY / workspace_client / user_token wiring.
+                # Local alias: the bare ``get_app_config`` name is imported inside
+                # a sibling conditional block below, which makes it a function-
+                # scope local — referencing the bare name here would raise
+                # UnboundLocalError when that block hasn't run. Import under a
+                # distinct alias (file convention) so this path is independent.
+                from deep_research.core.app_config import (
+                    get_app_config as _get_app_cfg_tools,
+                )
+
+                _tools_cfg = _get_app_cfg_tools().tools
                 tool_resolver = ToolResolver(
                     declarations=list(workflow_def.tools) if workflow_def.tools else None,
                     # No kind overlap: builtin handles web_search/web_crawl/file_search;
                     # Databricks handles vector_search/genie/knowledge_assistant.
-                    factories=[BuiltinToolFactory(), DatabricksToolFactory()],
+                    # Stored workflow definitions reach this chain, so decorated
+                    # imports are gated by the operator allowlist (empty =
+                    # fail-closed) and `registered` resolves by catalog lookup.
+                    factories=[
+                        BuiltinToolFactory(),
+                        DatabricksToolFactory(),
+                        DecoratedToolFactory(
+                            allowed_import_prefixes=tuple(
+                                _tools_cfg.decorated_import_allowlist
+                            )
+                        ),
+                        RegisteredToolFactory(get_registered_tool_catalog()),
+                    ],
                     factory_context=runner.factory_context,
                 )
+                # Operator trust switch for python_function's non-boundary
+                # in-process paths (backend: restricted / data_lib_mode: live);
+                # the builtin factory fails closed without it.
+                tool_resolver.factory_context.extras[
+                    "_allow_inprocess_python_function"
+                ] = bool(_get_app_cfg_tools().execution.allow_inprocess_python_function)
                 logger.info(
                     "FWK_TOOL_RESOLVER_READY declarations=%d "
                     "workspace_client=%s overrides=%d",
@@ -1957,6 +2000,7 @@ async def stream_workflow_via_framework(
                             # check below, which may call get_persistence_delta()
                             # and reset the delta (discarding final_report).
                             elif isinstance(fw_event, FwkWorkflowCompletedEvent):
+                                _workflow_completed = True
                                 if fw_event.final_report:
                                     final_report = fw_event.final_report
                                     logger.info(
@@ -2161,6 +2205,31 @@ async def stream_workflow_via_framework(
                         await event_buffer.flush()
                     except Exception as e:
                         logger.warning("FWK_EVENT_BUFFER_FLUSH_FAILED error=%s", str(e)[:200])
+
+                # Report-less completion: a run that finished SUCCESSFULLY
+                # (positive WorkflowCompletedEvent) but produced no report — a
+                # pure tool-node / no-LLM pipeline whose terminal output is a
+                # tool result, not synthesized prose. Synthesize a fallback from
+                # the declared output_keys so the run records a terminal
+                # transition AND writes assistant-message content through the
+                # normal completion path below (a status-only flip would leave a
+                # NULL message + emit no PersistenceCompletedEvent). Gated on
+                # _workflow_completed so a RESEARCH_TIMEOUT or failure is NEVER
+                # flipped to COMPLETED here (they mark FAILED elsewhere).
+                if (
+                    _workflow_completed
+                    and not final_report
+                    and config.message_id is not None
+                    and config.research_session_id is not None
+                    and chat_id is not None
+                    and user_id is not None
+                    and wf_state is not None
+                ):
+                    final_report = _synthesize_terminal_report(wf_state, workflow_def)
+                    logger.info(
+                        "FWK_REPORT_LESS_COMPLETION synthesized_len=%d",
+                        len(final_report),
+                    )
 
                 # F-PERSIST-GUARDS: `db is not None` was a proxy for
                 # "persistence is wired up", but the independent-session
@@ -3474,6 +3543,48 @@ async def _persist_completion(
                     str(config.research_session_id)[:8],
                 )
         return None
+
+
+def _render_output_value(value: Any) -> str:
+    """Render a workflow output value as readable markdown (bounded)."""
+    if isinstance(value, str):
+        text = value
+    elif isinstance(value, dict):
+        inner = value.get("result") if "result" in value else value.get("content")
+        if inner is not None and not isinstance(inner, (dict, list)):
+            text = str(inner)
+        else:
+            try:
+                text = json.dumps(value, default=str, indent=2)
+            except (TypeError, ValueError):
+                text = str(value)
+    else:
+        text = str(value)
+    text = text.strip()
+    return text[:4000] + "…" if len(text) > 4000 else text
+
+
+def _synthesize_terminal_report(
+    wf_state: WorkflowState, workflow_def: WorkflowDefinition
+) -> str:
+    """Fallback report for a SUCCESSFUL run that produced no synthesized prose.
+
+    Joins the workflow's declared ``output_keys`` values (a pure tool-node /
+    no-LLM pipeline's terminal outputs) into a minimal markdown summary. Always
+    returns non-empty content so the normal completion path writes an assistant
+    message (never a NULL-content turn).
+    """
+    parts: list[str] = []
+    for key in workflow_def.output_keys or []:
+        value = wf_state.get(key)
+        if value is None:
+            continue
+        rendered = _render_output_value(value)
+        if rendered:
+            parts.append(f"**{key}**\n\n{rendered}")
+    if parts:
+        return "\n\n".join(parts)
+    return "Workflow completed."
 
 
 def _get_pool_sources(wf_state: WorkflowState | None) -> list[Any]:

@@ -525,6 +525,156 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
 }
 
 
+# Authoring sugar over the workspace managed MCP server for UC functions: the
+# normalizer lifts each uc_function card into an mcp_servers entry
+# (managed_target: functions/{catalog}/{schema}, allow: [function]).
+_UC_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "function": {
+            "type": "string",
+            "title": "UC Function",
+            "description": (
+                "Fully qualified Unity Catalog scalar function "
+                "(catalog.schema.function). Invoked via SQL under the caller's "
+                "identity (OBO) — no app-side sandbox. Scalar functions only."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean), required, default. Usually left empty — "
+                "auto-discovered from the function signature on save. Set "
+                "explicitly to override."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "description": (
+                "On (default): results are admitted to the evidence pool and can be "
+                "cited. Off: results inform the model but are never cited."
+            ),
+            "default": True,
+        },
+    },
+    "required": ["function"],
+}
+
+
+# Operator-curated catalog tool: workflows reference a key, never an import
+# path (dict lookup at resolution — stored definitions cannot execute imports).
+_REGISTERED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "key": {
+            "type": "string",
+            "title": "Catalog Key",
+            "description": (
+                "Key of an operator-registered Python tool (app.yaml "
+                "tools.registered_tools). Save-time validation rejects keys "
+                "that are not in the catalog."
+            ),
+        },
+    },
+    "required": ["key"],
+}
+
+
+# Fixed design-time Python code executed in the run's persistent sandboxed
+# session (subprocess REPL). Callable by agents AND by deterministic tool nodes.
+_PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {
+            "type": "string",
+            "title": "Python Code",
+            "x-widget": "code",
+            "description": (
+                "Fixed function body authored at design time. Declared params "
+                "become globals; assign `result`. Runs in the run's sandboxed "
+                "session process — variables persist across calls (the run's "
+                "scratchpad)."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean/array/object), required, default, description."
+            ),
+        },
+        "backend": {
+            "type": "string",
+            "title": "Backend",
+            "enum": ["subprocess", "restricted"],
+            "default": "subprocess",
+            "description": (
+                "subprocess (default): hardened per-run sandbox session. "
+                "restricted: in-process — trusted hosts only (requires the "
+                "operator switch execution.allow_inprocess_python_function)."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "title": "Timeout (seconds)",
+            "default": 10,
+        },
+        "extra_allowed_modules": {
+            "type": "array",
+            "title": "Data Libraries",
+            "items": {"type": "string", "enum": ["pandas", "numpy"]},
+            "description": (
+                "Vetted data libraries importable by the code (facade view: "
+                "top-level API, IO/eval primitives removed)."
+            ),
+        },
+        "data_lib_mode": {
+            "type": "string",
+            "title": "Data-lib Exposure",
+            "enum": ["facade", "live"],
+            "default": "facade",
+            "description": (
+                "facade (default): top-level pandas/numpy API only. live: full "
+                "modules — trusted hosts only (operator switch required)."
+            ),
+        },
+        "reads_namespace": {
+            "type": "array",
+            "title": "Reads Variables",
+            "items": {"type": "string"},
+            "description": (
+                "Session variables the code expects to already exist (bridged "
+                "from the compute scratchpad when JSON-able)."
+            ),
+        },
+        "bind_result": {
+            "type": "string",
+            "title": "Bind Result As",
+            "description": (
+                "Also store the script's `result` under this session variable "
+                "so later functions and agents can use it."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "default": False,
+            "description": (
+                "Admit successful results into the evidence pool so synthesis "
+                "can cite them (function:// source)."
+            ),
+        },
+    },
+    "required": ["code"],
+}
+
+
 _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     "web_search": {
         "layer": "A",
@@ -685,9 +835,15 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     },
     "compute": {"layer": "C", "config_schema": _COMPUTE_SCHEMA},
     "compute_namespace": {"layer": "C", "config_schema": _COMPUTE_NAMESPACE_SCHEMA},
+    "python_function": {"layer": "C", "config_schema": _PYTHON_FUNCTION_SCHEMA},
+    "registered": {"layer": "D", "config_schema": _REGISTERED_SCHEMA},
     "mcp": {
         "layer": "B",
         "config_schema": _MCP_SERVER_SCHEMA,
+    },
+    "uc_function": {
+        "layer": "B",
+        "config_schema": _UC_FUNCTION_SCHEMA,
     },
     "table_discovery": {
         "layer": "B",

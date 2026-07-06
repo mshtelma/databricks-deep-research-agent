@@ -20,7 +20,7 @@ _SUPPORTED_KINDS = frozenset({
     "file_search", "compute", "compute_namespace",
     "table_discovery", "table_search", "table_read",
     "table_neighbors", "table_load", "table_aggregate",
-    "read_skill",
+    "read_skill", "python_function", "uc_function",
 })
 _FUNCTIONAL_TABLE_KINDS = frozenset({
     "table_search",
@@ -32,6 +32,46 @@ _FUNCTIONAL_TABLE_KINDS = frozenset({
 
 _SEARCH_PROVIDERS = frozenset({"brave", "jina", "databricks"})
 _CRAWL_PROVIDERS = frozenset({"jina"})
+
+# python_function construction-time code validation, cached by (code, modules)
+# hash: validate_all() constructs every declared tool per request, so repeat
+# validations of unchanged code must be free.
+_PYFN_VALIDATION_CACHE: dict[tuple[str, frozenset[str]], str | None] = {}
+
+
+def _validate_python_function_code(
+    tool_name: str, code: str, extra_modules: frozenset[str]
+) -> None:
+    """Fail tool construction (pre-LLM-spend) on policy-violating code."""
+    import hashlib
+
+    from databricks_deep_research.tools.builtins._skill_script_runner import (
+        ALLOWED_MODULES,
+        SkillScriptPolicyError,
+        validate_script_source,
+    )
+
+    key = (hashlib.sha256(code.encode("utf-8")).hexdigest(), extra_modules)
+    if key not in _PYFN_VALIDATION_CACHE:
+        try:
+            validate_script_source(
+                code, allowed_modules=ALLOWED_MODULES | extra_modules
+            )
+            _PYFN_VALIDATION_CACHE[key] = None
+        except SkillScriptPolicyError as exc:
+            _PYFN_VALIDATION_CACHE[key] = str(exc)
+    error = _PYFN_VALIDATION_CACHE[key]
+    if error is not None:
+        raise ValueError(f"python_function '{tool_name}': {error}")
+
+
+def _inprocess_python_function_allowed(ctx: ToolFactoryContext) -> bool:
+    """Operator trust switch for the non-boundary in-process paths."""
+    if ctx.extras.get("_allow_inprocess_python_function") is True:
+        return True
+    return os.environ.get(
+        "DDR_ALLOW_INPROCESS_PYTHON_FUNCTION", ""
+    ).strip().lower() in ("1", "true", "yes")
 
 
 def _clean_str(value: Any) -> str | None:
@@ -548,6 +588,38 @@ class BuiltinToolFactory:
                 "carries one row per group with the requested aggregate value."
             ),
         ),
+        "python_function": CatalogCard(
+            summary=(
+                "Run a FIXED, design-time Python function (SMA, reshaping, "
+                "forecast glue) in the run's sandboxed session."
+            ),
+            input_prose=(
+                "Provide the declared parameters (they become globals). The "
+                "function's code is fixed at design time; the script assigns "
+                "'result'. Variables it defines persist in the session for "
+                "later calls."
+            ),
+            output_prose=(
+                "Returns the script's 'result' value plus captured stdout. "
+                "With citeable enabled, the result is admitted as evidence."
+            ),
+        ),
+        "uc_function": CatalogCard(
+            summary=(
+                "Invoke an existing Unity Catalog scalar function "
+                "(catalog.schema.fn) via SQL under the caller's identity (OBO)."
+            ),
+            input_prose=(
+                "Provide the function's declared arguments by name. Argument "
+                "values are bound as SQL parameters; the function runs on a SQL "
+                "warehouse and returns a single scalar."
+            ),
+            output_prose=(
+                "Returns the function's scalar result. With citeable enabled "
+                "(default), the result is admitted as evidence with a "
+                "'uc-function://' source."
+            ),
+        ),
         "read_skill": CatalogCard(
             summary="Load the full body of an attached skill by name (progressive disclosure).",
             input_prose=(
@@ -577,6 +649,8 @@ class BuiltinToolFactory:
         "table_load": None,
         "table_aggregate": None,
         "read_skill": None,
+        "python_function": None,
+        "uc_function": None,
     }
 
     def supports(self, kind: str) -> bool:
@@ -734,6 +808,169 @@ class BuiltinToolFactory:
                 compute_resolver=_resolve_compute,
                 name=decl.name,
                 description=decl.description,
+            )
+
+        if decl.kind == "python_function":
+            from databricks_deep_research.tools.builtins._skill_script_runner import (
+                DATA_LIBS,
+            )
+            from databricks_deep_research.tools.builtins.compute import (
+                PythonComputeTool,
+            )
+            from databricks_deep_research.tools.builtins.python_function import (
+                PythonFunctionTool,
+            )
+            from databricks_deep_research.tools.code_executor import (
+                RestrictedCodeExecutor,
+                SandboxSession,
+                SandboxSessionHolder,
+            )
+
+            code = decl.config.get("code")
+            if not isinstance(code, str) or not code.strip():
+                raise ValueError(
+                    f"python_function '{decl.name}' requires non-empty config.code"
+                )
+            extra_modules = [
+                m
+                for m in (decl.config.get("extra_allowed_modules") or [])
+                if isinstance(m, str) and m
+            ]
+            unknown_modules = [m for m in extra_modules if m not in DATA_LIBS]
+            if unknown_modules:
+                raise ValueError(
+                    f"python_function '{decl.name}': extra_allowed_modules "
+                    f"{unknown_modules} are not vetted data libraries; "
+                    f"allowed: {sorted(DATA_LIBS)}"
+                )
+            data_lib_mode = decl.config.get("data_lib_mode", "facade")
+            if data_lib_mode not in ("facade", "live"):
+                raise ValueError(
+                    f"python_function '{decl.name}': data_lib_mode must be "
+                    f"'facade' or 'live', got {data_lib_mode!r}"
+                )
+            backend = decl.config.get("backend", "subprocess")
+            _validate_python_function_code(decl.name, code, frozenset(extra_modules))
+            params = [
+                p for p in (decl.config.get("params") or []) if isinstance(p, dict)
+            ]
+            timeout_seconds = float(decl.config.get("timeout_seconds", 10.0))
+            reads_namespace = [
+                n
+                for n in (decl.config.get("reads_namespace") or [])
+                if isinstance(n, str) and n
+            ]
+            bind_result = decl.config.get("bind_result")
+            bind_result = bind_result if isinstance(bind_result, str) and bind_result else None
+            citeable = bool(decl.config.get("citeable", False))
+
+            def _resolve_compute() -> PythonComputeTool | None:
+                """Sibling lookup: the run's shared compute scratchpad, if any."""
+                cached = ctx.extras.get("_resolver_cache", {})
+                candidate = cached.get("compute")
+                if isinstance(candidate, PythonComputeTool):
+                    return candidate
+                for value in cached.values():
+                    if isinstance(value, PythonComputeTool):
+                        return value
+                return None
+
+            if backend == "restricted":
+                if not _inprocess_python_function_allowed(ctx):
+                    raise ValueError(
+                        f"python_function '{decl.name}': backend 'restricted' is "
+                        "disabled on this host — in-process execution is not a "
+                        "hard security boundary. Use the default 'subprocess' "
+                        "backend, or have the operator enable "
+                        "execution.allow_inprocess_python_function."
+                    )
+                return PythonFunctionTool(
+                    name=decl.name,
+                    code=code,
+                    params=params,
+                    description=decl.description,
+                    backend="restricted",
+                    restricted_executor=RestrictedCodeExecutor(
+                        enable_dataframes=bool(extra_modules),
+                        max_execution_seconds=timeout_seconds,
+                    ),
+                    compute_resolver=_resolve_compute,
+                    reads_namespace=reads_namespace,
+                    bind_result=bind_result,
+                    citeable=citeable,
+                    timeout_seconds=timeout_seconds,
+                )
+            if backend != "subprocess":
+                raise ValueError(
+                    f"python_function '{decl.name}': unknown backend {backend!r} "
+                    "(expected 'subprocess' or 'restricted')"
+                )
+            if data_lib_mode == "live" and not _inprocess_python_function_allowed(ctx):
+                raise ValueError(
+                    f"python_function '{decl.name}': data_lib_mode 'live' exposes "
+                    "the full pandas/numpy modules and requires the operator "
+                    "trust switch; use the default 'facade' mode."
+                )
+            holder = ctx.extras.get("_sandbox_session")
+            if not isinstance(holder, SandboxSessionHolder):
+                holder = SandboxSessionHolder()
+                ctx.extras["_sandbox_session"] = holder
+
+            session_holder = holder
+
+            def _get_session() -> SandboxSession:
+                return session_holder.get_or_create(
+                    wall_timeout_seconds=timeout_seconds,
+                    extra_allowed_modules=extra_modules,
+                    data_lib_mode=data_lib_mode,
+                )
+
+            return PythonFunctionTool(
+                name=decl.name,
+                code=code,
+                params=params,
+                description=decl.description,
+                backend="subprocess",
+                session_provider=_get_session,
+                compute_resolver=_resolve_compute,
+                extra_allowed_modules=extra_modules,
+                data_lib_mode=data_lib_mode,
+                reads_namespace=reads_namespace,
+                bind_result=bind_result,
+                citeable=citeable,
+                timeout_seconds=timeout_seconds,
+            )
+
+        if decl.kind == "uc_function":
+            if ctx.sql_executor is None:
+                raise ValueError(
+                    f"sql_executor required in ToolFactoryContext for "
+                    f"uc_function tool '{decl.name}' — set STORAGE_WAREHOUSE_ID "
+                    f"or TABLE_TOOLS_WAREHOUSE_ID so the OBO SQL executor is "
+                    f"wired"
+                )
+            from databricks_deep_research.tools.builtins.uc_function import (
+                UCFunctionTool,
+            )
+
+            function_name = decl.config.get("function")
+            if not isinstance(function_name, str) or not function_name.strip():
+                raise ValueError(
+                    f"uc_function '{decl.name}' requires config.function "
+                    f"(the 'catalog.schema.fn' FQN)"
+                )
+            uc_params = [
+                p
+                for p in (decl.config.get("params") or [])
+                if isinstance(p, dict)
+            ]
+            return UCFunctionTool(
+                name=decl.name,
+                function_name=function_name.strip(),
+                sql_executor=ctx.sql_executor,
+                params=uc_params,
+                description=decl.description,
+                citeable=bool(decl.config.get("citeable", True)),
             )
 
         if decl.kind == "read_skill":

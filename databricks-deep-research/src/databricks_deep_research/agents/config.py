@@ -408,8 +408,24 @@ class ToolNodeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     ref: ToolRefConfig  # tool reference descriptor
     input_mapping: dict[str, str] = Field(default_factory=dict)
+    input_literals: dict[str, Any] = Field(default_factory=dict)
     output_key: str = "tool_result"
+    output_data_key: str | None = None  # where ToolResult.data (+ success/error) lands
+    bind_namespace: str | None = None  # also inject the result into the compute namespace
+    # False preserves pre-existing semantics (failed ToolResults are stored, not
+    # raised); newly authored nodes should set True to engage error_handling.
+    fail_on_error: bool = False
+    enforce_output_schema: bool = False  # opt-in required-keys check of the output
     output_schema: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _no_arg_collisions(self) -> ToolNodeConfig:
+        overlap = sorted(set(self.input_mapping) & set(self.input_literals))
+        if overlap:
+            raise ValueError(
+                f"input_mapping and input_literals define the same argument(s): {overlap}"
+            )
+        return self
 
 
 class LoopNodeConfig(BaseModel):
