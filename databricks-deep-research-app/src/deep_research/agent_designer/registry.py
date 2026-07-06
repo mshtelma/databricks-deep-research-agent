@@ -52,8 +52,10 @@ NODE_TYPE_META: dict[str, dict[str, Any]] = {
         "category": "leaf",
         "is_composite": False,
         "config_model": ToolNodeConfig,
-        "default_config": {"ref": "web_search"},
-        "summary_template": "tool: {{ref}}",
+        # Unbound draft: the picker sets ref.name (create/select a declaration).
+        # ref MUST be a dict — a bare string fails ToolNodeConfig validation.
+        "default_config": {"ref": {"name": ""}},
+        "summary_template": "tool: {{ref.name}}",
     },
     NodeType.sequence: {
         "label": "Sequence",
@@ -525,15 +527,17 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
 }
 
 
-# Authoring sugar over the workspace managed MCP server for UC functions: the
-# normalizer lifts each uc_function card into an mcp_servers entry
-# (managed_target: functions/{catalog}/{schema}, allow: [function]).
+# A UC scalar function invoked at runtime via the OBO SQL executor
+# (UCFunctionTool) — first-class, NOT normalized into mcp_servers. ``config.params``
+# is usually left empty and auto-filled from the function signature on save
+# (uc_function_introspect); the Designer picker fills ``function`` + ``params``.
 _UC_FUNCTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "function": {
             "type": "string",
             "title": "UC Function",
+            "x-widget": "uc-function-picker",
             "description": (
                 "Fully qualified Unity Catalog scalar function "
                 "(catalog.schema.function). Invoked via SQL under the caller's "
@@ -543,12 +547,12 @@ _UC_FUNCTION_SCHEMA: dict[str, Any] = {
         "params": {
             "type": "array",
             "title": "Parameters",
+            "x-widget": "hidden",
             "items": {"type": "object"},
             "description": (
                 "Declared inputs: objects with name, type (string/integer/"
-                "number/boolean), required, default. Usually left empty — "
-                "auto-discovered from the function signature on save. Set "
-                "explicitly to override."
+                "number/boolean), required, default. Auto-discovered from the "
+                "function signature on save; hidden in the picker UI."
             ),
         },
         "citeable": {

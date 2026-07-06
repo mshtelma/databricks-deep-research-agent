@@ -35,6 +35,8 @@ import {
 } from '@/hooks/useDesignerResources';
 import type { DesignerResource } from '@/types/agentDesigner';
 
+import { UcFunctionPicker } from './UcFunctionPicker';
+
 // ---------------------------------------------------------------------------
 // Shared className recipes — keep styling tokens in one place so future
 // adjustments propagate everywhere.
@@ -140,7 +142,9 @@ export function SchemaField({
     | 'code'
     | 'prompt'
     | 'resource-select'
-    | 'json';
+    | 'json'
+    | 'uc-function-picker'
+    | 'hidden';
 
   if (Array.isArray(enumValues) || Array.isArray(enumOptions)) {
     widgetKind = 'select';
@@ -156,6 +160,10 @@ export function SchemaField({
       widgetKind = 'password';
     } else if (w === 'json') {
       widgetKind = 'json';
+    } else if (w === 'uc-function-picker') {
+      widgetKind = 'uc-function-picker';
+    } else if (w === 'hidden') {
+      widgetKind = 'hidden';
     } else {
       console.warn(
         `agent-designer: unknown widget '${w}' for field '${name}'; falling back to default`,
@@ -186,6 +194,25 @@ export function SchemaField({
   // -------------------------------------------------------------------------
   // Render by widget kind
   // -------------------------------------------------------------------------
+
+  if (widgetKind === 'hidden') {
+    return <></>;
+  }
+
+  if (widgetKind === 'uc-function-picker') {
+    const fqn = typeof value === 'string' ? value : '';
+    return (
+      <div className="mb-3.5">
+        <label className={LABEL_CLASS}>
+          {label}
+          {required && <span className={REQUIRED_MARK_CLASS}>*</span>}
+        </label>
+        <UcFunctionPicker value={{ function: fqn }} onChange={(v) => onChange(v.function)} />
+        {descEl}
+        {errEls}
+      </div>
+    );
+  }
 
   if (widgetKind === 'checkbox') {
     return (

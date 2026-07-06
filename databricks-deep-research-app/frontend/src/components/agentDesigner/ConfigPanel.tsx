@@ -47,6 +47,7 @@ import { resolveBlock } from '@/lib/blockPath';
 import { requiredConfigErrors, schemaProperties } from '@/lib/jsonSchema';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import { TypePill, LayerChip } from './atoms';
+import { FunctionToolNodeEditor } from './FunctionToolNodeEditor';
 import { SchemaField } from './SchemaField';
 import { AddToolDialog } from './AddToolDialog';
 import { WorkflowSettingsPanel } from './WorkflowSettingsPanel';
@@ -568,6 +569,12 @@ function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): R
     return (
       <p className="text-[12px] text-db-gray-text">No configurable properties for this block.</p>
     );
+  }
+
+  // Tool nodes use a bespoke picker + parameter-mapping editor (it must also
+  // create/select a tool declaration in ast.tools, which SchemaField cannot do).
+  if (block.type === 'tool') {
+    return <FunctionToolNodeEditor block={block} selectedPath={selectedPath} />;
   }
 
   const schemaProps =

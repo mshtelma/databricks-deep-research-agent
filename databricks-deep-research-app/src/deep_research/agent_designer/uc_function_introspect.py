@@ -19,8 +19,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import re
 from typing import TYPE_CHECKING, Any
+
+from deep_research.agent_designer.uc_metadata import (
+    FQN_RE,
+    parse_parameter_rows,
+    run_parameters_query,
+)
 
 if TYPE_CHECKING:
     from databricks_deep_research.tools.builtins.text_table.tools._common import (
@@ -28,48 +33,6 @@ if TYPE_CHECKING:
     )
 
 logger = logging.getLogger(__name__)
-
-# Strict 3-part FQN of [A-Za-z0-9_] parts — matches UCFunctionTool's runtime
-# regex and semantic_validation. The catalog part is interpolated into the
-# query's FROM clause, so it MUST be validated (no backticks/spaces) first.
-_FQN_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
-
-# Unity Catalog information_schema ``data_type`` -> our coarse param type.
-# Unmapped scalars default to "string" (bound as STRING, implicit-cast).
-_UC_TYPE_MAP: dict[str, str] = {
-    "STRING": "string",
-    "VARCHAR": "string",
-    "CHAR": "string",
-    "INT": "integer",
-    "INTEGER": "integer",
-    "BIGINT": "integer",
-    "SMALLINT": "integer",
-    "TINYINT": "integer",
-    "LONG": "integer",
-    "DOUBLE": "number",
-    "FLOAT": "number",
-    "REAL": "number",
-    "DECIMAL": "number",
-    "NUMERIC": "number",
-    "BOOLEAN": "boolean",
-    "BOOL": "boolean",
-    "DATE": "string",
-    "TIMESTAMP": "string",
-    "TIMESTAMP_NTZ": "string",
-    "INTERVAL": "string",
-    "BINARY": "string",
-}
-_COMPLEX_PREFIXES = ("ARRAY", "MAP", "STRUCT")
-
-
-def _is_complex_type(data_type: str, full_data_type: str) -> bool:
-    return data_type in ("ARRAY", "MAP", "STRUCT") or full_data_type.upper().startswith(
-        _COMPLEX_PREFIXES
-    )
-
-
-def _uc_type_to_param_type(data_type: str) -> str:
-    return _UC_TYPE_MAP.get(data_type.upper(), "string")
 
 
 def _collect_targets(
@@ -95,7 +58,7 @@ def _collect_targets(
         if isinstance(existing, list) and existing:
             continue
         fqn = str(config.get("function") or "").strip()
-        if not _FQN_RE.fullmatch(fqn):
+        if not FQN_RE.fullmatch(fqn):
             continue
         catalog, schema, fn = fqn.split(".")
         targets.setdefault((catalog.lower(), schema.lower()), []).append(
@@ -104,70 +67,24 @@ def _collect_targets(
     return targets
 
 
-def _run_query(
-    sql_executor: SqlExecutor, catalog: str, schema: str, fn_names: list[str]
-) -> list[dict[str, Any]]:
-    from databricks.sdk.service.sql import StatementParameterListItem
-
-    markers = ", ".join(f":fn{i}" for i in range(len(fn_names)))
-    sql = (
-        "SELECT specific_name, parameter_name, data_type, full_data_type, "
-        "ordinal_position, parameter_default "
-        f"FROM `{catalog}`.information_schema.parameters "
-        "WHERE specific_schema = :schema "
-        f"AND specific_name IN ({markers}) "
-        "AND parameter_name IS NOT NULL "
-        "ORDER BY specific_name, ordinal_position"
-    )
-    params = [StatementParameterListItem(name="schema", value=schema, type="STRING")]
-    for i, fn in enumerate(fn_names):
-        params.append(
-            StatementParameterListItem(name=f"fn{i}", value=fn, type="STRING")
-        )
-    return sql_executor(sql, params, "")
-
-
 def _params_by_fn(
     rows: list[dict[str, Any]],
     warnings: list[str],
     catalog: str,
     schema: str,
 ) -> dict[str, list[dict[str, Any]] | None]:
-    """Map ``specific_name`` -> ordered param list. ``None`` = has a non-scalar
-    parameter (rejected in v1). Absent fn => no parameter rows (no-arg)."""
-    raw: dict[str, list[dict[str, Any]]] = {}
-    complex_fns: set[str] = set()
-    seen: set[str] = set()
-    for row in rows:
-        specific = str(row.get("specific_name") or "").lower()
-        pname = row.get("parameter_name")
-        if not specific or pname is None:
-            continue
-        seen.add(specific)
-        data_type = str(row.get("data_type") or "").upper()
-        full_data_type = str(row.get("full_data_type") or data_type)
-        if _is_complex_type(data_type, full_data_type):
-            complex_fns.add(specific)
-            continue
-        raw.setdefault(specific, []).append(
-            {
-                "name": str(pname),
-                "type": _uc_type_to_param_type(data_type),
-                "required": row.get("parameter_default") is None,
-            }
-        )
-    result: dict[str, list[dict[str, Any]] | None] = {}
-    for fn in seen:
-        if fn in complex_fns:
+    """Parse parameter rows into per-function param lists, appending an author
+    warning for each function rejected for a non-scalar (array/map/struct)
+    parameter. Thin wrapper over the shared ``uc_metadata.parse_parameter_rows``."""
+    by_fn = parse_parameter_rows(rows)
+    for fn, params in by_fn.items():
+        if params is None:
             warnings.append(
                 f"uc_function {catalog}.{schema}.{fn} has a non-scalar "
                 "(array/map/struct) parameter; scalar functions only in v1 — "
                 "params left empty"
             )
-            result[fn] = None
-        else:
-            result[fn] = raw.get(fn, [])
-    return result
+    return by_fn
 
 
 def _query_all(
@@ -181,7 +98,7 @@ def _query_all(
     for (catalog, schema), items in targets.items():
         fn_names = sorted({fn for _cfg, fn in items})
         try:
-            rows = _run_query(sql_executor, catalog, schema, fn_names)
+            rows = run_parameters_query(sql_executor, catalog, schema, fn_names)
         except Exception as exc:  # noqa: BLE001 - fail-soft, one group at a time
             warnings.append(
                 f"uc_function introspection query failed for {catalog}.{schema}: "

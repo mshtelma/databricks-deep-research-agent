@@ -8,14 +8,20 @@ OBO scoping is enforced by the underlying DiscoveryService.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from collections.abc import Callable, Iterable
-from typing import Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from deep_research.core.auth import get_user_workspace_client, get_workspace_client
+
+if TYPE_CHECKING:
+    from databricks_deep_research.tools.builtins.text_table.tools._common import (
+        SqlExecutor,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +34,9 @@ SourceKind = Literal[
     "sql_warehouse",
     "mcp_server",
     "skill",
+    "uc_catalog",
+    "uc_schema",
+    "uc_function",
 ]
 
 # Map from DiscoveryService DataSourceType.value strings to our SourceKind literals.
@@ -38,6 +47,18 @@ _SOURCE_TYPE_TO_KIND: dict[str, SourceKind] = {
     "genie": "genie_space",
     "knowledge_assistant": "knowledge_assistant",
 }
+
+# discover_all() only yields these kinds; every other kind is opt-in (queried
+# directly), so a uc_* / sql_warehouse / mcp / skill request never pays for a
+# full discovery sweep.
+_DISCOVERY_SERVICE_KINDS: frozenset[str] = frozenset(
+    {"vector_index", "genie_space", "knowledge_assistant", "serving_endpoint"}
+)
+# Unity Catalog browse kinds (catalog -> schema -> function cascade), backed by
+# the OBO SQL executor over information_schema (see uc_metadata).
+_UC_BROWSE_KINDS: frozenset[str] = frozenset(
+    {"uc_catalog", "uc_schema", "uc_function"}
+)
 
 
 class DiscoveredResource(BaseModel):
@@ -124,6 +145,8 @@ class DesignerDiscoveryAdapter:
         user_token: str,
         kinds: list[SourceKind] | None = None,
         user_id: str = "",
+        parent: str | None = None,
+        name_prefix: str = "",
     ) -> list[DiscoveredResource]:
         """Discover all sources for the given user and return normalized resources.
 
@@ -144,7 +167,7 @@ class DesignerDiscoveryAdapter:
 
         resources: list[DiscoveredResource] = []
         include_discovery_resources = kinds is None or any(
-            kind != "sql_warehouse" for kind in kinds
+            kind in _DISCOVERY_SERVICE_KINDS for kind in kinds
         )
         if include_discovery_resources:
             response = await self._svc.discover_all(
@@ -223,6 +246,25 @@ class DesignerDiscoveryAdapter:
                 logger.warning("DESIGNER_SKILL_DISCOVERY_FAILED", exc_info=True)
                 raise
 
+        # UC browse (catalog/schema/function) — opt-in, parent-parameterized.
+        # Fail-soft: a missing warehouse or query error yields an empty list so
+        # the picker degrades to manual FQN entry rather than surfacing a 500.
+        if kinds is not None and any(k in _UC_BROWSE_KINDS for k in kinds):
+            try:
+                # Offload the blocking information_schema query so a cold-warehouse
+                # poll (up to ~5s) never stalls the event loop mid-cascade.
+                resources.extend(
+                    await asyncio.to_thread(
+                        self._list_uc_resources,
+                        kinds,
+                        parent,
+                        name_prefix,
+                        user_token or None,
+                    )
+                )
+            except Exception:
+                logger.warning("DESIGNER_UC_BROWSE_FAILED", exc_info=True)
+
         return resources
 
     def _list_mcp_servers(self, user_token: str | None) -> list[DiscoveredResource]:
@@ -266,6 +308,92 @@ class DesignerDiscoveryAdapter:
             for meta in metas
         ]
 
+    def _build_sql_executor(self, user_token: str | None) -> SqlExecutor | None:
+        """Build an OBO SQL executor for information_schema browse, or None when
+        no SQL warehouse is configured (browse then degrades to manual entry)."""
+        from databricks_deep_research.tools.builtins.text_table.runtime_wiring import (
+            StatementExecutionTableSQL,
+        )
+
+        from deep_research.agent.workflow_runner_factory import (
+            _resolve_table_warehouse_id,
+        )
+
+        warehouse_id = _resolve_table_warehouse_id()
+        if not warehouse_id:
+            logger.info("DESIGNER_UC_BROWSE_SKIP reason=no_warehouse")
+            return None
+        return StatementExecutionTableSQL(
+            workspace_client=self._workspace_client_factory(user_token),
+            warehouse_id=warehouse_id,
+            timeout_sec=5.0,
+        )
+
+    def _list_uc_resources(
+        self,
+        kinds: list[SourceKind],
+        parent: str | None,
+        name_prefix: str,
+        user_token: str | None,
+    ) -> list[DiscoveredResource]:
+        """Browse Unity Catalog via OBO SQL: catalogs, schemas (``parent`` =
+        catalog), or functions (``parent`` = ``catalog.schema``). Only the
+        requested kinds are queried; each needs its parent to have been chosen."""
+        from deep_research.agent_designer import uc_metadata
+
+        sql = self._build_sql_executor(user_token)
+        if sql is None:
+            return []
+        out: list[DiscoveredResource] = []
+        if "uc_catalog" in kinds:
+            out.extend(
+                _uc_rows_to_resources(
+                    "uc_catalog",
+                    uc_metadata.list_catalogs(sql, name_prefix=name_prefix),
+                )
+            )
+        if "uc_schema" in kinds and parent:
+            out.extend(
+                _uc_rows_to_resources(
+                    "uc_schema",
+                    uc_metadata.list_schemas(sql, parent, name_prefix=name_prefix),
+                )
+            )
+        if "uc_function" in kinds and parent and "." in parent:
+            catalog, schema = parent.split(".", 1)
+            out.extend(
+                _uc_rows_to_resources(
+                    "uc_function",
+                    uc_metadata.list_functions(
+                        sql, catalog, schema, name_prefix=name_prefix
+                    ),
+                )
+            )
+        return out
+
+    def get_function_signature(
+        self, user_token: str | None, fqn: str
+    ) -> dict[str, Any]:
+        """Introspect a single UC function's signature for the live picker.
+
+        Fail-soft: returns empty params (with a ``warning``) when no warehouse is
+        configured; a malformed FQN raises ``ValueError`` for the caller to 400."""
+        from deep_research.agent_designer import uc_metadata
+
+        sql = self._build_sql_executor(user_token)
+        if sql is None:
+            return {
+                "function": fqn,
+                "params": [],
+                "scalar": True,
+                "warning": (
+                    "No SQL warehouse configured; parameters could not be "
+                    "introspected. Enter parameters manually if the function "
+                    "takes arguments."
+                ),
+            }
+        return uc_metadata.get_signature(sql, fqn)
+
     def _list_sql_warehouses(self, user_token: str | None) -> list[DiscoveredResource]:
         client = self._workspace_client_factory(user_token)
         resources = [
@@ -292,6 +420,23 @@ class DesignerDiscoveryAdapter:
         if resource is None:
             raise ValueError(f"SQL warehouse {warehouse_id!r} was not returned by Databricks")
         return resource
+
+
+def _uc_rows_to_resources(
+    kind: SourceKind, rows: list[dict[str, str]]
+) -> list[DiscoveredResource]:
+    """Map uc_metadata row dicts ({name, full_name?, description?}) to resources,
+    reusing the DiscoveredResource contract the resource-select widget consumes."""
+    return [
+        DiscoveredResource(
+            kind=kind,
+            source_id=row.get("full_name") or row["name"],
+            name=row["name"],
+            full_name=row.get("full_name"),
+            description=row.get("description"),
+        )
+        for row in rows
+    ]
 
 
 def _enum_value(value: Any) -> str:

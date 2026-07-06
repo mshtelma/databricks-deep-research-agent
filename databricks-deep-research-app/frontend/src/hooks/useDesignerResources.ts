@@ -1,6 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
-import { listDesignerResources, startDesignerSqlWarehouse } from '@/api/agentDesigner';
+import {
+  getUcFunctionSignature,
+  listDesignerResources,
+  startDesignerSqlWarehouse,
+} from '@/api/agentDesigner';
 import type { DesignerResourcesResponse } from '@/types/agentDesigner';
 
 export const designerResourceKeys = {
@@ -19,6 +23,47 @@ export function useDesignerResources(kinds: string[], enabled = true) {
     gcTime: CACHE_TIME,
     enabled: enabled && kinds.length > 0,
   });
+}
+
+export const ucBrowseKeys = {
+  all: ['agent-designer', 'uc-browse'] as const,
+  level: (kind: string, parent: string, query: string) =>
+    [...ucBrowseKeys.all, kind, parent, query] as const,
+  signature: (fqn: string) => [...ucBrowseKeys.all, 'signature', fqn] as const,
+}
+
+export type UcBrowseKind = 'uc_catalog' | 'uc_schema' | 'uc_function'
+
+/**
+ * Browse one level of the Unity Catalog cascade. A child level (schema/function)
+ * stays disabled until its parent is chosen, and the query key includes the
+ * parent so a rapid parent switch can never render a stale child list.
+ */
+export function useUcBrowse(
+  kind: UcBrowseKind,
+  parent: string | undefined,
+  query = '',
+  enabled = true
+) {
+  const ready = enabled && (kind === 'uc_catalog' || Boolean(parent))
+  return useQuery({
+    queryKey: ucBrowseKeys.level(kind, parent ?? '', query),
+    queryFn: () => listDesignerResources([kind], { parent, query }),
+    staleTime: STALE_TIME,
+    gcTime: CACHE_TIME,
+    enabled: ready,
+  })
+}
+
+/** Live signature for a chosen UC function (drives auto parameter mapping). */
+export function useUcFunctionSignature(fqn: string | undefined, enabled = true) {
+  return useQuery({
+    queryKey: ucBrowseKeys.signature(fqn ?? ''),
+    queryFn: () => getUcFunctionSignature(fqn ?? ''),
+    staleTime: STALE_TIME,
+    gcTime: CACHE_TIME,
+    enabled: enabled && Boolean(fqn),
+  })
 }
 
 export function useStartDesignerSqlWarehouse() {
