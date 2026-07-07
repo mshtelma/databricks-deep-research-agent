@@ -47,6 +47,7 @@ import { resolveBlock } from '@/lib/blockPath';
 import { requiredConfigErrors, schemaProperties } from '@/lib/jsonSchema';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import { TypePill, LayerChip } from './atoms';
+import { FunctionParamsEditor } from './FunctionParamsEditor';
 import { SchemaField } from './SchemaField';
 import { AddToolDialog } from './AddToolDialog';
 import { WorkflowSettingsPanel } from './WorkflowSettingsPanel';
@@ -193,7 +194,7 @@ export interface ConfigPanelProps {
 type AddToolRequest =
   | { mode: 'workspace' }
   | { mode: 'bind-agent'; blockPath: string }
-  | { mode: 'select-tool-step'; blockPath: string };
+  | { mode: 'select-tool-step'; blockPath: string; prefillQuery?: string };
 
 // ---------------------------------------------------------------------------
 // Component
@@ -243,6 +244,12 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
       onOpenChange={(open) => setAddToolRequest(open ? addToolRequest : null)}
       onDeclared={handleToolDeclared}
       registry={registry}
+      intent={addToolRequest?.mode ?? 'workspace'}
+      initialQuery={
+        addToolRequest?.mode === 'select-tool-step'
+          ? addToolRequest.prefillQuery
+          : undefined
+      }
     />
   ) : null;
 
@@ -852,6 +859,41 @@ function normalizeInputMapping(value: unknown): Record<string, string> {
   return out;
 }
 
+function normalizeInputLiterals(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+/**
+ * Declared signature params of a workflow tool, when its kind carries them
+ * (uc_function: introspected on save; python_function: authored). Drives the
+ * signature-aware mapping rows in the tool-step inspector.
+ */
+function declarationParams(
+  decl: ToolDecl | null,
+): Array<{ name: string; type: string; required: boolean }> {
+  if (!decl || (decl.kind !== 'uc_function' && decl.kind !== 'python_function')) {
+    return [];
+  }
+  const raw = decl.config?.['params'];
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ name: string; type: string; required: boolean }> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const name = typeof record['name'] === 'string' ? record['name'] : '';
+    if (!name) continue;
+    out.push({
+      name,
+      type: typeof record['type'] === 'string' ? record['type'] : 'string',
+      required: record['required'] !== false,
+    });
+  }
+  return out;
+}
+
 function uniqueMappingKey(mapping: Record<string, string>): string {
   const base = 'parameter';
   if (!(base in mapping)) return base;
@@ -879,12 +921,17 @@ function ToolStepForm({
   const ref = normalizeToolRef(config['ref']);
   const directRef = isDirectToolRef(ref);
   const inputMapping = normalizeInputMapping(config['input_mapping']);
+  const inputLiterals = normalizeInputLiterals(config['input_literals']);
   const outputKey = typeof config['output_key'] === 'string' ? config['output_key'] : 'tool_result';
   const selectedDecl =
     !directRef
       ? declaredTools.find((tool) => tool.name === ref.name) ?? null
       : null;
   const unresolvedLocalRef = !directRef && ref.name.length > 0 && selectedDecl === null;
+  const signatureParams = declarationParams(selectedDecl);
+  const missingRequired = signatureParams
+    .filter((p) => p.required && !(p.name in inputMapping) && !(p.name in inputLiterals))
+    .map((p) => p.name);
 
   const updateConfig = React.useCallback(
     (patch: Record<string, unknown>) => {
@@ -1029,7 +1076,15 @@ function ToolStepForm({
           </FieldShell>
           <button
             type="button"
-            onClick={() => onShowAddTool({ mode: 'select-tool-step', blockPath: selectedPath })}
+            onClick={() =>
+              onShowAddTool({
+                mode: 'select-tool-step',
+                blockPath: selectedPath,
+                // Prefill the picker with the direct target so conversion is
+                // one click (pasted-FQN fast path for uc_function refs).
+                prefillQuery: directRef ? ref.name : undefined,
+              })
+            }
             className="mb-3 inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
           >
             <Plus size={11} /> Convert to workflow tool
@@ -1037,6 +1092,29 @@ function ToolStepForm({
         </div>
       </details>
 
+      {signatureParams.length > 0 && (
+        <FieldShell label="Parameters">
+          <FunctionParamsEditor
+            params={signatureParams}
+            inputMapping={inputMapping}
+            inputLiterals={inputLiterals}
+            onChange={({ inputMapping: nextMapping, inputLiterals: nextLiterals }) =>
+              updateConfig({ input_mapping: nextMapping, input_literals: nextLiterals })
+            }
+          />
+          {missingRequired.length > 0 && (
+            <p
+              role="status"
+              className="mt-1.5 rounded-db-md border border-db-yellow-500 bg-db-yellow-100 px-2.5 py-1.5 text-[11px] leading-[1.45] text-db-navy-800"
+            >
+              Required parameter{missingRequired.length > 1 ? 's' : ''} not mapped:{' '}
+              <code className="font-db-mono">{missingRequired.join(', ')}</code>
+            </p>
+          )}
+        </FieldShell>
+      )}
+
+      {signatureParams.length === 0 && (
       <FieldShell label="Parameters">
         <div className="space-y-2 rounded-db-md border border-db-gray-lines bg-db-oat-light p-2.5">
           {mappingEntries.length === 0 && (
@@ -1095,6 +1173,7 @@ function ToolStepForm({
           </button>
         </div>
       </FieldShell>
+      )}
 
       <FieldShell label="Output key">
         <input
@@ -1105,12 +1184,64 @@ function ToolStepForm({
         />
       </FieldShell>
 
-      <SchemaField
-        name="output_schema"
-        schema={{ type: 'object', title: 'Output schema', 'x-widget': 'json' }}
-        value={config['output_schema']}
-        onChange={(value) => updateConfig({ output_schema: value })}
-      />
+      <label className="mb-3.5 flex cursor-pointer items-center gap-2 text-[12px] text-db-navy-800">
+        <input
+          type="checkbox"
+          aria-label="Fail step on tool error"
+          checked={config['fail_on_error'] === true}
+          onChange={(event) => updateConfig({ fail_on_error: event.target.checked })}
+          className="h-3.5 w-3.5 rounded border-db-gray-lines accent-db-lava-600"
+        />
+        Fail the step when the tool errors
+      </label>
+
+      <details className="mb-3.5 rounded-db-md border border-db-gray-lines bg-white">
+        <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-db-navy-700 hover:bg-db-oat-light">
+          Advanced output
+        </summary>
+        <div className="border-t border-db-gray-lines px-3 pt-3">
+          <FieldShell label="Structured data key">
+            <input
+              aria-label="Structured data key"
+              value={typeof config['output_data_key'] === 'string' ? config['output_data_key'] : ''}
+              onChange={(event) =>
+                updateConfig({ output_data_key: event.target.value || undefined })
+              }
+              placeholder="also store ToolResult.data under this state key"
+              className={TOOL_STEP_MONO_INPUT_CLASS}
+            />
+          </FieldShell>
+          <FieldShell label="Bind into compute namespace">
+            <input
+              aria-label="Bind into compute namespace"
+              value={typeof config['bind_namespace'] === 'string' ? config['bind_namespace'] : ''}
+              onChange={(event) =>
+                updateConfig({ bind_namespace: event.target.value || undefined })
+              }
+              placeholder="session variable name for compute/python_function"
+              className={TOOL_STEP_MONO_INPUT_CLASS}
+            />
+          </FieldShell>
+          <label className="mb-3 flex cursor-pointer items-center gap-2 text-[12px] text-db-navy-800">
+            <input
+              type="checkbox"
+              aria-label="Enforce output schema"
+              checked={config['enforce_output_schema'] === true}
+              onChange={(event) =>
+                updateConfig({ enforce_output_schema: event.target.checked })
+              }
+              className="h-3.5 w-3.5 rounded border-db-gray-lines accent-db-lava-600"
+            />
+            Enforce required keys from the output schema
+          </label>
+          <SchemaField
+            name="output_schema"
+            schema={{ type: 'object', title: 'Output schema', 'x-widget': 'json' }}
+            value={config['output_schema']}
+            onChange={(value) => updateConfig({ output_schema: value })}
+          />
+        </div>
+      </details>
     </div>
   );
 }

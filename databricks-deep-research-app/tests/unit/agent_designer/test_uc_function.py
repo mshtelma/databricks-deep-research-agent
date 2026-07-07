@@ -241,3 +241,59 @@ class TestParamIntrospection:
         warnings = await introspect_and_fill_uc_params(defn, _exec)
         assert warnings == []
         assert called["n"] == 0
+
+
+class TestToolNodeRequiredParamValidation:
+    """Tool-UX plan Phase 2: required declared params must be bound on tool nodes."""
+
+    _PARAMS = [
+        {"name": "current", "type": "number", "required": True},
+        {"name": "previous", "type": "number", "required": False},
+    ]
+
+    def _node(self, config: dict[str, Any]) -> dict[str, Any]:
+        return {"id": "t1", "type": "tool", "label": "t1", "config": config}
+
+    def _definition(self, node_config: dict[str, Any]) -> dict[str, Any]:
+        return _ast(
+            [_uc_tool("sma", "finance.indicators.sma", params=self._PARAMS)],
+            children=[self._node(node_config)],
+        )
+
+    def test_unbound_required_param_flagged(self) -> None:
+        definition = self._definition({"ref": {"name": "sma"}, "output_key": "out"})
+        errors = semantic_validation_errors(definition)
+        matching = [e for e in errors if "without binding required" in e.message]
+        assert matching, [e.message for e in errors]
+        assert "current" in matching[0].message
+        assert "previous" not in matching[0].message  # optional param not enforced
+
+    def test_state_mapping_satisfies_required_param(self) -> None:
+        definition = self._definition(
+            {
+                "ref": {"name": "sma"},
+                "input_mapping": {"current": "latest_close"},
+                "output_key": "out",
+            }
+        )
+        errors = semantic_validation_errors(definition)
+        assert not [e for e in errors if "without binding required" in e.message]
+
+    def test_literal_satisfies_required_param(self) -> None:
+        definition = self._definition(
+            {
+                "ref": {"name": "sma"},
+                "input_literals": {"current": 100.0},
+                "output_key": "out",
+            }
+        )
+        errors = semantic_validation_errors(definition)
+        assert not [e for e in errors if "without binding required" in e.message]
+
+    def test_declaration_without_params_is_not_enforced(self) -> None:
+        definition = _ast(
+            [_uc_tool("sma", "finance.indicators.sma")],
+            children=[self._node({"ref": {"name": "sma"}, "output_key": "out"})],
+        )
+        errors = semantic_validation_errors(definition)
+        assert not [e for e in errors if "without binding required" in e.message]

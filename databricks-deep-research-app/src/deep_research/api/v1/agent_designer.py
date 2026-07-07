@@ -455,6 +455,8 @@ class ResourcesResponse(BaseModel):
     resources: list[DiscoveredResource]
     total: int
     error: BrowseError | None = None
+    # Partial-result caveat (catalog-wide uc_function search truncation).
+    warning: str | None = None
 
 
 class FunctionSignatureResponse(BaseModel):
@@ -548,8 +550,9 @@ async def list_resources(
     parent: str | None = Query(
         default=None,
         description=(
-            "Parent scope for cascading UC browse: catalog name for uc_schema, "
-            "'catalog.schema' for uc_function. Ignored by other kinds."
+            "Parent scope for cascading UC browse: catalog name for uc_schema; "
+            "for uc_function either 'catalog.schema' (schema listing) or a bare "
+            "catalog (budgeted catalog-wide search). Ignored by other kinds."
         ),
     ),
     query: str | None = Query(
@@ -577,7 +580,11 @@ async def list_resources(
             total=0,
             error=BrowseError(code=exc.code, message=exc.message),
         )
-    return ResourcesResponse(resources=resources, total=len(resources))
+    return ResourcesResponse(
+        resources=resources,
+        total=len(resources),
+        warning=discovery_adapter.uc_search_warning,
+    )
 
 
 @router.get(

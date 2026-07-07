@@ -80,6 +80,9 @@ def semantic_validation_errors(
     }
     tools = definition.get("tools", []) or []
     declared_tool_names: set[str] = set()
+    # name -> declared signature params (uc_function introspected on save,
+    # python_function authored). Drives required-param coverage on tool nodes.
+    declared_tool_params: dict[str, list[dict[str, Any]]] = {}
     for idx, tool in enumerate(tools):
         if not isinstance(tool, dict):
             errors.append(
@@ -93,6 +96,12 @@ def semantic_validation_errors(
         kind = tool.get("kind")
         if isinstance(name, str) and name:
             declared_tool_names.add(name)
+            if kind in ("uc_function", "python_function"):
+                raw_params = (tool.get("config") or {}).get("params")
+                if isinstance(raw_params, list):
+                    declared_tool_params[name] = [
+                        p for p in raw_params if isinstance(p, dict)
+                    ]
         config = tool.get("config", {})
         if config is None:
             config = {}
@@ -373,6 +382,43 @@ def semantic_validation_errors(
             )
         )
 
+    def validate_tool_node_params(config: dict[str, Any], path: str) -> None:
+        """Required declared params must be bound via input_mapping or
+        input_literals — an unbound required arg fails the SQL/sandbox call at
+        runtime, so catch it at save time (tool-UX plan Phase 2)."""
+        ref = config.get("ref")
+        if not isinstance(ref, dict):
+            return
+        ref_name = ref.get("name")
+        if not isinstance(ref_name, str) or ref_name not in declared_tool_params:
+            return
+        params = declared_tool_params[ref_name]
+        if not params:
+            return  # unknown/uninstrospected signature — nothing to enforce
+        mapping = config.get("input_mapping")
+        literals = config.get("input_literals")
+        bound: set[str] = set()
+        if isinstance(mapping, dict):
+            bound |= set(mapping)
+        if isinstance(literals, dict):
+            bound |= set(literals)
+        missing = [
+            str(p.get("name"))
+            for p in params
+            if p.get("name") and p.get("required", True) and p.get("name") not in bound
+        ]
+        if missing:
+            errors.append(
+                SemanticValidationError(
+                    message=(
+                        f"Tool node calls '{ref_name}' without binding required "
+                        f"parameter(s) {missing}; map them from workflow state "
+                        "(input_mapping) or set literals (input_literals)."
+                    ),
+                    path=f"{path}.config.input_mapping",
+                )
+            )
+
     def walk(node: Any, path: str) -> None:
         if not isinstance(node, dict):
             return
@@ -384,6 +430,7 @@ def semantic_validation_errors(
             validate_agent_mcp_servers(config, path)
         if node.get("type") == "tool":
             validate_tool_node_ref(config, path)
+            validate_tool_node_params(config, path)
         if node.get("type") == "plan_and_execute":
             for nested_key in ("planner", "evaluator"):
                 nested = config.get(nested_key)

@@ -80,6 +80,8 @@ export interface DesignerResourcesResponse {
   total: number
   /** Set when a Unity Catalog browse failed (e.g. no BROWSE on the catalog). */
   error?: DesignerBrowseError | null
+  /** Partial-result caveat from a catalog-wide function search (truncation). */
+  warning?: string | null
 }
 
 export type DesignerAssetKind =

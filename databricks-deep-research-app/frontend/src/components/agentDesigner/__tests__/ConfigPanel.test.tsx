@@ -229,9 +229,9 @@ const FIXTURE_REGISTRY: RegistryResponse = {
       config_schema: {
         type: 'object',
         properties: {
-          function_name: { type: 'string', title: 'Unity Catalog Function' },
+          function: { type: 'string', title: 'UC Function' },
         },
-        required: ['function_name'],
+        required: ['function'],
       },
     },
   ],
@@ -597,22 +597,26 @@ describe('ConfigPanel', () => {
     expect(workflowSelect).not.toHaveTextContent('missing_tool');
   });
 
-  it('uses the shared family and kind picker when adding workflow tools', () => {
+  it('uses the shared search-first picker when adding workflow tools', () => {
     const ast = makeAst();
     useAgentEditorStore.setState({ ast, selectedPath: null });
 
     renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add/i }));
 
-    expect(screen.getByRole('combobox', { name: /tool family/i })).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: /tool kind/i })).toBeInTheDocument();
-
-    fireEvent.change(screen.getByRole('combobox', { name: /tool family/i }), {
-      target: { value: 'databricks' },
-    });
-    expect(screen.getByRole('combobox', { name: /tool kind/i })).toHaveTextContent(
-      'Unity Catalog Function',
+    // Search-first: no classification dropdowns; a search box plus family chips.
+    const search = screen.getByRole('textbox', { name: /search tools/i });
+    expect(search).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^databricks$/i })).toHaveAttribute(
+      'aria-pressed',
+      'false',
     );
+
+    // Typing filters the kind rows; picking a kind with required config opens
+    // the configure step with its schema-driven fields.
+    fireEvent.change(search, { target: { value: 'unity' } });
+    fireEvent.click(screen.getByRole('button', { name: /unity catalog function/i }));
+    expect(screen.getByRole('textbox', { name: /uc function/i })).toBeInTheDocument();
   });
 
   it('edits tool step input mappings without changing the selected tool ref', () => {
@@ -930,5 +934,142 @@ describe('ConfigPanel', () => {
     updateSpy.mockRestore();
     // Restore the file-wide default mock so test ordering can't leak this server.
     vi.mocked(listDesignerResources).mockResolvedValue({ resources: [], total: 0 });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tool step — signature-driven parameter mapping (tool-UX plan Phase 2)
+// ---------------------------------------------------------------------------
+
+describe('ToolStepForm signature mapping', () => {
+  const UC_DECL = {
+    kind: 'uc_function',
+    name: 'pct_change',
+    config: {
+      function: 'main.metrics.pct_change',
+      params: [
+        { name: 'current', type: 'number', required: true },
+        { name: 'previous', type: 'number', required: false },
+      ],
+    },
+  };
+
+  it('renders signature rows and flags unmapped required parameters', () => {
+    const ast = makeToolAst(
+      { ref: { type: 'builtin', name: 'pct_change' }, input_mapping: {}, output_key: 'out' },
+      [UC_DECL],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.getByLabelText('current source')).toBeInTheDocument();
+    expect(screen.getByLabelText('previous source')).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent(/required parameter/i);
+    expect(screen.getByRole('status')).toHaveTextContent('current');
+    // Raw mapping rows are replaced by the signature editor.
+    expect(
+      screen.queryByRole('button', { name: /add parameter mapping/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('maps a signature parameter to a state key via updateBlock', () => {
+    const ast = makeToolAst(
+      { ref: { type: 'builtin', name: 'pct_change' }, input_mapping: {}, output_key: 'out' },
+      [UC_DECL],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    const inputs = screen.getAllByPlaceholderText(/workflow state key/i);
+    fireEvent.change(inputs[0]!, { target: { value: 'latest_close' } });
+
+    expect(updateSpy).toHaveBeenCalledWith(
+      'root.children.0',
+      expect.objectContaining({
+        config: expect.objectContaining({
+          input_mapping: { current: 'latest_close' },
+          input_literals: {},
+        }),
+      }),
+    );
+    updateSpy.mockRestore();
+  });
+
+  it('stores literal values disjoint from state refs', () => {
+    const ast = makeToolAst(
+      {
+        ref: { type: 'builtin', name: 'pct_change' },
+        input_mapping: { previous: 'baseline' },
+        output_key: 'out',
+      },
+      [UC_DECL],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    // Flip `previous` from state ref to literal: it must leave input_mapping.
+    fireEvent.change(screen.getByLabelText('previous source'), {
+      target: { value: 'literal' },
+    });
+    fireEvent.change(screen.getAllByPlaceholderText(/constant value/i)[0]!, {
+      target: { value: '100' },
+    });
+
+    const lastCall = updateSpy.mock.calls.at(-1);
+    expect(lastCall?.[1]).toEqual(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          input_literals: { previous: '100' },
+          input_mapping: expect.not.objectContaining({ previous: expect.anything() }),
+        }),
+      }),
+    );
+    updateSpy.mockRestore();
+  });
+
+  it('exposes fail_on_error and advanced output controls', () => {
+    const ast = makeToolAst(
+      { ref: { type: 'builtin', name: 'pct_change' }, output_key: 'out' },
+      [UC_DECL],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    fireEvent.click(screen.getByRole('checkbox', { name: /fail step on tool error/i }));
+    expect(updateSpy).toHaveBeenCalledWith(
+      'root.children.0',
+      expect.objectContaining({
+        config: expect.objectContaining({ fail_on_error: true }),
+      }),
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: /structured data key/i }), {
+      target: { value: 'pct_data' },
+    });
+    expect(updateSpy).toHaveBeenCalledWith(
+      'root.children.0',
+      expect.objectContaining({
+        config: expect.objectContaining({ output_data_key: 'pct_data' }),
+      }),
+    );
+    updateSpy.mockRestore();
+  });
+
+  it('prefills the picker with a direct ref FQN when converting', () => {
+    const ast = makeToolAst({
+      ref: { type: 'uc_function', name: 'main.metrics.pct_change' },
+      input_mapping: {},
+      output_key: 'out',
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /convert to workflow tool/i }));
+
+    const search = screen.getByRole('textbox', { name: /search tools/i });
+    expect((search as HTMLInputElement).value).toBe('main.metrics.pct_change');
   });
 });

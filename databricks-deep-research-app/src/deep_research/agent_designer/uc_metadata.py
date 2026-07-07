@@ -24,12 +24,14 @@ authoring-time) both build on the helpers here.
 from __future__ import annotations
 
 import re
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
+from typing import Any
 
-if TYPE_CHECKING:
-    from databricks_deep_research.tools.builtins.text_table.tools._common import (
-        SqlExecutor,
-    )
+# Structural twin of the framework text_table executor callable, which lives in
+# a private module the app must not import (public-API lockdown): an OBO SQL
+# executor is ``(sql, params, user_token) -> rows``. ``StatementExecutionTableSQL``
+# instances satisfy this shape; this module and its callers annotate against it.
+SqlExecutor = Callable[[str, list[Any], str], list[dict[str, Any]]]
 
 # A single Databricks-legal identifier segment (letters / digits / underscore).
 # Matches ``UCFunctionTool``'s per-part rule: hyphenated catalogs are a v1 limit,
@@ -39,6 +41,10 @@ IDENT_RE = re.compile(r"^[A-Za-z0-9_]+$")
 
 # Strict 3-part FQN of IDENT_RE parts — matches UCFunctionTool + semantic_validation.
 FQN_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
+
+# A (possibly empty) name prefix of identifier characters — the only shape that
+# may be interpolated into a LIKE pattern (no quotes/wildcards representable).
+PREFIX_RE = re.compile(r"^[A-Za-z0-9_]*$")
 
 # Unity Catalog ``data_type`` -> our coarse param type. Unmapped scalars default
 # to "string" (bound as STRING, implicit-cast).
@@ -218,6 +224,54 @@ def list_functions(
             continue
         out.append({"name": name, "full_name": f"{catalog}.{schema}.{name}"})
     out.sort(key=lambda d: d["name"])
+    return out
+
+
+def search_functions_in_catalog(
+    sql_executor: SqlExecutor,
+    catalog: str,
+    *,
+    name_prefix: str = "",
+    limit: int = 500,
+    user_token: str = "",
+) -> list[dict[str, str]]:
+    """Catalog-wide function search in ONE statement via ``information_schema``.
+
+    ``information_schema.routines`` requires USE CATALOG, so callers gate this
+    on :func:`check_use_catalog` and fall back to the per-schema ``SHOW USER
+    FUNCTIONS`` fan-out (BROWSE-only) when it fails. The prefix is pushed into
+    a ``LIKE`` only when it is ident-safe (:data:`PREFIX_RE` — no quotes or
+    wildcards representable) and is always re-checked client-side.
+    """
+    catalog = catalog.strip().lower()
+    if not _valid_ident(catalog):
+        raise ValueError(f"unsupported catalog identifier: {catalog!r}")
+    prefix = name_prefix.strip().lower()
+    like = ""
+    if prefix and PREFIX_RE.fullmatch(prefix):
+        like = f" AND routine_name LIKE '{prefix}%'"
+    sql = (
+        f"SELECT routine_schema, routine_name "  # noqa: S608 - idents validated above
+        f"FROM `{catalog}`.information_schema.routines "
+        f"WHERE routine_schema <> 'information_schema'{like} "
+        f"ORDER BY routine_name, routine_schema LIMIT {int(limit)}"
+    )
+    rows = sql_executor(sql, [], user_token)
+    out: list[dict[str, str]] = []
+    for row in rows:
+        schema = str(row.get("routine_schema") or "").strip().lower()
+        name = str(row.get("routine_name") or "").strip().lower()
+        if not schema or not name:
+            # Column-name drift safety: fall back to the first two columns.
+            values = [str(v or "").strip().lower() for v in row.values()]
+            if len(values) >= 2:
+                schema, name = values[0], values[1]
+        if not (_valid_ident(schema) and _valid_ident(name)):
+            continue
+        if prefix and not name.startswith(prefix):
+            continue
+        out.append({"name": name, "full_name": f"{catalog}.{schema}.{name}"})
+    out.sort(key=lambda d: (d["name"], d["full_name"]))
     return out
 
 

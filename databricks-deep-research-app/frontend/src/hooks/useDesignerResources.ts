@@ -51,6 +51,27 @@ export function useUcBrowse(kind: UcBrowseKind, parent: string | undefined, enab
   })
 }
 
+/**
+ * Prefix search for UC functions. `parent` is either `catalog.schema` (single
+ * SHOW USER FUNCTIONS) or a bare catalog (budgeted server-side fan-out; the
+ * response's `warning` reports truncation). Keyed on (parent, prefix) with a
+ * short staleTime — the server keeps its own 60s cache per user/scope/prefix.
+ */
+export function useUcFunctionSearch(
+  parent: string | undefined,
+  prefix: string,
+  enabled = true,
+) {
+  return useQuery({
+    queryKey: [...ucBrowseKeys.all, 'search', parent ?? '', prefix] as const,
+    queryFn: () => listDesignerResources(['uc_function'], { parent, query: prefix }),
+    staleTime: 30 * 1000,
+    gcTime: CACHE_TIME,
+    enabled: enabled && Boolean(parent),
+    placeholderData: (previous: DesignerResourcesResponse | undefined) => previous,
+  });
+}
+
 /** Live signature for a chosen UC function (drives auto parameter mapping). */
 export function useUcFunctionSignature(fqn: string | undefined, enabled = true) {
   return useQuery({

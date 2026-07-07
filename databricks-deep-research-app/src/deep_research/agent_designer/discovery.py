@@ -9,8 +9,11 @@ OBO scoping is enforced by the underlying DiscoveryService.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import re
+import threading
+import time
 from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -19,9 +22,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from deep_research.core.auth import get_user_workspace_client, get_workspace_client
 
 if TYPE_CHECKING:
-    from databricks_deep_research.tools.builtins.text_table.tools._common import (
-        SqlExecutor,
-    )
+    from deep_research.agent_designer.uc_metadata import SqlExecutor
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +60,22 @@ _DISCOVERY_SERVICE_KINDS: frozenset[str] = frozenset(
 _UC_BROWSE_KINDS: frozenset[str] = frozenset(
     {"uc_catalog", "uc_schema", "uc_function"}
 )
+
+# Catalog-scoped function search budget. The BROWSE-only fallback fans out one
+# SHOW USER FUNCTIONS per schema, so the statement count is hard-capped:
+# 1 (USE CATALOG probe) + 1 (SHOW SCHEMAS) + _UC_SEARCH_MAX_SCHEMAS = 24.
+_UC_SEARCH_MAX_SCHEMAS = 22
+_UC_SEARCH_CONCURRENCY = 4
+_UC_SEARCH_TTL_SECONDS = 60.0
+_UC_SEARCH_RESULT_CAP = 500
+
+# Short-TTL per-(user, catalog, prefix) cache: debounced picker keystrokes and
+# chip toggles re-issue the same search; a 60s window absorbs them without
+# holding permission changes stale for long.
+_UC_SEARCH_CACHE: dict[
+    tuple[str, str, str], tuple[float, list["DiscoveredResource"], str | None]
+] = {}
+_UC_SEARCH_CACHE_LOCK = threading.Lock()
 
 
 class UcBrowseError(Exception):
@@ -154,6 +171,15 @@ class DesignerDiscoveryAdapter:
         self._workspace_client_factory = (
             workspace_client_factory or _workspace_client_for_user_token
         )
+        # Set by a catalog-scoped uc_function search when results are partial
+        # (schema-budget truncation / skipped schemas / result cap). The
+        # /resources route surfaces it so the picker can render the caveat.
+        self._uc_search_warning: str | None = None
+
+    @property
+    def uc_search_warning(self) -> str | None:
+        """Partial-result caveat from the last catalog-scoped function search."""
+        return self._uc_search_warning
 
     async def list_for_user(
         self,
@@ -278,6 +304,7 @@ class DesignerDiscoveryAdapter:
                         parent,
                         name_prefix,
                         user_token or None,
+                        user_id,
                     )
                 )
             except Exception as exc:  # noqa: BLE001
@@ -372,12 +399,15 @@ class DesignerDiscoveryAdapter:
         parent: str | None,
         name_prefix: str,
         user_token: str | None,
+        user_id: str | None = None,
     ) -> list[DiscoveredResource]:
         """Browse Unity Catalog via OBO SQL: catalogs, schemas (``parent`` =
-        catalog), or functions (``parent`` = ``catalog.schema``). Only the
+        catalog), or functions (``parent`` = ``catalog.schema`` for a schema
+        listing, or a bare catalog for a budgeted catalog-wide search). Only the
         requested kinds are queried; each needs its parent to have been chosen."""
         from deep_research.agent_designer import uc_metadata
 
+        self._uc_search_warning = None
         out: list[DiscoveredResource] = []
         # The picker requests one kind at a time, so exactly one branch runs and
         # exactly one executor is built. Catalog/schema use no context; functions
@@ -400,19 +430,139 @@ class DesignerDiscoveryAdapter:
                         uc_metadata.list_schemas(sql, parent, name_prefix=name_prefix),
                     )
                 )
-        if "uc_function" in kinds and parent and "." in parent:
-            catalog, schema = parent.split(".", 1)
-            sql = self._build_sql_executor(user_token, catalog=catalog, schema=schema)
-            if sql is not None:
-                out.extend(
-                    _uc_rows_to_resources(
-                        "uc_function",
-                        uc_metadata.list_functions(
-                            sql, catalog, schema, name_prefix=name_prefix
-                        ),
-                    )
+        if "uc_function" in kinds and parent:
+            if "." in parent:
+                catalog, schema = parent.split(".", 1)
+                sql = self._build_sql_executor(
+                    user_token, catalog=catalog, schema=schema
                 )
+                if sql is not None:
+                    out.extend(
+                        _uc_rows_to_resources(
+                            "uc_function",
+                            uc_metadata.list_functions(
+                                sql, catalog, schema, name_prefix=name_prefix
+                            ),
+                        )
+                    )
+            else:
+                found, warning = self._search_uc_functions_by_catalog(
+                    parent, name_prefix, user_token, user_id
+                )
+                self._uc_search_warning = warning
+                out.extend(found)
         return out
+
+    def _search_uc_functions_by_catalog(
+        self,
+        catalog: str,
+        name_prefix: str,
+        user_token: str | None,
+        user_id: str | None,
+    ) -> tuple[list[DiscoveredResource], str | None]:
+        """Budgeted catalog-wide function search (``parent`` = bare catalog).
+
+        Fast path: when the caller holds USE CATALOG, one
+        ``information_schema.routines`` statement covers the whole catalog.
+        BROWSE-only fallback: ``SHOW SCHEMAS`` + per-schema ``SHOW USER
+        FUNCTIONS`` fanned out over :data:`_UC_SEARCH_CONCURRENCY` threads,
+        visiting at most :data:`_UC_SEARCH_MAX_SCHEMAS` schemas; truncation and
+        skipped schemas are reported via the returned warning instead of
+        failing. Results are cached per (user, catalog, prefix) for
+        :data:`_UC_SEARCH_TTL_SECONDS`.
+        """
+        from deep_research.agent_designer import uc_metadata
+
+        catalog_norm = catalog.strip().lower()
+        prefix_norm = name_prefix.strip().lower()
+        cache_key = (user_id or "anon", catalog_norm, prefix_norm)
+        now = time.monotonic()
+        with _UC_SEARCH_CACHE_LOCK:
+            hit = _UC_SEARCH_CACHE.get(cache_key)
+            if hit is not None and hit[0] > now:
+                return list(hit[1]), hit[2]
+
+        sql = self._build_sql_executor(user_token)
+        if sql is None:
+            return [], None
+
+        warning: str | None = None
+        use_catalog = False
+        try:
+            use_catalog = uc_metadata.check_use_catalog(sql, catalog_norm)
+        except Exception:  # noqa: BLE001 - probe failure just forces the fallback
+            logger.warning("DESIGNER_UC_SEARCH_PROBE_FAILED", exc_info=True)
+
+        if use_catalog:
+            rows = uc_metadata.search_functions_in_catalog(
+                sql,
+                catalog_norm,
+                name_prefix=name_prefix,
+                limit=_UC_SEARCH_RESULT_CAP,
+            )
+            if len(rows) >= _UC_SEARCH_RESULT_CAP:
+                warning = (
+                    f"Showing the first {_UC_SEARCH_RESULT_CAP} matches in "
+                    f"'{catalog_norm}' — narrow the search."
+                )
+        else:
+            schemas = uc_metadata.list_schemas(sql, catalog_norm)
+            visited = schemas[:_UC_SEARCH_MAX_SCHEMAS]
+            skipped_errors = 0
+            rows = []
+
+            def _one_schema(schema_name: str) -> list[dict[str, str]]:
+                scoped = self._build_sql_executor(
+                    user_token, catalog=catalog_norm, schema=schema_name
+                )
+                if scoped is None:
+                    return []
+                return uc_metadata.list_functions(
+                    scoped, catalog_norm, schema_name, name_prefix=name_prefix
+                )
+
+            with concurrent.futures.ThreadPoolExecutor(
+                max_workers=_UC_SEARCH_CONCURRENCY
+            ) as pool:
+                futures = {
+                    pool.submit(_one_schema, entry["name"]): entry["name"]
+                    for entry in visited
+                }
+                for future in concurrent.futures.as_completed(futures):
+                    try:
+                        rows.extend(future.result())
+                    except Exception:  # noqa: BLE001 - one schema never sinks the search
+                        skipped_errors += 1
+                        logger.info(
+                            "DESIGNER_UC_SEARCH_SCHEMA_SKIPPED schema=%s",
+                            futures[future],
+                            exc_info=True,
+                        )
+            rows.sort(key=lambda d: (d["name"], d["full_name"]))
+            capped = len(rows) > _UC_SEARCH_RESULT_CAP
+            if capped:
+                rows = rows[:_UC_SEARCH_RESULT_CAP]
+            notes: list[str] = []
+            if len(schemas) > len(visited):
+                notes.append(
+                    f"searched the first {len(visited)} of {len(schemas)} "
+                    f"schemas in '{catalog_norm}' — pick a schema for full coverage"
+                )
+            if skipped_errors:
+                notes.append(f"{skipped_errors} schema(s) could not be searched")
+            if capped:
+                notes.append(f"showing the first {_UC_SEARCH_RESULT_CAP} matches")
+            if notes:
+                warning = "Partial results: " + "; ".join(notes) + "."
+
+        resources = _uc_rows_to_resources("uc_function", rows)
+        with _UC_SEARCH_CACHE_LOCK:
+            _UC_SEARCH_CACHE[cache_key] = (
+                now + _UC_SEARCH_TTL_SECONDS,
+                list(resources),
+                warning,
+            )
+        return resources, warning
 
     def get_function_signature(
         self, user_token: str | None, fqn: str

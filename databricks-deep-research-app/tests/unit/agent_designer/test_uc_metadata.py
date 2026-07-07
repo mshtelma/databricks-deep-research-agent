@@ -272,3 +272,33 @@ def test_classify_sql_error() -> None:
         == "not_found"
     )
     assert uc_metadata.classify_sql_error("something unexpected") == "other"
+
+
+def test_search_functions_in_catalog_pushes_only_ident_safe_prefixes() -> None:
+    """The LIKE clause may contain only [A-Za-z0-9_] prefixes; anything else is
+    filtered client-side so no quote/wildcard ever reaches the SQL text."""
+    seen_sql: list[str] = []
+
+    def _exec(sql: str, params: list[Any], token: str) -> list[dict[str, Any]]:
+        seen_sql.append(sql)
+        return [
+            {"routine_schema": "metrics", "routine_name": "pct_change"},
+            {"routine_schema": "metrics", "routine_name": "other"},
+        ]
+
+    rows = uc_metadata.search_functions_in_catalog(_exec, "Main", name_prefix="pct")
+    assert "LIKE 'pct%'" in seen_sql[-1]
+    assert [r["full_name"] for r in rows] == ["main.metrics.pct_change"]
+
+    # Unsafe prefix: no LIKE is emitted; filtering happens client-side only.
+    rows = uc_metadata.search_functions_in_catalog(_exec, "main", name_prefix="pct'--")
+    assert "LIKE" not in seen_sql[-1]
+    assert rows == []
+
+
+def test_search_functions_in_catalog_rejects_bad_catalog() -> None:
+    def _exec(sql: str, params: list[Any], token: str) -> list[dict[str, Any]]:
+        raise AssertionError("must not execute")
+
+    with pytest.raises(ValueError, match="unsupported catalog identifier"):
+        uc_metadata.search_functions_in_catalog(_exec, "bad-catalog")

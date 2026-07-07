@@ -25,9 +25,7 @@ from typing import TYPE_CHECKING, Any
 from deep_research.agent_designer.uc_metadata import FQN_RE, get_signature
 
 if TYPE_CHECKING:
-    from databricks_deep_research.tools.builtins.text_table.tools._common import (
-        SqlExecutor,
-    )
+    from deep_research.agent_designer.uc_metadata import SqlExecutor
 
 logger = logging.getLogger(__name__)
 
