@@ -2,8 +2,34 @@
 
 ## Status
 
-Revision 2 — rewritten after a code-verified adversarial review (2026-07-07).
-Do not implement from this file until re-reviewed.
+Revision 3 — **implemented** (2026-07-08) on `feat/tool-ux-integration`.
+
+- Phase 0 (integration): commits `aff3d61` (Line A), `d603c9f` (merge of
+  feat-function-picker-ui incl. deterministic functions, with the resolver /
+  registry / family-map reconciliations), `11d7adc` (asyncpg chore merge).
+- Phases 1–2 (search-first picker, catalog-scoped UC search, signature-driven
+  tool steps, required-param validation): commit `cfa9a4d`.
+- Phases 3–4 (Python/MCP clarity, x-advanced disclosure, decorated import
+  validation, ToolsPanel target + used-by): commit `676c0ea`.
+
+Deviations from the plan text, chosen during implementation:
+
+1. **Intent application stays in `ConfigPanel.handleToolDeclared`** (the single
+   existing site) instead of moving into the picker; the picker signals both
+   new declarations and existing-tool selections through `onDeclared` and
+   labels its CTA per intent. Functionally equivalent, less churn.
+2. **Tool-step unification landed as `ToolStepForm` absorbing
+   `FunctionParamsEditor`** (signature rows, literals, advanced output
+   section), not as an evolution of `FunctionToolNodeEditor` — that component
+   is now unrouted and can be deleted in a cleanup pass.
+3. `uc_tool` retirement happened in Phase 0 (merge), not as a separate step.
+
+Known follow-ups (small): list `mcp_servers` entries in the picker's
+existing-tools group; surface the signature route's `run_ready` warning after
+the fast-path declare; delete the unrouted `FunctionToolNodeEditor`.
+
+The remainder of this document is the reviewed plan (Revision 2) the
+implementation followed.
 
 Verified against three concurrent lines of work (all based on `b258929`):
 
