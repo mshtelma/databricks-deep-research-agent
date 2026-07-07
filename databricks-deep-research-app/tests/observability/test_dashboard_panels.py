@@ -1,7 +1,8 @@
 """CI snapshot tests for scripts/grafana/agent_designer_dashboard.json.
 
 These tests verify that the Grafana dashboard JSON stays in sync with the
-Agent Designer V1.5 observability policy (docs/observability-policy.md).
+Agent Designer V1.5 observability policy (the policy doc was retired; the
+signal list encoded in these tests is the source of truth).
 
 Design intent
 -------------
