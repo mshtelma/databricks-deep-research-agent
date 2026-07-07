@@ -148,12 +148,14 @@ def _resolve(node: WorkflowNode, visible: set[str], dangling: list[str]) -> set[
     if node.type == NodeType.tool:
         cfg_t = ToolNodeConfig(**node.config)
         # input_mapping maps tool-arg -> outer state key; the VALUES must resolve.
+        # input_literals are constants and bind_namespace is runtime-mediated —
+        # neither needs a producer.
         for state_key in cfg_t.input_mapping.values():
             if state_key not in visible:
                 dangling.append(
                     f"tool '{node.id}': input_mapping reads '{state_key}' with no producer"
                 )
-        return {cfg_t.output_key} if cfg_t.output_key else set()
+        return {key for key in (cfg_t.output_key, cfg_t.output_data_key) if key}
     if node.type == NodeType.sequence:
         local = set(visible)
         exported: set[str] = set()
@@ -323,6 +325,8 @@ def _collect_producers_reads(
             cfg_t = ToolNodeConfig(**node.config)
             if cfg_t.output_key:
                 producers.append(Producer(cfg_t.output_key, "state", node.id))
+            if cfg_t.output_data_key:
+                producers.append(Producer(cfg_t.output_data_key, "state", node.id))
             state_reads.update(cfg_t.input_mapping.values())
         elif node.type == NodeType.plan_and_execute:
             cfg_p = PlanAndExecuteNodeConfig(**node.config)

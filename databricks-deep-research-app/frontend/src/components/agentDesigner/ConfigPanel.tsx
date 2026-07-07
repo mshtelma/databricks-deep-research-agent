@@ -124,9 +124,11 @@ function toolSummary(decl: ToolDecl): string {
     config['index_name'] ??
     config['space_id'] ??
     config['endpoint_name'] ??
-    config['function_name'] ??
+    config['function'] ??
+    config['function_name'] ?? // legacy alias shape from imported drafts
     config['tool_name'] ??
     config['import'] ??
+    config['key'] ??
     config['max_results'] ??
     config['num_results'];
   return primary === undefined || primary === null || primary === '' ? 'Not configured' : String(primary);
@@ -617,6 +619,10 @@ function ConfigureForm({
     );
   }
 
+  // Tool nodes: declaration-first step editor (ToolStepForm). The bespoke
+  // FunctionToolNodeEditor (UC picker + signature params) is kept in-tree and
+  // folds into this form in the tool-UX plan's Phase 2; UcFunctionPicker
+  // already renders in declaration editors via the uc-function-picker widget.
   if (block.type === 'tool') {
     return (
       <ToolStepForm

@@ -466,6 +466,58 @@ def _hydrate_get_validation(
     return None, True
 
 
+async def _maybe_introspect_uc_params(
+    definition: dict[str, Any] | None, fastapi_request: Request
+) -> None:
+    """Best-effort: fill uc_function ``config.params`` from information_schema
+    under the caller's OBO identity, before persist.
+
+    Fail-soft by contract — never raises, never blocks the save. Off the
+    synchronous service path so a cold warehouse cannot exceed the client's 30s
+    timeout: a short-capped ``asyncio.to_thread`` query, and the whole thing is
+    skipped when there is no OBO token or no SQL warehouse.
+    """
+    if not isinstance(definition, dict):
+        return
+    tools = definition.get("tools")
+    if not isinstance(tools, list) or not any(
+        isinstance(t, dict) and t.get("kind") == "uc_function" for t in tools
+    ):
+        return
+    # get_user_workspace_client 401s in Databricks Apps without this header;
+    # local dev / curl-without-OBO simply skip introspection.
+    if not fastapi_request.headers.get("X-Forwarded-Access-Token"):
+        return
+    try:
+        from databricks_deep_research.tools.builtins.text_table.runtime_wiring import (
+            StatementExecutionTableSQL,
+        )
+
+        from deep_research.agent.workflow_runner_factory import (
+            _resolve_table_warehouse_id,
+        )
+        from deep_research.agent_designer.uc_function_introspect import (
+            introspect_and_fill_uc_params,
+        )
+
+        warehouse_id = _resolve_table_warehouse_id()
+        if not warehouse_id:
+            logger.info("UC_FUNCTION_INTROSPECT_SKIP reason=no_warehouse")
+            return
+        executor = StatementExecutionTableSQL(
+            workspace_client=get_user_workspace_client(fastapi_request),
+            warehouse_id=warehouse_id,
+            timeout_sec=5.0,
+        )
+        warnings = await introspect_and_fill_uc_params(
+            definition, executor, timeout_seconds=8.0
+        )
+        for warning in warnings:
+            logger.info("UC_FUNCTION_INTROSPECT_WARN %s", warning)
+    except Exception as exc:  # noqa: BLE001 - introspection must never block save
+        logger.warning("UC_FUNCTION_INTROSPECT_SKIP error=%s", str(exc)[:200])
+
+
 @router.post("", response_model=AgentV2Response, status_code=status.HTTP_201_CREATED)
 async def create_agent(
     request: CreateAgentV2Request,
@@ -493,6 +545,7 @@ async def create_agent(
     # already blocked at request parse.
     service = AgentV2Service(session)
     _t0 = time.monotonic()
+    await _maybe_introspect_uc_params(request.definition, fastapi_request)
     agent = await service.create(owner_id=user.user_id, request=request)
     llm_client = getattr(fastapi_request.app.state, "llm_client", None)
     needs_bg = False
@@ -585,6 +638,7 @@ async def update_agent(
     # strict mode 422s on verdict=fail (which rolls back the update).
     service = AgentV2Service(session)
     _t0 = time.monotonic()
+    await _maybe_introspect_uc_params(request.definition, fastapi_request)
     try:
         agent = await service.update(agent_id, user.user_id, request, if_match)
     except EtagConflictError as exc:

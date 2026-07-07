@@ -53,8 +53,10 @@ NODE_TYPE_META: dict[str, dict[str, Any]] = {
         "category": "leaf",
         "is_composite": False,
         "config_model": ToolNodeConfig,
-        "default_config": {"ref": "web_search"},
-        "summary_template": "tool: {{ref}}",
+        # Unbound draft: the picker sets ref.name (create/select a declaration).
+        # ref MUST be a dict — a bare string fails ToolNodeConfig validation.
+        "default_config": {"ref": {"name": ""}},
+        "summary_template": "tool: {{ref.name}}",
     },
     NodeType.sequence: {
         "label": "Sequence",
@@ -560,30 +562,6 @@ _DECORATED_TOOL_SCHEMA: dict[str, Any] = {
     "required": ["import"],
 }
 
-_UC_FUNCTION_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "function_name": {
-            "type": "string",
-            "title": "Unity Catalog Function",
-            "description": "Full three-part Unity Catalog function name (catalog.schema.function).",
-        },
-    },
-    "required": ["function_name"],
-}
-
-_UC_TOOL_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "properties": {
-        "tool_name": {
-            "type": "string",
-            "title": "Unity Catalog Tool",
-            "description": "Registered UC tool name or three-part UC function-backed tool name.",
-        },
-    },
-    "required": ["tool_name"],
-}
-
 _ENTERPRISE_TOOL_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -594,6 +572,168 @@ _ENTERPRISE_TOOL_SCHEMA: dict[str, Any] = {
         },
     },
     "required": ["tool_name"],
+}
+
+
+# A UC scalar function invoked at runtime via the OBO SQL executor
+# (UCFunctionTool) — first-class, NOT normalized into mcp_servers. ``config.params``
+# is usually left empty and auto-filled from the function signature on save
+# (uc_function_introspect); the Designer picker fills ``function`` + ``params``.
+_UC_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "function": {
+            "type": "string",
+            "title": "UC Function",
+            "x-widget": "uc-function-picker",
+            "description": (
+                "Fully qualified Unity Catalog function "
+                "(catalog.schema.function). Invoked via SQL under the caller's "
+                "identity (OBO) — no app-side sandbox. Scalar or table-valued."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "x-widget": "hidden",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean), required, default. Auto-discovered from the "
+                "function signature on save; hidden in the picker UI."
+            ),
+        },
+        "returns_table": {
+            "type": "boolean",
+            "title": "Returns Table",
+            "x-widget": "hidden",
+            "default": False,
+            "description": (
+                "True for a table-valued function (invoked SELECT * FROM fn(..)); "
+                "auto-detected from the signature on save. Hidden in the UI."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "description": (
+                "On (default): results are admitted to the evidence pool and can be "
+                "cited. Off: results inform the model but are never cited."
+            ),
+            "default": True,
+        },
+    },
+    "required": ["function"],
+}
+
+
+# Operator-curated catalog tool: workflows reference a key, never an import
+# path (dict lookup at resolution — stored definitions cannot execute imports).
+_REGISTERED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "key": {
+            "type": "string",
+            "title": "Catalog Key",
+            "description": (
+                "Key of an operator-registered Python tool (app.yaml "
+                "tools.registered_tools). Save-time validation rejects keys "
+                "that are not in the catalog."
+            ),
+        },
+    },
+    "required": ["key"],
+}
+
+
+# Fixed design-time Python code executed in the run's persistent sandboxed
+# session (subprocess REPL). Callable by agents AND by deterministic tool nodes.
+_PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {
+            "type": "string",
+            "title": "Python Code",
+            "x-widget": "code",
+            "description": (
+                "Fixed function body authored at design time. Declared params "
+                "become globals; assign `result`. Runs in the run's sandboxed "
+                "session process — variables persist across calls (the run's "
+                "scratchpad)."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean/array/object), required, default, description."
+            ),
+        },
+        "backend": {
+            "type": "string",
+            "title": "Backend",
+            "enum": ["subprocess", "restricted"],
+            "default": "subprocess",
+            "description": (
+                "subprocess (default): hardened per-run sandbox session. "
+                "restricted: in-process — trusted hosts only (requires the "
+                "operator switch execution.allow_inprocess_python_function)."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "title": "Timeout (seconds)",
+            "default": 10,
+        },
+        "extra_allowed_modules": {
+            "type": "array",
+            "title": "Data Libraries",
+            "items": {"type": "string", "enum": ["pandas", "numpy"]},
+            "description": (
+                "Vetted data libraries importable by the code (facade view: "
+                "top-level API, IO/eval primitives removed)."
+            ),
+        },
+        "data_lib_mode": {
+            "type": "string",
+            "title": "Data-lib Exposure",
+            "enum": ["facade", "live"],
+            "default": "facade",
+            "description": (
+                "facade (default): top-level pandas/numpy API only. live: full "
+                "modules — trusted hosts only (operator switch required)."
+            ),
+        },
+        "reads_namespace": {
+            "type": "array",
+            "title": "Reads Variables",
+            "items": {"type": "string"},
+            "description": (
+                "Session variables the code expects to already exist (bridged "
+                "from the compute scratchpad when JSON-able)."
+            ),
+        },
+        "bind_result": {
+            "type": "string",
+            "title": "Bind Result As",
+            "description": (
+                "Also store the script's `result` under this session variable "
+                "so later functions and agents can use it."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "default": False,
+            "description": (
+                "Admit successful results into the evidence pool so synthesis "
+                "can cite them (function:// source)."
+            ),
+        },
+    },
+    "required": ["code"],
 }
 
 
@@ -757,9 +897,27 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     },
     "compute": {"layer": "C", "config_schema": _COMPUTE_SCHEMA},
     "compute_namespace": {"layer": "C", "config_schema": _COMPUTE_NAMESPACE_SCHEMA},
+    # Labels disambiguate the three Python-ish kinds in the shared picker
+    # (title-casing python_function would collide with decorated's
+    # "Python Function" label).
+    "python_function": {
+        "label": "Inline Python Function",
+        "layer": "C",
+        "config_schema": _PYTHON_FUNCTION_SCHEMA,
+    },
+    "registered": {
+        "label": "Registered Python Tool",
+        "layer": "D",
+        "config_schema": _REGISTERED_SCHEMA,
+    },
     "mcp": {
         "layer": "B",
         "config_schema": _MCP_SERVER_SCHEMA,
+    },
+    "uc_function": {
+        "label": "Unity Catalog Function",
+        "layer": "B",
+        "config_schema": _UC_FUNCTION_SCHEMA,
     },
     "table_discovery": {
         "layer": "B",
@@ -804,16 +962,10 @@ _DECLARATION_TOOL_KIND_META: dict[str, dict[str, Any]] = {
         "layer": "D",
         "config_schema": _DECORATED_TOOL_SCHEMA,
     },
-    "uc_function": {
-        "label": "Unity Catalog Function",
-        "layer": "B",
-        "config_schema": _UC_FUNCTION_TOOL_SCHEMA,
-    },
-    "uc_tool": {
-        "label": "Unity Catalog Tool",
-        "layer": "B",
-        "config_schema": _UC_TOOL_SCHEMA,
-    },
+    # uc_function is NOT listed here: it is a first-class ToolKind (OBO-SQL
+    # UCFunctionTool) carried by _TOOL_KIND_META with _UC_FUNCTION_SCHEMA.
+    # uc_tool is retired from authoring (no discovery, no runtime registration
+    # path); direct {type: uc_tool} refs remain parseable for imported YAML.
     "enterprise": {
         "label": "Enterprise Tool",
         "layer": "D",
@@ -1072,7 +1224,7 @@ def tool_kinds_payload() -> list[dict[str, Any]]:
     Tool-name harmonization from the final plan remains a separate framework
     migration; this endpoint exposes executable built-in ToolKind values plus
     declaration-backed callable kinds that the framework resolver can execute
-    (``decorated`` Python functions and externally registered UC/enterprise refs).
+    (``decorated`` Python functions and externally registered enterprise refs).
     Bare ``kind: custom`` declarations are intentionally hidden here: the
     current framework uses that kind only for compile-time instance overrides,
     not for Designer-authored deployable YAML declarations. User-visible

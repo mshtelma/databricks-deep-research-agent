@@ -12,6 +12,7 @@ DELETE /api/v1/agent-designer/custom-tools/{tool_id}
 """
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -41,6 +42,7 @@ from deep_research.agent_designer.discovery import (
     DesignerDiscoveryAdapter,
     DiscoveredResource,
     SourceKind,
+    UcBrowseError,
     _DiscoveryServiceProto,
 )
 from deep_research.agent_designer.registry import (
@@ -442,9 +444,26 @@ class RegistryResponse(BaseModel):
     version: str
 
 
+class BrowseError(BaseModel):
+    """Why a Unity Catalog browse returned no results (for the picker to render)."""
+
+    code: str  # 'permission' | 'not_found' | 'other'
+    message: str
+
+
 class ResourcesResponse(BaseModel):
     resources: list[DiscoveredResource]
     total: int
+    error: BrowseError | None = None
+
+
+class FunctionSignatureResponse(BaseModel):
+    function: str
+    params: list[dict[str, Any]]
+    scalar: bool
+    returns_table: bool = False
+    run_ready: bool = True
+    warning: str | None = None
 
 
 class RefreshCatalogRequest(BaseModel):
@@ -485,6 +504,9 @@ _VALID_RESOURCE_KINDS: frozenset[str] = frozenset(
         "sql_warehouse",
         "mcp_server",
         "skill",
+        "uc_catalog",
+        "uc_schema",
+        "uc_function",
     }
 )
 
@@ -523,18 +545,70 @@ async def list_resources(
     user: CurrentUser,
     fastapi_request: Request,
     kinds: list[str] | None = Query(default=None),
+    parent: str | None = Query(
+        default=None,
+        description=(
+            "Parent scope for cascading UC browse: catalog name for uc_schema, "
+            "'catalog.schema' for uc_function. Ignored by other kinds."
+        ),
+    ),
+    query: str | None = Query(
+        default=None, description="Optional name-prefix filter (server-side)."
+    ),
 ) -> ResourcesResponse:
     """List Databricks resources available for Designer tool configuration."""
     obo_token = _obo_token_from_request(fastapi_request)
     discovery_adapter = DesignerDiscoveryAdapter(
         cast(_DiscoveryServiceProto, DiscoveryService())
     )
-    resources = await discovery_adapter.list_for_user(
-        user_token=obo_token,
-        kinds=_parse_resource_kinds(kinds),
-        user_id=user.user_id,
-    )
+    try:
+        resources = await discovery_adapter.list_for_user(
+            user_token=obo_token,
+            kinds=_parse_resource_kinds(kinds),
+            user_id=user.user_id,
+            parent=parent,
+            name_prefix=query or "",
+        )
+    except UcBrowseError as exc:
+        # Never 500 the picker: return empty + a structured reason so it can
+        # explain (e.g. no BROWSE on the catalog) and still allow manual FQN entry.
+        return ResourcesResponse(
+            resources=[],
+            total=0,
+            error=BrowseError(code=exc.code, message=exc.message),
+        )
     return ResourcesResponse(resources=resources, total=len(resources))
+
+
+@router.get(
+    "/resources/uc-functions/{fqn}/signature",
+    response_model=FunctionSignatureResponse,
+)
+async def get_uc_function_signature(
+    fqn: str,
+    _user: CurrentUser,
+    fastapi_request: Request,
+) -> FunctionSignatureResponse:
+    """Live pre-save signature for a UC function (params + scalar-ness).
+
+    Fail-soft: query errors degrade to empty params + a warning so the picker can
+    still store the function and let the author map parameters manually."""
+    adapter = DesignerDiscoveryAdapter(cast(_DiscoveryServiceProto, DiscoveryService()))
+    obo_token = _obo_token_from_request(fastapi_request) or None
+    try:
+        result = await asyncio.to_thread(adapter.get_function_signature, obo_token, fqn)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error_kind": "invalid_function_fqn", "message": str(exc)},
+        ) from exc
+    except Exception as exc:  # noqa: BLE001 - fail-soft: never 500 the picker
+        logger.warning("DESIGNER_UC_SIGNATURE_FAILED fqn=%s error=%s", fqn, repr(exc))
+        return FunctionSignatureResponse(
+            function=fqn, params=[], scalar=True,
+            warning=f"Could not introspect parameters ({exc}).",
+        )
+    return FunctionSignatureResponse(**result)
 
 
 @router.post(

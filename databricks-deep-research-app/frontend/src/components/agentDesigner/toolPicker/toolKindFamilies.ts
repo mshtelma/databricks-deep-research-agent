@@ -20,6 +20,8 @@ export const TOOL_FAMILY_ORDER: ToolFamily[] = [
 
 const FAMILY_BY_KIND: Record<string, ToolFamily> = {
   decorated: 'python',
+  python_function: 'python',
+  registered: 'python',
   uc_function: 'databricks',
   vector_search: 'databricks',
   vector_index: 'databricks',

@@ -62,7 +62,7 @@ import sys
 import textwrap as _textwrap_mod
 import threading
 import types
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -998,6 +998,47 @@ class PythonComputeTool:
                 if len(entries) >= max_items:
                     break
             return entries
+
+    def export_namespace_jsonable(self, *, max_bytes: int = 64 * 1024) -> dict[str, Any]:
+        """JSON-serialisable snapshot of user variables (checkpoint payload).
+
+        Only ``_SAFE_NAMESPACE_TYPES`` values that actually JSON-encode within
+        the per-snapshot budget are included; live objects (DataFrames,
+        callables) are omitted — they are declared-lost on restore. Never
+        pickles (a restore-side RCE sink). Thread-safe.
+        """
+        import json as _json
+
+        snapshot: dict[str, Any] = {}
+        total = 0
+        with self._lock:
+            for key, value in self._namespace.items():
+                if key.startswith("_") or key == "__builtins__":
+                    continue
+                if not isinstance(value, self._SAFE_NAMESPACE_TYPES):
+                    continue
+                try:
+                    encoded = _json.dumps(value)
+                except (TypeError, ValueError):
+                    continue
+                if total + len(encoded) > max_bytes:
+                    continue
+                snapshot[key] = value
+                total += len(encoded)
+        return snapshot
+
+    def restore_namespace(self, snapshot: Mapping[str, Any]) -> int:
+        """Re-inject a JSON-able snapshot (resume path). Returns count restored.
+
+        Goes through :meth:`inject_variable` so the entry-count trim and lock
+        semantics apply unchanged.
+        """
+        restored = 0
+        for key, value in snapshot.items():
+            if isinstance(key, str) and key.isidentifier() and not key.startswith("_"):
+                self.inject_variable(key, value)
+                restored += 1
+        return restored
 
     def namespace_snapshot(self) -> str:
         """Return prompt-safe summary of user-defined variables.

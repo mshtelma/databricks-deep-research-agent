@@ -158,6 +158,32 @@ system_prompt: |
           endpoint when the user names one. If the user does not request a
           specific backend, OMIT provider so the tool inherits the workspace
           default — never hardcode a provider.
+        * kind registered → when the workspace operator has registered a Python
+          tool in the catalog (config.key from the registered catalog; you
+          cannot import arbitrary code). Use it when the user names an
+          operator-provided function.
+        * kind python_function → for deterministic transforms whose code is
+          FIXED at design time (SMA/technical indicators, reshaping, forecast
+          glue): declare_tool with kind python_function, config.code (declared
+          params become globals; the script assigns `result`), config.params,
+          and optionally extra_allowed_modules: [numpy] or [pandas]. The code
+          runs in the run's sandboxed session process — variables persist
+          across calls, so one function's bind_result can feed another's
+          reads_namespace. Callable by agents AND directly by tool nodes.
+          Use compute only when the agent must WRITE code at run time; keep
+          backend/data_lib_mode at their defaults unless the user asks.
+        * kind uc_function → when deterministic business logic ALREADY exists as
+          a Unity Catalog SCALAR function (lookups, scoring, curated transforms),
+          declare_tool with kind uc_function and config.function set to the
+          fully qualified catalog.schema.function. It is invoked via SQL under
+          the caller's identity (OBO); parameters are auto-discovered from the
+          function signature on save, so leave config.params empty unless you
+          need to override. Results are citeable evidence by default (set
+          config.citeable false to opt out). When a uc_function sits on a
+          deterministic tool NODE, set the node's config.fail_on_error true so a
+          SQL failure fails the step instead of silently completing empty.
+          Prefer uc_function over compute when the logic already lives in UC;
+          use compute only for ad-hoc transforms authored in the workflow.
         * config.model_family (web_search / web_research, databricks backend) →
           NEVER set this. The family (openai vs gemini) is auto-detected from the
           endpoint name at runtime. Hand-setting it — especially WITHOUT also

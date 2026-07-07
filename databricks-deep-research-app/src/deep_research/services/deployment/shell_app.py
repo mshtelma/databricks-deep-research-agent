@@ -221,6 +221,9 @@ _SQL_WAREHOUSE_TOOL_KINDS: frozenset[str] = frozenset(
         "table_neighbors",
         "table_load",
         "table_aggregate",
+        # uc_function invokes a UC function via the same OBO SQL executor, so an
+        # exported agent that declares one needs the SQL-warehouse resource.
+        "uc_function",
     }
 )
 

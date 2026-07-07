@@ -219,29 +219,49 @@ class TestToolResolver:
         assert result.definition.name == "web_search"
 
     @pytest.mark.asyncio
-    async def test_external_uc_function_declaration_resolves_by_config_ref(self) -> None:
-        """A workflow alias can resolve to an externally registered UC function."""
+    async def test_external_enterprise_declaration_resolves_by_config_ref(self) -> None:
+        """A workflow alias can resolve to an externally registered enterprise tool."""
         registry = ToolRegistry()
-        tool = _FakeTool("main.metrics.pct_change")
-        registry.register_external("main.metrics.pct_change", tool)
+        tool = _FakeTool("crm_lookup")
+        registry.register_external("crm_lookup", tool)
         decl = ToolDeclaration(
-            name="pct_change",
-            kind="uc_function",
-            config={"function_name": "main.metrics.pct_change"},
+            name="crm",
+            kind="enterprise",
+            config={"tool_name": "crm_lookup"},
         )
 
         resolver = ToolResolver(declarations=[decl], legacy_registry=registry)
         direct_node_resolver = ToolResolver(declarations=[decl], legacy_registry=registry)
 
-        assert await resolver.resolve("pct_change") is tool
-        assert await direct_node_resolver.resolve({"type": "builtin", "name": "pct_change"}) is tool
+        assert await resolver.resolve("crm") is tool
+        assert await direct_node_resolver.resolve({"type": "builtin", "name": "crm"}) is tool
 
     @pytest.mark.asyncio
-    async def test_external_uc_function_declaration_requires_function_name(self) -> None:
-        decl = ToolDeclaration(name="pct_change", kind="uc_function")
+    async def test_external_enterprise_declaration_requires_tool_name(self) -> None:
+        decl = ToolDeclaration(name="crm", kind="enterprise")
         resolver = ToolResolver(declarations=[decl], legacy_registry=ToolRegistry())
 
-        with pytest.raises(ValueError, match="requires config.function_name"):
+        with pytest.raises(ValueError, match="requires config.tool_name"):
+            await resolver.resolve("crm")
+
+    @pytest.mark.asyncio
+    async def test_uc_function_declaration_routes_to_factory_chain_not_external(self) -> None:
+        """Regression guard for the deterministic-functions merge: uc_function
+        declarations must reach the factory chain (UCFunctionTool). An external
+        short-circuit would look the FQN up in a registry nothing populates."""
+        registry = ToolRegistry()
+        registry.register_external("main.metrics.pct_change", _FakeTool("should_not_win"))
+        decl = ToolDeclaration(
+            name="pct_change",
+            kind="uc_function",
+            config={"function": "main.metrics.pct_change"},
+        )
+
+        resolver = ToolResolver(declarations=[decl], legacy_registry=registry)
+
+        # No factories supplied -> the factory chain is exhausted; the external
+        # registry entry above must NOT be consulted for uc_function.
+        with pytest.raises(ValueError, match="No factory supports kind='uc_function'"):
             await resolver.resolve("pct_change")
 
     @pytest.mark.asyncio

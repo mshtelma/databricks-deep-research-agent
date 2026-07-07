@@ -154,7 +154,17 @@ root:
             ``remove_tool`` to drop one. Inspect the current tools with
             ``inspect_ast_summary`` / ``list_tool_kinds`` first; if the user
             named a workspace resource, confirm it via ``inspect_assets`` /
-            ``recommend_tools_for_assets``.
+            ``recommend_tools_for_assets``. For deterministic logic that
+            already exists in Unity Catalog, ``declare_tool`` with kind
+            ``uc_function`` and ``config.function: catalog.schema.function``
+            — it is invoked via SQL under the caller's identity (OBO), scalar
+            functions only; params are auto-discovered on save and it is
+            citeable evidence by default. On a deterministic tool node, set
+            ``config.fail_on_error: true`` so a SQL failure fails the step. For
+            fixed design-time
+            transforms (SMA, reshaping, forecast glue), ``declare_tool`` with
+            kind ``python_function`` (``config.code`` + ``config.params``;
+            sandboxed session, variables persist across calls).
           - Add a lane or candidate: ``clone_block`` an EXISTING sibling
             (so the new node inherits a valid config + pool wiring), then
             adjust its prompt with ``edit_update_block`` if needed. Do NOT hand-

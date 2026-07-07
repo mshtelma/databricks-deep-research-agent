@@ -1,0 +1,24 @@
+{
+  "statuses": [
+    "running",
+    "completed",
+    "failed",
+    "cancelled",
+    "timed_out",
+    "polling_timed_out",
+    "budget_exceeded",
+    "skipped",
+    "safety_termination"
+  ],
+  "labels": {
+    "running": "Running…",
+    "completed": "Completed",
+    "failed": "Failed",
+    "cancelled": "Cancelled",
+    "timed_out": "Timed out",
+    "polling_timed_out": "Polling timed out",
+    "budget_exceeded": "Budget exceeded",
+    "skipped": "Skipped",
+    "safety_termination": "Stopped for safety"
+  }
+}

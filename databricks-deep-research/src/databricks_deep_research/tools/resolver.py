@@ -24,9 +24,12 @@ from databricks_deep_research.workflow.definition import ToolDeclaration
 
 logger = logging.getLogger(__name__)
 
+# Declaration kinds whose runtime tool is supplied per-execution via
+# ToolRegistry.register_external (app enterprise tools). uc_function is
+# deliberately NOT routed here: it has a first-class factory (UCFunctionTool,
+# OBO SQL) and an external short-circuit would shadow it with a registry
+# lookup nothing ever populates. uc_tool is retired for the same reason.
 _EXTERNAL_DECLARATION_FIELDS: dict[str, str] = {
-    "uc_function": "function_name",
-    "uc_tool": "tool_name",
     "enterprise": "tool_name",
 }
 

@@ -1753,6 +1753,36 @@ class SkillsConfig(BaseModel):
     model_config = {"frozen": True}
 
 
+class ExecutionConfig(BaseModel):
+    """Deterministic python_function execution gates.
+
+    Operator-owned trust switch: in-process execution (``backend: restricted``
+    and ``data_lib_mode: live``) is NOT a hard security boundary (un-killable
+    worker threads, no memory cap), so stored/vibe-coded functions may only use
+    the subprocess sandbox unless the operator flips this on.
+    """
+
+    allow_inprocess_python_function: bool = False
+
+    model_config = {"frozen": True}
+
+
+class ToolsConfig(BaseModel):
+    """Operator-curated Python tool sources (startup-loaded = trusted).
+
+    ``registered_tools`` entries ("module:attr") are imported ONCE at startup
+    into the registered-tool catalog; workflows reference them by key only
+    (``kind: registered`` → dict lookup, never importlib on stored data).
+    ``decorated_import_allowlist`` gates the legacy ``kind: decorated`` import
+    path for stored definitions — empty (default) means fail-closed.
+    """
+
+    registered_tools: list[str] = Field(default_factory=list)
+    decorated_import_allowlist: list[str] = Field(default_factory=list)
+
+    model_config = {"frozen": True}
+
+
 class AgentEffortConfig(BaseModel):
     """Proportional research-depth scaling for custom-agent workflows.
 
@@ -1882,6 +1912,16 @@ class AppConfig(BaseModel):
     skills: SkillsConfig = Field(
         default_factory=SkillsConfig,
         description="Skills subsystem configuration (skill-script execution gate).",
+    )
+    # python_function execution gates (in-process trust switch).
+    execution: ExecutionConfig = Field(
+        default_factory=ExecutionConfig,
+        description="Deterministic python_function execution gates.",
+    )
+    # Operator-curated Python tool sources (registered catalog + decorated gate).
+    tools: ToolsConfig = Field(
+        default_factory=ToolsConfig,
+        description="Registered-tool catalog entries and the decorated-import allowlist.",
     )
     # Effort/depth dial for custom-agent workflows (proportional budget scaling).
     agent_effort: AgentEffortConfig = Field(

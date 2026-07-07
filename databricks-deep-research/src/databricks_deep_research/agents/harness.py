@@ -1035,17 +1035,23 @@ async def _build_input(
     # designer architect) get no compute_namespace key at all, which keeps
     # the variable absent from their prompt context rather than leaking a
     # misleading "(compute tool not available)" placeholder.
-    ns_summary: str | None = None
+    # Merge every distinct scratchpad view (the compute tool's in-process
+    # namespace AND the sandbox-session shadow exposed by python_function
+    # tools) so agents see one combined {compute_namespace}.
+    ns_parts: list[str] = []
     for tool in tools:
         if hasattr(tool, "namespace_snapshot") and callable(tool.namespace_snapshot):
             try:
-                ns_summary = tool.namespace_snapshot()
+                part = tool.namespace_snapshot()
             except Exception:
                 logger.warning("NAMESPACE_SNAPSHOT_FAILED node=%s", _node_id, exc_info=True)
-                ns_summary = "(error reading compute namespace)"
-            break
-    if ns_summary is not None and context.get("compute_namespace") is None:
-        context["compute_namespace"] = ns_summary
+                part = "(error reading compute namespace)"
+            # Duck-typed contract: only string snapshots count (mocks and
+            # misbehaving tools are skipped, never crash prompt building).
+            if isinstance(part, str) and part and part not in ns_parts:
+                ns_parts.append(part)
+    if ns_parts and context.get("compute_namespace") is None:
+        context["compute_namespace"] = "\n".join(ns_parts)
 
     # Auto-inject temporal context (current_date, current_iso_datetime,
     # current_timezone) unless the caller has already provided one. Caller
