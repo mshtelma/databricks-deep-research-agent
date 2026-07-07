@@ -30,6 +30,8 @@ const IDENT_RE = /^[A-Za-z0-9_]*$/;
 export interface UcFunctionValue {
   function: string;
   params?: UcFunctionParam[];
+  /** True for a table-valued function — fixes the runtime SQL shape. */
+  returns_table?: boolean;
 }
 
 export interface UcFunctionSignatureInfo {
@@ -82,14 +84,30 @@ export function UcFunctionPicker({
     }
   }, [value.function]);
 
-  const catalogsQ = useUcBrowse('uc_catalog', undefined, catalog, !disabled);
-  const schemasQ = useUcBrowse('uc_schema', catalog || undefined, schema, !disabled);
+  const catalogsQ = useUcBrowse('uc_catalog', undefined, !disabled);
+  // Browse a child level only once its parent is a *committed* value — one that
+  // actually appears in the parent level's list. This is what stops schema
+  // browse from firing on every keystroke of a half-typed catalog (`m`, `mc`, …).
+  const catalogNames = React.useMemo(
+    () => new Set((catalogsQ.data?.resources ?? []).map((r) => r.name)),
+    [catalogsQ.data],
+  );
+  const catalogCommitted = catalog !== '' && catalogNames.has(catalog);
+  const schemasQ = useUcBrowse('uc_schema', catalogCommitted ? catalog : undefined, !disabled);
+  const schemaNames = React.useMemo(
+    () => new Set((schemasQ.data?.resources ?? []).map((r) => r.name)),
+    [schemasQ.data],
+  );
+  const schemaCommitted = catalogCommitted && schema !== '' && schemaNames.has(schema);
   const functionsQ = useUcBrowse(
     'uc_function',
-    catalog && schema ? `${catalog}.${schema}` : undefined,
-    fn,
+    schemaCommitted ? `${catalog}.${schema}` : undefined,
     !disabled,
   );
+  // A browse that failed (e.g. no BROWSE on the catalog) comes back 200 with a
+  // structured `error` (not a thrown query) — surface the nearest one.
+  const browseError =
+    functionsQ.data?.error ?? schemasQ.data?.error ?? catalogsQ.data?.error ?? null;
 
   const fqn = catalog && schema && fn ? `${catalog}.${schema}.${fn}` : '';
   const fqnValid = FQN_RE.test(fqn);
@@ -101,11 +119,16 @@ export function UcFunctionPicker({
     (c: string, s: string, f: string) => {
       const next = c && s && f ? `${c}.${s}.${f}` : '';
       lastValueFn.current = next;
-      // Keep existing params only if the FQN is unchanged; otherwise clear until
-      // the signature for the new function arrives.
-      onChange({ function: next, params: next === value.function ? value.params : undefined });
+      // Keep existing params/returns_table only if the FQN is unchanged; otherwise
+      // clear until the signature for the new function arrives.
+      const unchanged = next === value.function;
+      onChange({
+        function: next,
+        params: unchanged ? value.params : undefined,
+        returns_table: unchanged ? value.returns_table : undefined,
+      });
     },
-    [onChange, value.function, value.params],
+    [onChange, value.function, value.params, value.returns_table],
   );
 
   const onCatalog = (raw: string): void => {
@@ -148,7 +171,7 @@ export function UcFunctionPicker({
     const data = sigQ.data;
     if (data && data.function === fqn && emittedSig.current !== data.function) {
       emittedSig.current = data.function;
-      onChange({ function: fqn, params: data.params });
+      onChange({ function: fqn, params: data.params, returns_table: data.returns_table });
       onSignature?.({ params: data.params, scalar: data.scalar, warning: data.warning });
     }
   }, [sigQ.data, fqn, onChange, onSignature]);
@@ -236,7 +259,18 @@ export function UcFunctionPicker({
         </p>
       )}
       {sigQ.data?.warning && <p className={WARN}>{sigQ.data.warning}</p>}
-      {(catalogsQ.isError || schemasQ.isError || functionsQ.isError) && (
+      {browseError && (
+        <p className={WARN}>
+          {browseError.code === 'permission'
+            ? 'You can see this catalog but lack the privilege to browse into it. '
+            : browseError.code === 'not_found'
+              ? 'That catalog or schema was not found. '
+              : 'Could not browse Unity Catalog. '}
+          You can still type a full{' '}
+          <span className="font-db-mono">catalog.schema.function</span> above.
+        </p>
+      )}
+      {!browseError && (catalogsQ.isError || schemasQ.isError || functionsQ.isError) && (
         <p className={WARN}>
           Could not browse Unity Catalog (a SQL warehouse may be needed). You can still
           type a full <span className="font-db-mono">catalog.schema.function</span> above.

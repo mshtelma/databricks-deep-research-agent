@@ -111,7 +111,7 @@ class TestToolNodeRefValidation:
 
 
 # --------------------------------------------------------------------------
-# Save-time parameter introspection
+# Save-time signature introspection (DESCRIBE FUNCTION — BROWSE-sufficient)
 # --------------------------------------------------------------------------
 
 SqlRow = dict[str, Any]
@@ -129,49 +129,44 @@ def _executor(
     return _exec
 
 
-def _param_row(
-    fn: str,
-    name: str,
-    data_type: str,
-    ordinal: int,
-    *,
-    default: Any = None,
-    full: str | None = None,
-) -> SqlRow:
-    return {
-        "specific_name": fn,
-        "parameter_name": name,
-        "data_type": data_type,
-        "full_data_type": full or data_type,
-        "ordinal_position": ordinal,
-        "parameter_default": default,
-    }
+def _describe(lines: list[str]) -> list[SqlRow]:
+    """DESCRIBE FUNCTION EXTENDED output: one text column ``function_desc``."""
+    return [{"function_desc": line} for line in lines]
 
 
 class TestParamIntrospection:
     async def test_fills_params_and_maps_types(self) -> None:
-        rows = [
-            _param_row("pct_change", "old_value", "DOUBLE", 1),
-            _param_row("pct_change", "new_value", "DOUBLE", 2),
+        lines = [
+            "Function: msh.dre_e2e.pct_change",
+            "Type: SCALAR",
+            "Input: old_value DOUBLE 'previous'",
+            "       new_value DOUBLE 'current'",
+            "Returns: DOUBLE",
         ]
         defn = _ast([_uc_tool("pct", "msh.dre_e2e.pct_change")])
         capture: dict[str, Any] = {}
         warnings = await introspect_and_fill_uc_params(
-            defn, _executor(rows, capture)
+            defn, _executor(_describe(lines), capture)
         )
-        params = defn["tools"][0]["config"]["params"]
+        cfg = defn["tools"][0]["config"]
+        params = cfg["params"]
         assert [p["name"] for p in params] == ["old_value", "new_value"]
         assert params[0]["type"] == "number"
         assert params[0]["required"] is True
-        # Exact-match query, never a LIKE-prefix (which would ingest siblings).
-        assert "specific_name IN (" in capture["sql"]
-        assert "LIKE" not in capture["sql"].upper()
+        assert cfg["returns_table"] is False
+        # DESCRIBE the exact function — never a batched/LIKE query.
+        assert "DESCRIBE FUNCTION EXTENDED" in capture["sql"]
         assert warnings == []
 
     async def test_optional_param_marked_not_required(self) -> None:
-        rows = [_param_row("f", "n", "INT", 1, default="10")]
+        lines = [
+            "Function: c.s.f",
+            "Type: SCALAR",
+            "Input: n INT DEFAULT 10 'count'",
+            "Returns: INT",
+        ]
         defn = _ast([_uc_tool("f", "c.s.f")])
-        await introspect_and_fill_uc_params(defn, _executor(rows))
+        await introspect_and_fill_uc_params(defn, _executor(_describe(lines)))
         params = defn["tools"][0]["config"]["params"]
         assert params[0]["type"] == "integer"
         assert params[0]["required"] is False
@@ -180,36 +175,49 @@ class TestParamIntrospection:
         defn = _ast([_uc_tool("pct", "MSH.DRE_E2E.PCT_CHANGE")])
         capture: dict[str, Any] = {}
         await introspect_and_fill_uc_params(defn, _executor([], capture))
-        by_name = {p.name: p.value for p in capture["params"]}
-        assert by_name["schema"] == "dre_e2e"
-        assert by_name["fn0"] == "pct_change"
-        assert "`msh`.information_schema.parameters" in capture["sql"]
+        assert "`msh`.`dre_e2e`.`pct_change`" in capture["sql"]
 
-    async def test_sibling_specific_name_not_confused(self) -> None:
-        # A sibling function's rows must never leak into a different decl.
-        rows = [_param_row("pct_change_2", "x", "INT", 1)]
-        defn = _ast([_uc_tool("pct", "msh.dre_e2e.pct_change")])
-        await introspect_and_fill_uc_params(defn, _executor(rows))
-        assert defn["tools"][0]["config"]["params"] == []
+    async def test_table_function_sets_returns_table(self) -> None:
+        lines = [
+            "Function: mcp.default.get_orders",
+            "Type: TABLE",
+            "Input: cust_id STRING 'customer id'",
+            "Returns: sale_id STRING",
+        ]
+        defn = _ast([_uc_tool("orders", "mcp.default.get_orders")])
+        await introspect_and_fill_uc_params(defn, _executor(_describe(lines)))
+        cfg = defn["tools"][0]["config"]
+        assert cfg["returns_table"] is True
+        assert cfg["params"] == [
+            {"name": "cust_id", "type": "string", "required": True}
+        ]
 
-    async def test_explicit_params_skip_introspection(self) -> None:
+    async def test_explicit_params_preserved_but_returns_table_filled(self) -> None:
+        # Author params win, but returns_table is still corrected from the signature.
+        lines = [
+            "Function: msh.dre_e2e.pct_change",
+            "Type: TABLE",
+            "Input: z STRING 'z'",
+            "Returns: r STRING",
+        ]
         defn = _ast(
             [_uc_tool("pct", "msh.dre_e2e.pct_change", params=[{"name": "z"}])]
         )
-        called = {"n": 0}
-
-        def _exec(sql: str, params: list[Any], token: str) -> list[SqlRow]:
-            called["n"] += 1
-            return []
-
-        await introspect_and_fill_uc_params(defn, _exec)
-        assert defn["tools"][0]["config"]["params"] == [{"name": "z"}]
-        assert called["n"] == 0
+        await introspect_and_fill_uc_params(defn, _executor(_describe(lines)))
+        cfg = defn["tools"][0]["config"]
+        assert cfg["params"] == [{"name": "z"}]
+        assert cfg["returns_table"] is True
 
     async def test_array_param_rejected_with_warning(self) -> None:
-        rows = [_param_row("reshaper", "items", "ARRAY", 1, full="ARRAY<STRING>")]
+        lines = [
+            "Function: c.s.reshaper",
+            "Type: SCALAR",
+            "Input: items ARRAY<STRING> 'labels'",
+            "Returns: STRING",
+        ]
         defn = _ast([_uc_tool("r", "c.s.reshaper")])
-        warnings = await introspect_and_fill_uc_params(defn, _executor(rows))
+        warnings = await introspect_and_fill_uc_params(defn, _executor(_describe(lines)))
+        # non-scalar => params left unset (untyped pass-through at runtime)
         assert "params" not in defn["tools"][0]["config"]
         assert any("non-scalar" in w for w in warnings)
 

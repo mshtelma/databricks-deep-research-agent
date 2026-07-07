@@ -188,6 +188,56 @@ class TestExecute:
         assert "invalid argument name" in (result.error or "")
 
 
+class TestExecuteTableFunction:
+    async def test_table_function_uses_select_star_from(self) -> None:
+        capture: dict[str, Any] = {}
+        rows = [
+            {"sale_id": "S1", "revenue": 10.0},
+            {"sale_id": "S2", "revenue": 20.0},
+        ]
+        tool = UCFunctionTool(
+            name="orders",
+            function_name="mcp.default.get_orders",
+            sql_executor=_executor(rows, capture),
+            params=[{"name": "cust_id", "type": "string", "required": True}],
+            returns_table=True,
+        )
+        result = await tool.execute({"cust_id": "C1"}, ToolContext())
+        assert result.success
+        assert capture["sql"] == (
+            "SELECT * FROM `mcp`.`default`.`get_orders`(cust_id => :cust_id)"
+        )
+        # All rows preserved in data; content is a compact table preview.
+        assert result.data["rows"] == rows
+        assert result.data["result"] is None
+        assert "sale_id" in result.content and "S2" in result.content
+
+    async def test_table_function_empty_rows_ok(self) -> None:
+        tool = UCFunctionTool(
+            name="orders",
+            function_name="mcp.default.get_orders",
+            sql_executor=_executor([]),
+            returns_table=True,
+        )
+        result = await tool.execute({"cust_id": "C1"}, ToolContext())
+        assert result.success
+        assert result.data["rows"] == []
+        assert "(no rows)" in result.content
+
+    async def test_scalar_default_preserves_as_result_shape(self) -> None:
+        # returns_table defaults False -> scalar SELECT ... AS result (unchanged).
+        capture: dict[str, Any] = {}
+        tool = UCFunctionTool(
+            name="f",
+            function_name="c.s.f",
+            sql_executor=_executor([{"result": "7"}], capture),
+            params=[{"name": "a", "type": "integer"}],
+        )
+        result = await tool.execute({"a": 1}, ToolContext())
+        assert "AS result" in capture["sql"]
+        assert result.data["result"] == "7"
+
+
 def _decl(config: dict[str, Any], name: str = "ucf") -> ToolDeclaration:
     return ToolDeclaration(name=name, kind="uc_function", config=config)
 
@@ -217,6 +267,17 @@ class TestFactory:
         ctx = ToolFactoryContext(sql_executor=_executor([]))
         with pytest.raises(ValueError, match="config.function"):
             await factory.create(_decl({}), ctx)
+
+    async def test_passes_returns_table_from_config(self) -> None:
+        factory = BuiltinToolFactory()
+        capture: dict[str, Any] = {}
+        ctx = ToolFactoryContext(sql_executor=_executor([{"x": 1}], capture))
+        tool = await factory.create(
+            _decl({"function": "mcp.default.get_orders", "returns_table": True}),
+            ctx,
+        )
+        await tool.execute({"cust_id": "C1"}, ToolContext())
+        assert capture["sql"].startswith("SELECT * FROM ")
 
 
 def _definition(tools: list[ToolDeclaration]) -> WorkflowDefinition:

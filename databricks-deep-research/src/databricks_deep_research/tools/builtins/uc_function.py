@@ -1,6 +1,6 @@
 """Deterministic ``uc_function`` tool: invoke a Unity Catalog function via SQL.
 
-A ``uc_function`` names an existing UC *scalar* function
+A ``uc_function`` names an existing UC *scalar or table-valued* function
 (``catalog.schema.fn``) and invokes it through the framework's OBO SQL executor
 (:class:`~databricks_deep_research.tools.builtins.text_table.runtime_wiring.StatementExecutionTableSQL`),
 so it runs under the *caller's* identity (on-behalf-of-user) with the ``sql``
@@ -71,9 +71,33 @@ _SQL_TYPE_MAP: dict[str, str] = {
     "bool": "BOOLEAN",
 }
 
+# Cap the rows rendered into a table-function result so a large result set never
+# blows up the tool-call content / citation snippet.
+_MAX_PREVIEW_ROWS = 50
+
+
+def _format_rows(rows: list[dict[str, Any]]) -> str:
+    """Render table-function rows as a compact markdown table (row-capped)."""
+    if not rows:
+        return "(no rows)"
+    columns = list(rows[0].keys())
+    lines = [" | ".join(columns), " | ".join("---" for _ in columns)]
+    for row in rows[:_MAX_PREVIEW_ROWS]:
+        lines.append(" | ".join(str(row.get(col, "")) for col in columns))
+    if len(rows) > _MAX_PREVIEW_ROWS:
+        lines.append(f"… ({len(rows) - _MAX_PREVIEW_ROWS} more row(s))")
+    return "\n".join(lines)
+
 
 class UCFunctionTool:
-    """Invoke a Unity Catalog scalar function via the OBO SQL executor."""
+    """Invoke a Unity Catalog function via the OBO SQL executor.
+
+    Scalar functions are called ``SELECT fn(args) AS result`` (a single value);
+    table-valued functions (``returns_table=True``) are called
+    ``SELECT * FROM fn(args)`` and return all rows. ``returns_table`` is derived
+    at authoring time from ``DESCRIBE FUNCTION`` (``Type: TABLE``); it defaults
+    to ``False`` so an un-introspected declaration keeps the scalar behavior.
+    """
 
     def __init__(
         self,
@@ -84,6 +108,7 @@ class UCFunctionTool:
         params: Sequence[dict[str, Any]] = (),
         description: str = "",
         citeable: bool = True,
+        returns_table: bool = False,
     ) -> None:
         if not _FQN_RE.match(function_name):
             raise ValueError(
@@ -99,6 +124,7 @@ class UCFunctionTool:
         self._schema = compile_params_schema(self._params)
         self._description = description
         self._citeable = citeable
+        self._returns_table = returns_table
         # Declared name -> SQL binding type (None = untyped, implicit-cast).
         self._sql_types: dict[str, str | None] = {
             str(p.get("name")): _SQL_TYPE_MAP.get(
@@ -173,8 +199,7 @@ class UCFunctionTool:
                 success=False,
                 error=str(exc),
             )
-        value = rows[0].get("result") if rows else None
-        return self._to_tool_result(arguments, value, rows)
+        return self._to_tool_result(arguments, rows)
 
     # -- helpers --------------------------------------------------------------
 
@@ -196,17 +221,26 @@ class UCFunctionTool:
                     type=self._sql_types.get(name),
                 )
             )
-        sql = f"SELECT {self._quoted_fqn}({', '.join(clauses)}) AS result"
+        args_sql = ", ".join(clauses)
+        if self._returns_table:
+            # Table-valued function: SELECT * FROM fn(args) yields all rows.
+            sql = f"SELECT * FROM {self._quoted_fqn}({args_sql})"
+        else:
+            sql = f"SELECT {self._quoted_fqn}({args_sql}) AS result"
         return sql, sdk_params
 
     def _to_tool_result(
         self,
         arguments: dict[str, Any],
-        value: Any,
         rows: list[dict[str, Any]],
     ) -> ToolResult:
         arg_repr = ", ".join(f"{k}={v!r}" for k, v in arguments.items())
-        content = f"{self._function_name}({arg_repr}) -> {value}"
+        if self._returns_table:
+            value: Any = None
+            content = f"{self._function_name}({arg_repr}) ->\n{_format_rows(rows)}"
+        else:
+            value = rows[0].get("result") if rows else None
+            content = f"{self._function_name}({arg_repr}) -> {value}"
         sources: list[SourceInfo] = []
         if self._citeable:
             arg_hash = hashlib.sha256(

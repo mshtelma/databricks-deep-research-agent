@@ -1,8 +1,9 @@
 """Unit tests for uc_metadata — OBO-SQL Unity Catalog browse + signature helpers.
 
-Uses a fake SqlExecutor that dispatches canned rows by matching a substring of the
-issued SQL, so the pure query-building + row-parsing logic is exercised without a
-warehouse.
+Browse/signature use SHOW/DESCRIBE (BROWSE-sufficient) rather than
+information_schema (which needs USE CATALOG). A fake SqlExecutor dispatches canned
+rows by matching a substring of the issued SQL, so the pure query-building +
+row-parsing logic is exercised without a warehouse.
 """
 
 from __future__ import annotations
@@ -30,30 +31,51 @@ def _executor(responses: list[tuple[str, list[dict[str, Any]]]]):
     return _exec
 
 
+def _describe(lines: list[str]) -> list[dict[str, Any]]:
+    """DESCRIBE FUNCTION EXTENDED returns one text column ``function_desc``."""
+    return [{"function_desc": line} for line in lines]
+
+
+# --- catalogs (SHOW CATALOGS, unchanged) -----------------------------------
+
+
 def test_list_catalogs_filters_hyphenated_lowercases_and_sorts() -> None:
     ex = _executor(
         [("SHOW CATALOGS", [{"catalog": "Sales"}, {"catalog": "my-cat"}, {"catalog": "MAIN"}])]
     )
     result = uc_metadata.list_catalogs(ex)
-    # hyphenated dropped (v1 unsupported), lowercased, sorted
     assert [c["name"] for c in result] == ["main", "sales"]
     assert result[0]["full_name"] == "main"
 
 
 def test_list_catalogs_name_prefix_client_side() -> None:
-    ex = _executor([("SHOW CATALOGS", [{"catalog": "sales"}, {"catalog": "staging"}, {"catalog": "main"}])])
+    ex = _executor(
+        [("SHOW CATALOGS", [{"catalog": "sales"}, {"catalog": "staging"}, {"catalog": "main"}])]
+    )
     result = uc_metadata.list_catalogs(ex, name_prefix="sa")
     assert [c["name"] for c in result] == ["sales"]
 
 
-def test_list_schemas_scopes_to_catalog_and_binds_prefix() -> None:
-    ex = _executor([("information_schema.schemata", [{"schema_name": "finance"}])])
-    result = uc_metadata.list_schemas(ex, "main", name_prefix="fin")
-    assert result == [{"name": "finance", "full_name": "main.finance"}]
-    sql, params, _ = ex.calls[0]  # type: ignore[attr-defined]
-    assert "`main`.information_schema.schemata" in sql
-    assert "schema_name LIKE :q" in sql
-    assert any(getattr(p, "value", None) == "fin%" for p in params)
+# --- schemas (SHOW SCHEMAS IN, BROWSE-sufficient) --------------------------
+
+
+def test_list_schemas_uses_show_schemas_and_filters_prefix() -> None:
+    ex = _executor(
+        [
+            (
+                "SHOW SCHEMAS",
+                [{"databaseName": "finance"}, {"databaseName": "fin_raw"}, {"databaseName": "sales"}],
+            )
+        ]
+    )
+    result = uc_metadata.list_schemas(ex, "MAIN", name_prefix="fin")
+    # prefix-filtered client-side, lowercased, sorted ("_" sorts before "a")
+    assert result == [
+        {"name": "fin_raw", "full_name": "main.fin_raw"},
+        {"name": "finance", "full_name": "main.finance"},
+    ]
+    sql, _params, _ = ex.calls[0]  # type: ignore[attr-defined]
+    assert sql == "SHOW SCHEMAS IN `main`"
 
 
 def test_list_schemas_rejects_bad_catalog_identifier() -> None:
@@ -62,74 +84,146 @@ def test_list_schemas_rejects_bad_catalog_identifier() -> None:
         uc_metadata.list_schemas(ex, "bad-catalog")
 
 
-def test_list_functions_returns_fqn_and_return_type_hint() -> None:
+# --- functions (SHOW USER FUNCTIONS + session context) ---------------------
+
+
+def test_list_functions_uses_show_user_functions_and_parses_fqn() -> None:
     ex = _executor(
-        [("information_schema.routines", [{"routine_name": "Get_Price", "data_type": "DOUBLE"}])]
+        [
+            (
+                "SHOW USER FUNCTIONS",
+                [
+                    {"function": "main.finance.get_price"},
+                    {"function": "main.finance.calc_tax"},
+                    {"function": "other.sch.ignore_me"},
+                ],
+            )
+        ]
     )
-    result = uc_metadata.list_functions(ex, "main", "finance")
+    result = uc_metadata.list_functions(ex, "MAIN", "Finance")
+    # only this schema's functions, bare name kept, sorted
     assert result == [
-        {
-            "name": "get_price",
-            "full_name": "main.finance.get_price",
-            "description": "returns DOUBLE",
-        }
+        {"name": "calc_tax", "full_name": "main.finance.calc_tax"},
+        {"name": "get_price", "full_name": "main.finance.get_price"},
     ]
-    sql, params, _ = ex.calls[0]  # type: ignore[attr-defined]
-    assert "routine_type = 'FUNCTION'" in sql
-    assert any(getattr(p, "value", None) == "finance" for p in params)
+    sql, _params, _ = ex.calls[0]  # type: ignore[attr-defined]
+    assert sql == "SHOW USER FUNCTIONS"
+
+
+def test_list_functions_name_prefix_client_side() -> None:
+    ex = _executor(
+        [
+            (
+                "SHOW USER FUNCTIONS",
+                [{"function": "main.fin.get_price"}, {"function": "main.fin.calc_tax"}],
+            )
+        ]
+    )
+    result = uc_metadata.list_functions(ex, "main", "fin", name_prefix="get")
+    assert [r["name"] for r in result] == ["get_price"]
+
+
+def test_list_functions_rejects_bad_identifier() -> None:
+    ex = _executor([])
+    with pytest.raises(ValueError):
+        uc_metadata.list_functions(ex, "bad-catalog", "sch")
+
+
+# --- signature (DESCRIBE FUNCTION EXTENDED) --------------------------------
 
 
 def test_get_signature_scalar_function() -> None:
-    rows = [
-        {
-            "specific_name": "get_price",
-            "parameter_name": "ticker",
-            "data_type": "STRING",
-            "full_data_type": "STRING",
-            "ordinal_position": 1,
-            "parameter_default": None,
-        },
-        {
-            "specific_name": "get_price",
-            "parameter_name": "as_of",
-            "data_type": "DATE",
-            "full_data_type": "DATE",
-            "ordinal_position": 2,
-            "parameter_default": "current_date()",
-        },
-    ]
-    ex = _executor([("information_schema.parameters", rows)])
+    ex = _executor(
+        [
+            (
+                "DESCRIBE FUNCTION",
+                _describe(
+                    [
+                        "Function:      main.finance.get_price",
+                        "Type:          SCALAR",
+                        "Input:         ticker STRING 'the ticker symbol'",
+                        "               as_of DATE DEFAULT current_date() 'as-of date'",
+                        "Returns:       DOUBLE",
+                        "Deterministic: true",
+                    ]
+                ),
+            )
+        ]
+    )
     sig = uc_metadata.get_signature(ex, "main.finance.get_price")
     assert sig["scalar"] is True
+    assert sig["returns_table"] is False
     assert sig["function"] == "main.finance.get_price"
     assert sig["params"] == [
         {"name": "ticker", "type": "string", "required": True},
         {"name": "as_of", "type": "string", "required": False},
     ]
+    sql, _params, _ = ex.calls[0]  # type: ignore[attr-defined]
+    assert sql == "DESCRIBE FUNCTION EXTENDED `main`.`finance`.`get_price`"
+
+
+def test_get_signature_table_function_sets_returns_table() -> None:
+    ex = _executor(
+        [
+            (
+                "DESCRIBE FUNCTION",
+                _describe(
+                    [
+                        "Function:      mcp.default.get_orders",
+                        "Type:          TABLE",
+                        "Input:         input_customer_id STRING COLLATE UTF8_BINARY 'The customer ID (format: C0001)'",
+                        "Returns:       sale_id STRING",
+                        "               revenue DOUBLE",
+                    ]
+                ),
+            )
+        ]
+    )
+    sig = uc_metadata.get_signature(ex, "mcp.default.get_orders")
+    assert sig["returns_table"] is True
+    assert sig["scalar"] is True
+    # only the Input param (Returns continuation lines are not params)
+    assert sig["params"] == [
+        {"name": "input_customer_id", "type": "string", "required": True}
+    ]
 
 
 def test_get_signature_non_scalar_param_marks_not_scalar() -> None:
-    rows = [
-        {
-            "specific_name": "classify",
-            "parameter_name": "labels",
-            "data_type": "ARRAY",
-            "full_data_type": "ARRAY<STRING>",
-            "ordinal_position": 1,
-            "parameter_default": None,
-        }
-    ]
-    ex = _executor([("information_schema.parameters", rows)])
+    ex = _executor(
+        [
+            (
+                "DESCRIBE FUNCTION",
+                _describe(
+                    [
+                        "Function:      main.ml.classify",
+                        "Type:          SCALAR",
+                        "Input:         labels ARRAY<STRING> 'candidate labels'",
+                        "Returns:       STRING",
+                    ]
+                ),
+            )
+        ]
+    )
     sig = uc_metadata.get_signature(ex, "main.ml.classify")
     assert sig["scalar"] is False
     assert sig["params"] == []
 
 
 def test_get_signature_no_arg_function_is_scalar_empty() -> None:
-    ex = _executor([("information_schema.parameters", [])])
+    ex = _executor(
+        [
+            (
+                "DESCRIBE FUNCTION",
+                _describe(
+                    ["Function: main.util.now", "Type: SCALAR", "Input: ()", "Returns: TIMESTAMP"]
+                ),
+            )
+        ]
+    )
     sig = uc_metadata.get_signature(ex, "main.util.now")
     assert sig["scalar"] is True
     assert sig["params"] == []
+    assert sig["returns_table"] is False
 
 
 def test_get_signature_rejects_malformed_fqn() -> None:
@@ -140,7 +234,41 @@ def test_get_signature_rejects_malformed_fqn() -> None:
         uc_metadata.get_signature(ex, "two.parts")
 
 
-def test_run_parameters_query_rejects_empty_fn_names() -> None:
-    ex = _executor([])
-    with pytest.raises(ValueError):
-        uc_metadata.run_parameters_query(ex, "main", "finance", [])
+# --- run-readiness (USE CATALOG litmus) + error classification -------------
+
+
+def test_check_use_catalog_true_on_success() -> None:
+    ex = _executor([("information_schema.schemata", [{"1": 1}])])
+    assert uc_metadata.check_use_catalog(ex, "main") is True
+    sql, _params, _ = ex.calls[0]  # type: ignore[attr-defined]
+    assert "`main`.information_schema.schemata" in sql
+
+
+def test_check_use_catalog_false_on_permission_error() -> None:
+    def _exec(sql: str, params: list[Any], token: str) -> list[dict[str, Any]]:
+        raise RuntimeError(
+            "ServiceErrorCode.BAD_REQUEST: [INSUFFICIENT_PERMISSIONS] Insufficient "
+            "privileges: User does not have USE CATALOG on Catalog 'x'. SQLSTATE: 42501"
+        )
+
+    assert uc_metadata.check_use_catalog(_exec, "x") is False
+
+
+def test_check_use_catalog_reraises_non_permission_error() -> None:
+    def _exec(sql: str, params: list[Any], token: str) -> list[dict[str, Any]]:
+        raise RuntimeError("transient network blip")
+
+    with pytest.raises(RuntimeError):
+        uc_metadata.check_use_catalog(_exec, "main")
+
+
+def test_classify_sql_error() -> None:
+    assert (
+        uc_metadata.classify_sql_error("[INSUFFICIENT_PERMISSIONS] USE CATALOG ... 42501")
+        == "permission"
+    )
+    assert (
+        uc_metadata.classify_sql_error("[TABLE_OR_VIEW_NOT_FOUND] cannot be found 42P01")
+        == "not_found"
+    )
+    assert uc_metadata.classify_sql_error("something unexpected") == "other"

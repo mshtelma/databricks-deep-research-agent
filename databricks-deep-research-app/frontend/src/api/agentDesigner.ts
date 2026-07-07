@@ -381,6 +381,10 @@ export interface UcFunctionSignature {
   function: string
   params: UcFunctionParam[]
   scalar: boolean
+  /** True for a table-valued function (invoked SELECT * FROM fn(..)). */
+  returns_table: boolean
+  /** False when the caller lacks USE CATALOG (can browse but not run it). */
+  run_ready: boolean
   warning?: string | null
 }
 

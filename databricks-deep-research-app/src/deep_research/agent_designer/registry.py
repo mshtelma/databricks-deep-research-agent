@@ -539,9 +539,9 @@ _UC_FUNCTION_SCHEMA: dict[str, Any] = {
             "title": "UC Function",
             "x-widget": "uc-function-picker",
             "description": (
-                "Fully qualified Unity Catalog scalar function "
+                "Fully qualified Unity Catalog function "
                 "(catalog.schema.function). Invoked via SQL under the caller's "
-                "identity (OBO) — no app-side sandbox. Scalar functions only."
+                "identity (OBO) — no app-side sandbox. Scalar or table-valued."
             ),
         },
         "params": {
@@ -553,6 +553,16 @@ _UC_FUNCTION_SCHEMA: dict[str, Any] = {
                 "Declared inputs: objects with name, type (string/integer/"
                 "number/boolean), required, default. Auto-discovered from the "
                 "function signature on save; hidden in the picker UI."
+            ),
+        },
+        "returns_table": {
+            "type": "boolean",
+            "title": "Returns Table",
+            "x-widget": "hidden",
+            "default": False,
+            "description": (
+                "True for a table-valued function (invoked SELECT * FROM fn(..)); "
+                "auto-detected from the signature on save. Hidden in the UI."
             ),
         },
         "citeable": {

@@ -971,6 +971,7 @@ class BuiltinToolFactory:
                 params=uc_params,
                 description=decl.description,
                 citeable=bool(decl.config.get("citeable", True)),
+                returns_table=bool(decl.config.get("returns_table", False)),
             )
 
         if decl.kind == "read_skill":

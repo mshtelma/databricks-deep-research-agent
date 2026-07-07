@@ -55,10 +55,25 @@ _DISCOVERY_SERVICE_KINDS: frozenset[str] = frozenset(
     {"vector_index", "genie_space", "knowledge_assistant", "serving_endpoint"}
 )
 # Unity Catalog browse kinds (catalog -> schema -> function cascade), backed by
-# the OBO SQL executor over information_schema (see uc_metadata).
+# the OBO SQL executor over SHOW/DESCRIBE commands (see uc_metadata).
 _UC_BROWSE_KINDS: frozenset[str] = frozenset(
     {"uc_catalog", "uc_schema", "uc_function"}
 )
+
+
+class UcBrowseError(Exception):
+    """A Unity Catalog browse (SHOW/DESCRIBE) query failed.
+
+    ``code`` is ``permission`` | ``not_found`` | ``other`` so the picker can
+    render an actionable message; ``message`` carries the raw SQL error. Raised
+    only for a *pure* uc-browse request (the picker sends exactly one uc kind);
+    mixed discovery sweeps keep failing soft so the chat discover path is robust.
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class DiscoveredResource(BaseModel):
@@ -247,11 +262,14 @@ class DesignerDiscoveryAdapter:
                 raise
 
         # UC browse (catalog/schema/function) — opt-in, parent-parameterized.
-        # Fail-soft: a missing warehouse or query error yields an empty list so
-        # the picker degrades to manual FQN entry rather than surfacing a 500.
+        # A *pure* uc-browse request (the picker sends exactly one uc kind)
+        # surfaces the failure as a UcBrowseError so the picker can explain it; a
+        # mixed discovery sweep keeps failing soft (empty + log) so the chat
+        # discover path stays robust.
         if kinds is not None and any(k in _UC_BROWSE_KINDS for k in kinds):
+            pure_uc_browse = all(k in _UC_BROWSE_KINDS for k in kinds)
             try:
-                # Offload the blocking information_schema query so a cold-warehouse
+                # Offload the blocking SHOW/DESCRIBE query so a cold-warehouse
                 # poll (up to ~5s) never stalls the event loop mid-cascade.
                 resources.extend(
                     await asyncio.to_thread(
@@ -262,8 +280,15 @@ class DesignerDiscoveryAdapter:
                         user_token or None,
                     )
                 )
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
                 logger.warning("DESIGNER_UC_BROWSE_FAILED", exc_info=True)
+                if pure_uc_browse:
+                    from deep_research.agent_designer import uc_metadata
+
+                    raise UcBrowseError(
+                        code=uc_metadata.classify_sql_error(str(exc)),
+                        message=str(exc),
+                    ) from exc
 
         return resources
 
@@ -308,9 +333,19 @@ class DesignerDiscoveryAdapter:
             for meta in metas
         ]
 
-    def _build_sql_executor(self, user_token: str | None) -> SqlExecutor | None:
-        """Build an OBO SQL executor for information_schema browse, or None when
-        no SQL warehouse is configured (browse then degrades to manual entry)."""
+    def _build_sql_executor(
+        self,
+        user_token: str | None,
+        *,
+        catalog: str | None = None,
+        schema: str | None = None,
+    ) -> SqlExecutor | None:
+        """Build an OBO SQL executor for UC browse, or None when no SQL warehouse
+        is configured (browse then degrades to manual entry).
+
+        ``catalog``/``schema`` set the statement session context — required for
+        ``SHOW USER FUNCTIONS`` (a cross-catalog ``IN cat.schema`` is unsupported).
+        """
         from databricks_deep_research.tools.builtins.text_table.runtime_wiring import (
             StatementExecutionTableSQL,
         )
@@ -327,6 +362,8 @@ class DesignerDiscoveryAdapter:
             workspace_client=self._workspace_client_factory(user_token),
             warehouse_id=warehouse_id,
             timeout_sec=5.0,
+            catalog=catalog,
+            schema=schema,
         )
 
     def _list_uc_resources(
@@ -341,34 +378,40 @@ class DesignerDiscoveryAdapter:
         requested kinds are queried; each needs its parent to have been chosen."""
         from deep_research.agent_designer import uc_metadata
 
-        sql = self._build_sql_executor(user_token)
-        if sql is None:
-            return []
         out: list[DiscoveredResource] = []
+        # The picker requests one kind at a time, so exactly one branch runs and
+        # exactly one executor is built. Catalog/schema use no context; functions
+        # need catalog/schema session context (SHOW USER FUNCTIONS).
         if "uc_catalog" in kinds:
-            out.extend(
-                _uc_rows_to_resources(
-                    "uc_catalog",
-                    uc_metadata.list_catalogs(sql, name_prefix=name_prefix),
+            sql = self._build_sql_executor(user_token)
+            if sql is not None:
+                out.extend(
+                    _uc_rows_to_resources(
+                        "uc_catalog",
+                        uc_metadata.list_catalogs(sql, name_prefix=name_prefix),
+                    )
                 )
-            )
         if "uc_schema" in kinds and parent:
-            out.extend(
-                _uc_rows_to_resources(
-                    "uc_schema",
-                    uc_metadata.list_schemas(sql, parent, name_prefix=name_prefix),
+            sql = self._build_sql_executor(user_token)
+            if sql is not None:
+                out.extend(
+                    _uc_rows_to_resources(
+                        "uc_schema",
+                        uc_metadata.list_schemas(sql, parent, name_prefix=name_prefix),
+                    )
                 )
-            )
         if "uc_function" in kinds and parent and "." in parent:
             catalog, schema = parent.split(".", 1)
-            out.extend(
-                _uc_rows_to_resources(
-                    "uc_function",
-                    uc_metadata.list_functions(
-                        sql, catalog, schema, name_prefix=name_prefix
-                    ),
+            sql = self._build_sql_executor(user_token, catalog=catalog, schema=schema)
+            if sql is not None:
+                out.extend(
+                    _uc_rows_to_resources(
+                        "uc_function",
+                        uc_metadata.list_functions(
+                            sql, catalog, schema, name_prefix=name_prefix
+                        ),
+                    )
                 )
-            )
         return out
 
     def get_function_signature(
@@ -376,8 +419,11 @@ class DesignerDiscoveryAdapter:
     ) -> dict[str, Any]:
         """Introspect a single UC function's signature for the live picker.
 
-        Fail-soft: returns empty params (with a ``warning``) when no warehouse is
-        configured; a malformed FQN raises ``ValueError`` for the caller to 400."""
+        Uses ``DESCRIBE FUNCTION`` (BROWSE-sufficient) for params + scalar/table
+        detection, then probes ``USE CATALOG`` for run-readiness (browsing needs
+        only BROWSE; invoking needs USE CATALOG + USE SCHEMA + EXECUTE). Fail-soft:
+        empty params + ``warning`` when no warehouse is configured; a malformed FQN
+        raises ``ValueError`` for the caller to 400."""
         from deep_research.agent_designer import uc_metadata
 
         sql = self._build_sql_executor(user_token)
@@ -386,13 +432,32 @@ class DesignerDiscoveryAdapter:
                 "function": fqn,
                 "params": [],
                 "scalar": True,
+                "returns_table": False,
+                "run_ready": False,
                 "warning": (
                     "No SQL warehouse configured; parameters could not be "
                     "introspected. Enter parameters manually if the function "
                     "takes arguments."
                 ),
             }
-        return uc_metadata.get_signature(sql, fqn)
+        sig = uc_metadata.get_signature(sql, fqn)
+        catalog = fqn.split(".", 1)[0]
+        run_ready = True
+        try:
+            run_ready = uc_metadata.check_use_catalog(sql, catalog)
+        except Exception:  # noqa: BLE001 - the probe never fails the signature
+            logger.warning("DESIGNER_UC_RUN_READY_PROBE_FAILED", exc_info=True)
+        warning: str | None = None
+        if not run_ready:
+            warning = (
+                f"You can browse this function, but running it needs USE CATALOG + "
+                f"USE SCHEMA + EXECUTE on '{catalog}' (granted to whoever the agent "
+                f"runs as). Ask a workspace admin to grant them."
+            )
+        if sig.get("returns_table"):
+            note = "This is a table-valued function (returns rows)."
+            warning = f"{warning} {note}" if warning else note
+        return {**sig, "run_ready": run_ready, "warning": warning}
 
     def _list_sql_warehouses(self, user_token: str | None) -> list[DiscoveredResource]:
         client = self._workspace_client_factory(user_token)

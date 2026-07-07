@@ -86,15 +86,20 @@ export function FunctionToolNodeEditor({
 
   // Ensure a uc_function declaration exists for `fqn` (dedup by FQN); return its name.
   const ensureDeclaration = React.useCallback(
-    (fqn: string, params: UcFunctionParam[] | undefined): string => {
+    (
+      fqn: string,
+      params: UcFunctionParam[] | undefined,
+      returnsTable: boolean | undefined,
+    ): string => {
       const state = useAgentEditorStore.getState();
       const all = state.ast?.tools ?? [];
+      const rt = returnsTable !== undefined ? { returns_table: returnsTable } : {};
       const existing = all.find(
         (t) => t.kind === 'uc_function' && (t.config?.['function'] as string) === fqn,
       );
       if (existing) {
         state.updateTool(existing.name, {
-          config: { ...existing.config, function: fqn, ...(params ? { params } : {}) },
+          config: { ...existing.config, function: fqn, ...(params ? { params } : {}), ...rt },
         });
         return existing.name;
       }
@@ -103,7 +108,11 @@ export function FunctionToolNodeEditor({
       let name = base;
       let i = 1;
       while (taken.has(name)) name = `${base}_${i++}`;
-      state.declareTool('uc_function', name, { function: fqn, params: params ?? [] });
+      state.declareTool('uc_function', name, {
+        function: fqn,
+        params: params ?? [],
+        returns_table: returnsTable ?? false,
+      });
       return name;
     },
     [],
@@ -115,7 +124,7 @@ export function FunctionToolNodeEditor({
         updateConfig({ ref: { name: '' } });
         return;
       }
-      const name = ensureDeclaration(value.function, value.params);
+      const name = ensureDeclaration(value.function, value.params, value.returns_table);
       updateConfig({ ref: { name } });
     },
     [ensureDeclaration, updateConfig],
@@ -128,7 +137,11 @@ export function FunctionToolNodeEditor({
     [updateConfig],
   );
 
-  const pickerValue: UcFunctionValue = { function: declFn, params: declParams };
+  const pickerValue: UcFunctionValue = {
+    function: declFn,
+    params: declParams,
+    returns_table: decl?.config?.['returns_table'] as boolean | undefined,
+  };
   const allTools = tools ?? [];
 
   return (

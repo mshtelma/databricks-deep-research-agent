@@ -42,6 +42,7 @@ from deep_research.agent_designer.discovery import (
     DesignerDiscoveryAdapter,
     DiscoveredResource,
     SourceKind,
+    UcBrowseError,
     _DiscoveryServiceProto,
 )
 from deep_research.agent_designer.registry import (
@@ -443,15 +444,25 @@ class RegistryResponse(BaseModel):
     version: str
 
 
+class BrowseError(BaseModel):
+    """Why a Unity Catalog browse returned no results (for the picker to render)."""
+
+    code: str  # 'permission' | 'not_found' | 'other'
+    message: str
+
+
 class ResourcesResponse(BaseModel):
     resources: list[DiscoveredResource]
     total: int
+    error: BrowseError | None = None
 
 
 class FunctionSignatureResponse(BaseModel):
     function: str
     params: list[dict[str, Any]]
     scalar: bool
+    returns_table: bool = False
+    run_ready: bool = True
     warning: str | None = None
 
 
@@ -550,13 +561,22 @@ async def list_resources(
     discovery_adapter = DesignerDiscoveryAdapter(
         cast(_DiscoveryServiceProto, DiscoveryService())
     )
-    resources = await discovery_adapter.list_for_user(
-        user_token=obo_token,
-        kinds=_parse_resource_kinds(kinds),
-        user_id=user.user_id,
-        parent=parent,
-        name_prefix=query or "",
-    )
+    try:
+        resources = await discovery_adapter.list_for_user(
+            user_token=obo_token,
+            kinds=_parse_resource_kinds(kinds),
+            user_id=user.user_id,
+            parent=parent,
+            name_prefix=query or "",
+        )
+    except UcBrowseError as exc:
+        # Never 500 the picker: return empty + a structured reason so it can
+        # explain (e.g. no BROWSE on the catalog) and still allow manual FQN entry.
+        return ResourcesResponse(
+            resources=[],
+            total=0,
+            error=BrowseError(code=exc.code, message=exc.message),
+        )
     return ResourcesResponse(resources=resources, total=len(resources))
 
 

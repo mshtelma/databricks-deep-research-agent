@@ -27,28 +27,24 @@ export function useDesignerResources(kinds: string[], enabled = true) {
 
 export const ucBrowseKeys = {
   all: ['agent-designer', 'uc-browse'] as const,
-  level: (kind: string, parent: string, query: string) =>
-    [...ucBrowseKeys.all, kind, parent, query] as const,
+  level: (kind: string, parent: string) => [...ucBrowseKeys.all, kind, parent] as const,
   signature: (fqn: string) => [...ucBrowseKeys.all, 'signature', fqn] as const,
 }
 
 export type UcBrowseKind = 'uc_catalog' | 'uc_schema' | 'uc_function'
 
 /**
- * Browse one level of the Unity Catalog cascade. A child level (schema/function)
- * stays disabled until its parent is chosen, and the query key includes the
- * parent so a rapid parent switch can never render a stale child list.
+ * Browse one level of the Unity Catalog cascade. Keyed on (kind, parent) only —
+ * the full child list is fetched once per parent and the native <datalist>
+ * filters as the user types, so keystrokes never trigger fetches. A child level
+ * stays disabled until its parent is passed (the caller gates on a *committed*
+ * parent so a half-typed name never fires a doomed query).
  */
-export function useUcBrowse(
-  kind: UcBrowseKind,
-  parent: string | undefined,
-  query = '',
-  enabled = true
-) {
+export function useUcBrowse(kind: UcBrowseKind, parent: string | undefined, enabled = true) {
   const ready = enabled && (kind === 'uc_catalog' || Boolean(parent))
   return useQuery({
-    queryKey: ucBrowseKeys.level(kind, parent ?? '', query),
-    queryFn: () => listDesignerResources([kind], { parent, query }),
+    queryKey: ucBrowseKeys.level(kind, parent ?? ''),
+    queryFn: () => listDesignerResources([kind], { parent }),
     staleTime: STALE_TIME,
     gcTime: CACHE_TIME,
     enabled: ready,
