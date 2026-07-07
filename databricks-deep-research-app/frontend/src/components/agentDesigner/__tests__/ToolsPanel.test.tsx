@@ -313,6 +313,37 @@ describe('ToolsPanel', () => {
     declareSpy.mockRestore();
   });
 
+  // Used-by badge (tool-UX plan Phase 4)
+  it('shows how many places use each declared tool', () => {
+    const ast = makeAst({
+      tools: [
+        { kind: 'web_search', name: 'ws1', config: {} },
+        { kind: 'vector_search', name: 'vs1', config: { index_name: 'main.s.i' } },
+      ],
+      root: {
+        id: 'root-id',
+        type: 'sequence',
+        label: 'Root',
+        config: {},
+        children: [
+          { id: 'agent-1', type: 'agent', label: 'A', config: { tools: ['ws1'] }, children: [] },
+          {
+            id: 'tool-1',
+            type: 'tool',
+            label: 'T',
+            config: { ref: { type: 'builtin', name: 'ws1' } },
+            children: [],
+          },
+        ],
+      },
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: null });
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.getByText(/used by 2/)).toBeInTheDocument(); // ws1: agent + tool node
+    expect(screen.getByText(/unused/)).toBeInTheDocument(); // vs1: declared only
+  });
+
   // 6. Bind Tools is disabled when no agent is selected
   it('Bind Tools button is disabled when no agent block is selected', () => {
     useAgentEditorStore.setState({ ast: makeAst(), selectedPath: null });

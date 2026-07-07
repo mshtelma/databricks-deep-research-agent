@@ -526,8 +526,9 @@ export function ToolDeclarationDialog({
                   </div>
                 </div>
 
-                {Object.entries(schemaProperties(stage.spec.config_schema ?? null)).map(
-                  ([fieldName, fieldSchema]) => (
+                {Object.entries(schemaProperties(stage.spec.config_schema ?? null))
+                  .filter(([, fieldSchema]) => fieldSchema['x-advanced'] !== true)
+                  .map(([fieldName, fieldSchema]) => (
                     <SchemaField
                       key={fieldName}
                       name={fieldName}
@@ -539,14 +540,28 @@ export function ToolDeclarationDialog({
                       }}
                       errors={configErrors[fieldName] ?? []}
                     />
-                  ),
-                )}
+                  ))}
 
                 <details className="mt-3 rounded-db-md border border-db-gray-lines bg-white">
                   <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-db-navy-700 hover:bg-db-oat-light">
                     Advanced
                   </summary>
                   <div className="border-t border-db-gray-lines px-3 py-3">
+                    {Object.entries(schemaProperties(stage.spec.config_schema ?? null))
+                      .filter(([, fieldSchema]) => fieldSchema['x-advanced'] === true)
+                      .map(([fieldName, fieldSchema]) => (
+                        <SchemaField
+                          key={fieldName}
+                          name={fieldName}
+                          schema={fieldSchema}
+                          value={config[fieldName]}
+                          onChange={(v) => {
+                            setConfig((prev) => ({ ...prev, [fieldName]: v }));
+                            setConfigErrors((prev) => ({ ...prev, [fieldName]: [] }));
+                          }}
+                          errors={configErrors[fieldName] ?? []}
+                        />
+                      ))}
                     <label
                       htmlFor="tool-name-input"
                       className="mb-1 block text-[12px] font-medium text-db-navy-800"

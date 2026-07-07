@@ -475,6 +475,7 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["http", "sse"],
             "title": "Transport",
+            "x-advanced": True,
             "description": "Stateless transport. 'http' (streamable) or 'sse'. stdio is unsupported.",
             "default": "http",
         },
@@ -496,28 +497,33 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
         "api_key_header": {
             "type": "string",
             "title": "API Key Header",
+            "x-advanced": True,
             "description": "Header name used when Auth Type is 'api_key'.",
             "default": "X-API-Key",
         },
         "allow": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Allow Tools",
+            "x-advanced": True,
             "description": "Optional allowlist of tool names to expose from this server.",
         },
         "deny": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Deny Tools",
+            "x-advanced": True,
             "description": "Optional denylist of tool names; applied after Allow.",
         },
         "name_prefix": {
             "type": "string",
             "title": "Name Prefix",
+            "x-advanced": True,
             "description": "Optional prefix namespacing this server's tool names.",
         },
         "strategy": {
             "type": "string",
             "enum": ["fast", "deep"],
             "title": "Discovery Strategy",
+            "x-advanced": True,
             "description": "'fast' discovers once and caches; 'deep' re-discovers per step.",
             "default": "fast",
         },
@@ -529,6 +535,7 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
                 "citeable evidence. Off => results inform the model but are never cited."
             ),
             "default": True,
+            "x-advanced": True,
         },
     },
     # Only ``name`` is structurally required; the url-vs-target rule depends on
@@ -544,19 +551,26 @@ _DECORATED_TOOL_SCHEMA: dict[str, Any] = {
         "import": {
             "type": "string",
             "title": "Python Import",
-            "description": "@tool function import path in 'module:attr' form.",
+            "description": (
+                "Import path in 'module:attr' form. The function must already "
+                "be importable in the deployed app runtime (a package or wheel "
+                "shipped with the app) — to author code in the workflow "
+                "itself, use an Inline Python Function instead."
+            ),
         },
         "description": {
             "type": "string",
             "title": "Description Override",
             "description": "Optional tool description used when wrapping a plain Python function.",
             "format": "multiline",
+            "x-advanced": True,
         },
         "requires_confirmation": {
             "type": "boolean",
             "title": "Requires Confirmation",
             "description": "Ask the caller to confirm before executing this Python function.",
             "default": False,
+            "x-advanced": True,
         },
     },
     "required": ["import"],
@@ -676,6 +690,7 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
             "title": "Backend",
             "enum": ["subprocess", "restricted"],
             "default": "subprocess",
+            "x-advanced": True,
             "description": (
                 "subprocess (default): hardened per-run sandbox session. "
                 "restricted: in-process — trusted hosts only (requires the "
@@ -686,10 +701,12 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
             "type": "number",
             "title": "Timeout (seconds)",
             "default": 10,
+            "x-advanced": True,
         },
         "extra_allowed_modules": {
             "type": "array",
             "title": "Data Libraries",
+            "x-advanced": True,
             "items": {"type": "string", "enum": ["pandas", "numpy"]},
             "description": (
                 "Vetted data libraries importable by the code (facade view: "
@@ -699,6 +716,7 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
         "data_lib_mode": {
             "type": "string",
             "title": "Data-lib Exposure",
+            "x-advanced": True,
             "enum": ["facade", "live"],
             "default": "facade",
             "description": (
@@ -709,6 +727,7 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
         "reads_namespace": {
             "type": "array",
             "title": "Reads Variables",
+            "x-advanced": True,
             "items": {"type": "string"},
             "description": (
                 "Session variables the code expects to already exist (bridged "
@@ -718,6 +737,7 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
         "bind_result": {
             "type": "string",
             "title": "Bind Result As",
+            "x-advanced": True,
             "description": (
                 "Also store the script's `result` under this session variable "
                 "so later functions and agents can use it."
@@ -731,6 +751,7 @@ _PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
                 "Admit successful results into the evidence pool so synthesis "
                 "can cite them (function:// source)."
             ),
+            "x-advanced": True,
         },
     },
     "required": ["code"],
@@ -957,8 +978,10 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
 }
 
 _DECLARATION_TOOL_KIND_META: dict[str, dict[str, Any]] = {
+    # Honest label (tool-UX plan Phase 3): this kind IMPORTS an already-deployed
+    # function; it never accepts pasted code (that is python_function).
     "decorated": {
-        "label": "Python Function",
+        "label": "Python Import (deployed package)",
         "layer": "D",
         "config_schema": _DECORATED_TOOL_SCHEMA,
     },

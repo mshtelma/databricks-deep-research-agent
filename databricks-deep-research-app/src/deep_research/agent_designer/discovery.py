@@ -73,7 +73,7 @@ _UC_SEARCH_RESULT_CAP = 500
 # chip toggles re-issue the same search; a 60s window absorbs them without
 # holding permission changes stale for long.
 _UC_SEARCH_CACHE: dict[
-    tuple[str, str, str], tuple[float, list["DiscoveredResource"], str | None]
+    tuple[str, str, str], tuple[float, list[DiscoveredResource], str | None]
 ] = {}
 _UC_SEARCH_CACHE_LOCK = threading.Lock()
 

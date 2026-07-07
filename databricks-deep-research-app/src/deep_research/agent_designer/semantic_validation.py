@@ -265,6 +265,28 @@ def semantic_validation_errors(
                         )
                     )
 
+        # decorated imports resolve `module:attr` in the deployed runtime; a
+        # malformed path can never import, so reject it at save time.
+        if kind == "decorated":
+            import_path = config.get("import")
+            path_str = import_path.strip() if isinstance(import_path, str) else ""
+            if path_str and not re.fullmatch(
+                r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*"
+                r":[A-Za-z_][A-Za-z0-9_]*",
+                path_str,
+            ):
+                errors.append(
+                    SemanticValidationError(
+                        message=(
+                            f"Tool '{name or idx}' config.import must be a Python "
+                            f"import path in 'module:attr' form (e.g. "
+                            f"my_pkg.tools:normalize_text); got {path_str!r}."
+                        ),
+                        path=f"tools[{idx}].config.import",
+                        kind="schema",
+                    )
+                )
+
         # uc_function is invoked via SQL: the FQN is backtick-quoted per part
         # and requires a strict catalog.schema.function of [A-Za-z0-9_] (the
         # UCFunctionTool applies the same regex at runtime — hyphenated catalog

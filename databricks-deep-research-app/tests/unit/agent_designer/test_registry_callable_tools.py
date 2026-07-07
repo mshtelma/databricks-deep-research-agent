@@ -17,11 +17,46 @@ def test_callable_tool_kinds_are_visible_in_designer_registry() -> None:
     assert {"decorated", "uc_function", "python_function", "registered", "enterprise"}.issubset(
         kinds
     )
-    assert kinds["decorated"]["label"] == "Python Function"
     assert kinds["uc_function"]["label"] == "Unity Catalog Function"
-    # The three Python-ish kinds must not share a label in the shared picker.
+    # The three Python-ish kinds must not share a label in the shared picker,
+    # and decorated must read as an IMPORT (it never accepts pasted code).
+    assert kinds["decorated"]["label"] == "Python Import (deployed package)"
     assert kinds["python_function"]["label"] == "Inline Python Function"
     assert kinds["registered"]["label"] == "Registered Python Tool"
+
+
+def test_progressive_disclosure_flags_mark_expert_fields_advanced() -> None:
+    """The picker's configure step folds x-advanced fields into Advanced; the
+    operator-gated sandbox knobs and MCP tuning fields must carry the flag."""
+    kinds = _by_kind()
+
+    python_props = kinds["python_function"]["config_schema"]["properties"]
+    assert python_props["code"].get("x-advanced") is not True
+    assert python_props["params"].get("x-advanced") is not True
+    for expert in (
+        "backend",
+        "timeout_seconds",
+        "extra_allowed_modules",
+        "data_lib_mode",
+        "reads_namespace",
+        "bind_result",
+        "citeable",
+    ):
+        assert python_props[expert].get("x-advanced") is True, expert
+
+    mcp_props = kinds["mcp"]["config_schema"]["properties"]
+    for basic in ("name", "url", "client_kind", "auth_type", "secret_ref"):
+        assert mcp_props[basic].get("x-advanced") is not True, basic
+    for expert in (
+        "transport",
+        "api_key_header",
+        "allow",
+        "deny",
+        "name_prefix",
+        "strategy",
+        "citeable",
+    ):
+        assert mcp_props[expert].get("x-advanced") is True, expert
 
 
 def test_uc_tool_kind_is_retired_from_authoring() -> None:

@@ -297,3 +297,25 @@ class TestToolNodeRequiredParamValidation:
         )
         errors = semantic_validation_errors(definition)
         assert not [e for e in errors if "without binding required" in e.message]
+
+
+class TestDecoratedImportValidation:
+    """Tool-UX plan Phase 3: decorated import paths are validated at save time."""
+
+    def _decl(self, import_path: str) -> dict[str, Any]:
+        return {"name": "norm", "kind": "decorated", "config": {"import": import_path}}
+
+    def test_valid_module_attr_passes(self) -> None:
+        definition = _ast([self._decl("my_pkg.tools:normalize_text")])
+        errors = semantic_validation_errors(definition)
+        assert not [e for e in errors if "config.import" in (e.path or "")]
+
+    def test_missing_attr_rejected(self) -> None:
+        definition = _ast([self._decl("my_pkg.tools")])
+        errors = semantic_validation_errors(definition)
+        assert any("'module:attr' form" in e.message for e in errors)
+
+    def test_arbitrary_code_rejected(self) -> None:
+        definition = _ast([self._decl("os.system('rm -rf /'):x")])
+        errors = semantic_validation_errors(definition)
+        assert any("'module:attr' form" in e.message for e in errors)
