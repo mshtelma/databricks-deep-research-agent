@@ -11,7 +11,7 @@ The probe runs three classes of checks:
    signature's correctness; these catch classifier misclassification at
    design time. (Every researcher lane invokes >=1 tool from its
    declared list; lane prompts contain the ``{query}`` anchor; every
-   tool kind is in ToolKind; no name-collision in lane tool aliases;
+   tool kind is in the Designer registry; no name-collision in lane tool aliases;
    synthesizer reads observation/sources pools.)
 
 2. **Signature-conditioned checks** — fire only when relevant
@@ -90,15 +90,11 @@ _CORPUS_TOOL_KINDS: frozenset[str] = frozenset(
         "file_search",
     }
 )
-_WEB_TOOL_KINDS: frozenset[str] = frozenset(
-    {"web_search", "web_research", "web_crawl"}
-)
+_WEB_TOOL_KINDS: frozenset[str] = frozenset({"web_search", "web_research", "web_crawl"})
 # asset_signature axes that require corpus-grounded tools to be present on
 # every researcher. ``web_only`` and ``no_assets`` are not in this set
 # because the deterministic blueprint legitimately uses web defaults there.
-_CORPUS_REQUIRED_ASSET_SIGS: frozenset[str] = frozenset(
-    {"corpus_only", "structured_only"}
-)
+_CORPUS_REQUIRED_ASSET_SIGS: frozenset[str] = frozenset({"corpus_only", "structured_only"})
 
 
 # Per-axis keyword sets enforced by the runtime-query check. Each axis
@@ -156,10 +152,10 @@ def _structural_family(topology: str) -> str:
 
 
 def _registered_tool_kinds() -> set[str]:
-    """Snapshot of the framework's ToolKind enum at probe time."""
-    from databricks_deep_research.tools.protocol import ToolKind
+    """Snapshot of Designer-supported tool declaration kinds at probe time."""
+    from deep_research.agent_designer.registry import tool_kinds_payload
 
-    return {k.value for k in ToolKind}
+    return {str(item["kind"]) for item in tool_kinds_payload()}
 
 
 def run_behavioral_probe(
@@ -181,7 +177,7 @@ def run_behavioral_probe(
 
     # ----- Signature-independent invariants ----------------------------
 
-    # 1. Every declared tool's kind is in the framework ToolKind enum.
+    # 1. Every declared tool's kind is in the Designer registry.
     known_kinds = _registered_tool_kinds()
     unknown_kinds: list[str] = []
     for tool in ast_tools:
@@ -193,7 +189,7 @@ def run_behavioral_probe(
     if unknown_kinds:
         result.gaps.append(f"unknown_tool_kinds:{','.join(sorted(unknown_kinds))}")
     else:
-        result.invariants_passed.append("all_tool_kinds_in_enum")
+        result.invariants_passed.append("all_tool_kinds_registered")
 
     # 2. Lane researchers must declare at least one tool.
     lanes = [n for n in _iter_agent_nodes(ast.get("root")) if _is_lane_researcher(n)]
@@ -330,18 +326,14 @@ def run_behavioral_probe(
             for lane in lanes:
                 kinds = _tool_kinds_for_lane(lane, ast_tools)
                 if not (kinds & _CORPUS_TOOL_KINDS):
-                    lanes_without_corpus_tool.append(
-                        str(lane.get("id") or "<unnamed>")
-                    )
+                    lanes_without_corpus_tool.append(str(lane.get("id") or "<unnamed>"))
             if lanes_without_corpus_tool:
                 result.gaps.append(
                     f"asset_signature_tool_kind_mismatch:signature={sig_value},"
                     f"lanes_without_corpus_tool={','.join(lanes_without_corpus_tool)}"
                 )
             else:
-                result.conditional_passed.append(
-                    f"asset_signature_matches_tool_kinds:{sig_value}"
-                )
+                result.conditional_passed.append(f"asset_signature_matches_tool_kinds:{sig_value}")
 
         # 10. best_of_n structural invariants. The family-map (check 5)
         #     intentionally treats best_of_n as a parallel fan-out, so these
@@ -352,9 +344,7 @@ def run_behavioral_probe(
         #     candidate count matching the signature.
         if expected_topology == "best_of_n":
             pool_names = {
-                str(p.get("name"))
-                for p in (ast.get("pools") or [])
-                if isinstance(p, dict)
+                str(p.get("name")) for p in (ast.get("pools") or []) if isinstance(p, dict)
             }
             if "candidates" not in pool_names:
                 result.gaps.append("best_of_n_missing_candidates_pool")
@@ -383,9 +373,7 @@ def run_behavioral_probe(
             if not judge_nodes:
                 result.gaps.append("best_of_n_no_judge")
             else:
-                judge_outputs = {
-                    str(_config_of(node).get("output_key")) for node in judge_nodes
-                }
+                judge_outputs = {str(_config_of(node).get("output_key")) for node in judge_nodes}
                 if not (set(ast.get("output_keys") or []) & judge_outputs):
                     result.gaps.append("best_of_n_judge_does_not_produce_output_key")
             want = sig.coordination_candidate_count
@@ -407,15 +395,8 @@ def run_behavioral_probe(
                 )
             ]
             if ungrounded:
-                result.gaps.append(
-                    f"best_of_n_candidates_not_grounded:{','.join(ungrounded)}"
-                )
-            if (
-                "candidates" in pool_names
-                and candidate_nodes
-                and judge_nodes
-                and not ungrounded
-            ):
+                result.gaps.append(f"best_of_n_candidates_not_grounded:{','.join(ungrounded)}")
+            if "candidates" in pool_names and candidate_nodes and judge_nodes and not ungrounded:
                 result.conditional_passed.append(
                     f"best_of_n_structure_ok:candidates={len(candidate_nodes)}"
                 )
@@ -429,9 +410,7 @@ def run_behavioral_probe(
         #     candidates pool fed by >=2 proposers plus a candidates-injecting
         #     integrator.
         if expected_topology == "iterative_refinement":
-            loop_nodes = [
-                n for n in _iter_all_nodes(ast.get("root")) if n.get("type") == "loop"
-            ]
+            loop_nodes = [n for n in _iter_all_nodes(ast.get("root")) if n.get("type") == "loop"]
             if not loop_nodes:
                 result.gaps.append("iterative_refinement_missing_loop")
             else:
@@ -443,35 +422,25 @@ def run_behavioral_probe(
                     if _config_of(n).get("subtype") == "synthesizer"
                     and _config_of(n).get("output_key") == "draft_report"
                 ]
-                reflectors = [
-                    n for n in body_agents if _config_of(n).get("subtype") == "reflector"
-                ]
+                reflectors = [n for n in body_agents if _config_of(n).get("subtype") == "reflector"]
                 if not draft_writers:
                     result.gaps.append("iterative_refinement_no_draft_synth")
                 if not reflectors:
                     result.gaps.append("iterative_refinement_no_reflector")
-                until_key = str(
-                    (loop.get("config") or {}).get("until", {}).get("key", "")
-                )
+                until_key = str((loop.get("config") or {}).get("until", {}).get("key", ""))
                 if not until_key.endswith(".decision"):
                     result.gaps.append("iterative_refinement_until_not_decision")
                 if any(
-                    (r.get("error_handling") or {}).get("on_error") == "skip"
-                    for r in reflectors
+                    (r.get("error_handling") or {}).get("on_error") == "skip" for r in reflectors
                 ):
                     result.gaps.append("iterative_refinement_reflector_is_skip")
-            produced = {
-                _config_of(n).get("output_key")
-                for n in _iter_agent_nodes(ast.get("root"))
-            }
+            produced = {_config_of(n).get("output_key") for n in _iter_agent_nodes(ast.get("root"))}
             if not (set(ast.get("output_keys") or []) & produced):
                 result.gaps.append("iterative_refinement_no_terminal_output")
             want_p = sig.refine_participants
             if want_p is not None and want_p >= 2:
                 pool_names = {
-                    str(p.get("name"))
-                    for p in (ast.get("pools") or [])
-                    if isinstance(p, dict)
+                    str(p.get("name")) for p in (ast.get("pools") or []) if isinstance(p, dict)
                 }
                 if "candidates" not in pool_names:
                     result.gaps.append("iterative_refinement_missing_candidates_pool")
@@ -500,9 +469,7 @@ def run_behavioral_probe(
                 ]
                 if not integrators:
                     result.gaps.append("iterative_refinement_no_integrator")
-            if not any(
-                g.startswith("iterative_refinement_") for g in result.gaps
-            ):
+            if not any(g.startswith("iterative_refinement_") for g in result.gaps):
                 result.conditional_passed.append(
                     f"iterative_refinement_structure_ok:participants={want_p or 1}"
                 )
@@ -544,9 +511,7 @@ def run_behavioral_probe(
                     )
                 ]
                 if branchless:
-                    result.gaps.append(
-                        f"router_branch_no_output:{','.join(branchless)}"
-                    )
+                    result.gaps.append(f"router_branch_no_output:{','.join(branchless)}")
             researchers = [
                 n
                 for n in _iter_agent_nodes(ast.get("root"))
@@ -564,9 +529,7 @@ def run_behavioral_probe(
                 result.gaps.append("router_no_grounded_researcher")
             if not any(g.startswith("router_") for g in result.gaps):
                 branch_count = len(conditionals[0].get("children") or []) if conditionals else 0
-                result.conditional_passed.append(
-                    f"router_structure_ok:branches={branch_count}"
-                )
+                result.conditional_passed.append(f"router_structure_ok:branches={branch_count}")
 
         # 14. tree_search structural invariants. The topology walker classifies it
         #     at the root as its OWN family (so check 5 already keys off
@@ -578,9 +541,7 @@ def run_behavioral_probe(
         #     level whose review output_key the deeper lanes read.
         if expected_topology == "tree_search":
             root = ast.get("root") if isinstance(ast, dict) else None
-            root_children = (
-                root.get("children") or [] if isinstance(root, dict) else []
-            )
+            root_children = root.get("children") or [] if isinstance(root, dict) else []
             level_parallels = [
                 c
                 for c in root_children
@@ -594,12 +555,9 @@ def run_behavioral_probe(
                 # Breadth must NARROW (non-increasing) across levels.
                 breadths = [len(p.get("children") or []) for p in level_parallels]
                 if any(
-                    later > earlier
-                    for earlier, later in zip(breadths, breadths[1:], strict=False)
+                    later > earlier for earlier, later in zip(breadths, breadths[1:], strict=False)
                 ):
-                    result.gaps.append(
-                        f"tree_search_breadth_not_narrowing:{breadths}"
-                    )
+                    result.gaps.append(f"tree_search_breadth_not_narrowing:{breadths}")
             researchers = [
                 n
                 for n in _iter_agent_nodes(ast.get("root"))
@@ -629,9 +587,7 @@ def run_behavioral_probe(
             if not synth_with_pools:
                 result.gaps.append("tree_search_no_grounded_synthesizer")
             else:
-                synth_outputs = {
-                    str(_config_of(n).get("output_key")) for n in synth_with_pools
-                }
+                synth_outputs = {str(_config_of(n).get("output_key")) for n in synth_with_pools}
                 if not (set(ast.get("output_keys") or []) & synth_outputs):
                     result.gaps.append("tree_search_synthesizer_no_terminal_output")
             # Depth >=2 ⇒ a between-level reflector whose review output_key is
@@ -653,9 +609,7 @@ def run_behavioral_probe(
                 deeper_lane_inputs: set[str] = set()
                 for parallel in level_parallels[1:]:
                     for lane in _iter_agent_nodes(parallel):
-                        deeper_lane_inputs.update(
-                            _config_of(lane).get("input_keys") or []
-                        )
+                        deeper_lane_inputs.update(_config_of(lane).get("input_keys") or [])
                 if not (review_keys & deeper_lane_inputs):
                     result.gaps.append("tree_search_deeper_level_ignores_gaps")
             if not any(g.startswith("tree_search_") for g in result.gaps):

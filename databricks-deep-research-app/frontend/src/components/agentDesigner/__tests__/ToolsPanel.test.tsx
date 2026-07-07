@@ -210,8 +210,9 @@ describe('ToolsPanel', () => {
     render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
 
-    // Dialog is open — pick "Web Search" kind card
-    fireEvent.click(screen.getByText('Web Search'));
+    // Dialog opens on the shared declaration picker; Web Search is the default kind.
+    expect(screen.getByRole('combobox', { name: /tool family/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /tool kind/i })).toHaveValue('web_search');
 
     // Name field is auto-filled with "web_search"
     const nameInput = screen.getByRole('textbox');
@@ -234,7 +235,12 @@ describe('ToolsPanel', () => {
 
     renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
-    fireEvent.click(screen.getByText('Vector Search'));
+    fireEvent.change(screen.getByRole('combobox', { name: /tool family/i }), {
+      target: { value: 'databricks' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: /tool kind/i }), {
+      target: { value: 'vector_search' },
+    });
 
     fireEvent.change(screen.getByRole('combobox', { name: /vector search index/i }), {
       target: { value: 'main.sales.customer_index' },
@@ -259,7 +265,12 @@ describe('ToolsPanel', () => {
 
     renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
-    fireEvent.click(screen.getByText('Vector Search'));
+    fireEvent.change(screen.getByRole('combobox', { name: /tool family/i }), {
+      target: { value: 'databricks' },
+    });
+    fireEvent.change(screen.getByRole('combobox', { name: /tool kind/i }), {
+      target: { value: 'vector_search' },
+    });
 
     const dialog = screen.getByRole('dialog');
     const addBtn = Array.from(dialog.querySelectorAll('button')).find(
@@ -283,8 +294,8 @@ describe('ToolsPanel', () => {
     render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
 
-    // Select web_search kind — name auto-fills to "web_search" (duplicate)
-    fireEvent.click(screen.getByText('Web Search'));
+    // Web Search is the default kind; name auto-fills to "web_search" (duplicate).
+    expect(screen.getByRole('combobox', { name: /tool kind/i })).toHaveValue('web_search');
 
     // Submit via the dialog's enabled footer "Add Tool" button
     const dialog = screen.getByRole('dialog');

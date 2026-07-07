@@ -122,6 +122,36 @@ const FIXTURE_REGISTRY: RegistryResponse = {
         },
       },
     },
+    {
+      type: 'tool',
+      label: 'Tool',
+      icon: 'tool',
+      category: 'core',
+      is_composite: false,
+      config_schema: {
+        type: 'object',
+        properties: {
+          ref: {
+            type: 'object',
+            properties: {
+              type: { type: 'string' },
+              name: { type: 'string' },
+            },
+            required: ['type', 'name'],
+          },
+          input_mapping: {
+            type: 'object',
+            additionalProperties: { type: 'string' },
+          },
+          output_key: { type: 'string' },
+          output_schema: {
+            type: 'object',
+            additionalProperties: true,
+          },
+        },
+        required: ['ref'],
+      },
+    },
   ],
   agent_subtypes: [],
   tool_kinds: [
@@ -178,6 +208,32 @@ const FIXTURE_REGISTRY: RegistryResponse = {
         },
       },
     },
+    {
+      kind: 'decorated',
+      label: 'Python Function',
+      icon: 'tool',
+      layer: 'D',
+      config_schema: {
+        type: 'object',
+        properties: {
+          import: { type: 'string', title: 'Import' },
+        },
+        required: ['import'],
+      },
+    },
+    {
+      kind: 'uc_function',
+      label: 'Unity Catalog Function',
+      icon: 'tool',
+      layer: 'B',
+      config_schema: {
+        type: 'object',
+        properties: {
+          function_name: { type: 'string', title: 'Unity Catalog Function' },
+        },
+        required: ['function_name'],
+      },
+    },
   ],
   model_tiers: [],
   version: '1.0',
@@ -221,6 +277,31 @@ function makePlanAst(config: Record<string, unknown> = {}): AST {
           id: 'plan-1',
           type: 'plan_and_execute',
           label: 'Plan',
+          config,
+          children: [],
+        },
+      ],
+    },
+  };
+}
+
+function makeToolAst(
+  config: Record<string, unknown> = {},
+  tools: AST['tools'] = [],
+): AST {
+  return {
+    ...createDraftWorkflow('Test Workflow'),
+    tools,
+    root: {
+      id: 'root-id',
+      type: 'sequence',
+      label: 'root',
+      config: {},
+      children: [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          label: 'Transform',
           config,
           children: [],
         },
@@ -386,6 +467,182 @@ describe('ConfigPanel', () => {
     });
     expect(updateSpy).toHaveBeenCalledWith('web_search', {
       config: { model: 'databricks-gpt-5' },
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('lets a tool step call a declared Python function workflow tool', () => {
+    const ast = makeToolAst(
+      {
+        ref: { type: 'builtin', name: '' },
+        input_mapping: {},
+        output_key: 'tool_result',
+      },
+      [
+        {
+          kind: 'decorated',
+          name: 'calculate_pct_change',
+          config: { import: 'analytics.tools:calculate_pct_change' },
+          description: 'Calculate percent change.',
+        },
+      ],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.queryByRole('combobox', { name: /tool source/i })).not.toBeInTheDocument();
+    const workflowSelect = screen.getByRole('combobox', { name: /workflow tool/i });
+    expect(workflowSelect).toHaveTextContent('calculate_pct_change');
+
+    fireEvent.change(workflowSelect, { target: { value: 'calculate_pct_change' } });
+
+    expect(updateSpy).toHaveBeenCalledWith('root.children.0', {
+      config: expect.objectContaining({
+        ref: { type: 'builtin', name: 'calculate_pct_change' },
+      }),
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('lets a tool step call a declared Unity Catalog function workflow tool', () => {
+    const ast = makeToolAst(
+      {
+        ref: { type: 'builtin', name: '' },
+        input_mapping: {},
+        output_key: 'tool_result',
+      },
+      [
+        {
+          kind: 'uc_function',
+          name: 'pct_change',
+          config: { function_name: 'main.metrics.pct_change' },
+          description: 'Calculate percent change in UC.',
+        },
+      ],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    const workflowSelect = screen.getByRole('combobox', { name: /workflow tool/i });
+    expect(workflowSelect).toHaveTextContent('pct_change · Unity Catalog Function');
+
+    fireEvent.change(workflowSelect, { target: { value: 'pct_change' } });
+
+    expect(updateSpy).toHaveBeenCalledWith('root.children.0', {
+      config: expect.objectContaining({
+        ref: { type: 'builtin', name: 'pct_change' },
+      }),
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('shows imported direct Unity Catalog refs only in advanced compatibility controls', () => {
+    const ast = makeToolAst({
+      ref: { type: 'uc_function', name: 'main.metrics.pct_change' },
+      input_mapping: {},
+      output_key: 'tool_result',
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.queryByRole('combobox', { name: /tool source/i })).not.toBeInTheDocument();
+    expect(screen.getByText(/imported direct reference/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /direct reference type/i })).toHaveValue(
+      'uc_function',
+    );
+    expect(screen.getByRole('textbox', { name: /function name/i })).toHaveValue(
+      'main.metrics.pct_change',
+    );
+
+    fireEvent.change(screen.getByRole('textbox', { name: /function name/i }), {
+      target: { value: 'main.metrics.revenue_delta' },
+    });
+
+    expect(updateSpy).toHaveBeenLastCalledWith('root.children.0', {
+      config: expect.objectContaining({
+        ref: { type: 'uc_function', name: 'main.metrics.revenue_delta' },
+      }),
+    });
+    updateSpy.mockRestore();
+  });
+
+  it('shows unresolved local tool refs without fabricating a declaration option', () => {
+    const ast = makeToolAst(
+      {
+        ref: { type: 'builtin', name: 'missing_tool' },
+        input_mapping: {},
+        output_key: 'tool_result',
+      },
+      [
+        {
+          kind: 'decorated',
+          name: 'real_tool',
+          config: { import: 'analytics.tools:real_tool' },
+        },
+      ],
+    );
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.getByText(/undeclared workflow tool/i)).toBeInTheDocument();
+    const workflowSelect = screen.getByRole('combobox', { name: /workflow tool/i });
+    expect(workflowSelect).toHaveTextContent('real_tool');
+    expect(workflowSelect).not.toHaveTextContent('missing_tool');
+  });
+
+  it('uses the shared family and kind picker when adding workflow tools', () => {
+    const ast = makeAst();
+    useAgentEditorStore.setState({ ast, selectedPath: null });
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByRole('button', { name: /add/i }));
+
+    expect(screen.getByRole('combobox', { name: /tool family/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /tool kind/i })).toBeInTheDocument();
+
+    fireEvent.change(screen.getByRole('combobox', { name: /tool family/i }), {
+      target: { value: 'databricks' },
+    });
+    expect(screen.getByRole('combobox', { name: /tool kind/i })).toHaveTextContent(
+      'Unity Catalog Function',
+    );
+  });
+
+  it('edits tool step input mappings without changing the selected tool ref', () => {
+    const ast = makeToolAst({
+      ref: { type: 'uc_function', name: 'main.metrics.pct_change' },
+      input_mapping: { old_value: 'previous_revenue' },
+      output_key: 'tool_result',
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
+    const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
+
+    renderWithQuery(<ConfigPanel registry={FIXTURE_REGISTRY} />);
+
+    fireEvent.change(screen.getByRole('textbox', { name: /state key for old_value/i }), {
+      target: { value: 'baseline_revenue' },
+    });
+
+    expect(updateSpy).toHaveBeenCalledWith('root.children.0', {
+      config: expect.objectContaining({
+        ref: { type: 'uc_function', name: 'main.metrics.pct_change' },
+        input_mapping: { old_value: 'baseline_revenue' },
+      }),
+    });
+
+    fireEvent.click(screen.getByRole('button', { name: /add parameter mapping/i }));
+
+    expect(updateSpy).toHaveBeenLastCalledWith('root.children.0', {
+      config: expect.objectContaining({
+        input_mapping: { old_value: 'baseline_revenue', parameter: '' },
+      }),
     });
     updateSpy.mockRestore();
   });

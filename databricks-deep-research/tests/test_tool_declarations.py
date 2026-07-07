@@ -55,9 +55,7 @@ class _FakeTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], context: ToolContext) -> ToolResult:
         return ToolResult(content="ok")
 
 
@@ -219,6 +217,32 @@ class TestToolResolver:
         resolver = ToolResolver(legacy_registry=registry)
         result = await resolver.resolve({"type": "builtin", "name": "web_search"})
         assert result.definition.name == "web_search"
+
+    @pytest.mark.asyncio
+    async def test_external_uc_function_declaration_resolves_by_config_ref(self) -> None:
+        """A workflow alias can resolve to an externally registered UC function."""
+        registry = ToolRegistry()
+        tool = _FakeTool("main.metrics.pct_change")
+        registry.register_external("main.metrics.pct_change", tool)
+        decl = ToolDeclaration(
+            name="pct_change",
+            kind="uc_function",
+            config={"function_name": "main.metrics.pct_change"},
+        )
+
+        resolver = ToolResolver(declarations=[decl], legacy_registry=registry)
+        direct_node_resolver = ToolResolver(declarations=[decl], legacy_registry=registry)
+
+        assert await resolver.resolve("pct_change") is tool
+        assert await direct_node_resolver.resolve({"type": "builtin", "name": "pct_change"}) is tool
+
+    @pytest.mark.asyncio
+    async def test_external_uc_function_declaration_requires_function_name(self) -> None:
+        decl = ToolDeclaration(name="pct_change", kind="uc_function")
+        resolver = ToolResolver(declarations=[decl], legacy_registry=ToolRegistry())
+
+        with pytest.raises(ValueError, match="requires config.function_name"):
+            await resolver.resolve("pct_change")
 
     @pytest.mark.asyncio
     async def test_missing_tool_raises(self) -> None:
@@ -675,9 +699,7 @@ class TestExecutorResolverIntegration:
 
         llm = MagicMock()
         llm.resolve_model = MagicMock(return_value="test-model")
-        llm.complete = AsyncMock(
-            return_value=MagicMock(content="mock", usage={})
-        )
+        llm.complete = AsyncMock(return_value=MagicMock(content="mock", usage={}))
 
         executor = WorkflowExecutor(defn, llm, tool_resolver=resolver)
         # Verify executor was created without error

@@ -18,11 +18,31 @@ import logging
 from typing import Any
 
 from databricks_deep_research.tools.factory import ToolFactory, ToolFactoryContext
-from databricks_deep_research.tools.protocol import ResearchTool
+from databricks_deep_research.tools.protocol import ResearchTool, ToolRef
 from databricks_deep_research.tools.registry import ToolRegistry
 from databricks_deep_research.workflow.definition import ToolDeclaration
 
 logger = logging.getLogger(__name__)
+
+_EXTERNAL_DECLARATION_FIELDS: dict[str, str] = {
+    "uc_function": "function_name",
+    "uc_tool": "tool_name",
+    "enterprise": "tool_name",
+}
+
+
+def _external_ref_for_declaration(decl: ToolDeclaration) -> ToolRef | None:
+    """Map a declaration-backed external tool to its runtime registry ref."""
+    field = _EXTERNAL_DECLARATION_FIELDS.get(decl.kind)
+    if field is None:
+        return None
+
+    raw_name = decl.config.get(field)
+    if not isinstance(raw_name, str) or not raw_name.strip():
+        raise ValueError(
+            f"External tool declaration {decl.name!r} (kind={decl.kind!r}) requires config.{field}"
+        )
+    return ToolRef(type=decl.kind, name=raw_name.strip())
 
 
 class ToolResolver:
@@ -35,9 +55,7 @@ class ToolResolver:
         factory_context: ToolFactoryContext | None = None,
         legacy_registry: ToolRegistry | None = None,
     ) -> None:
-        self._declarations: dict[str, ToolDeclaration] = {
-            d.name: d for d in (declarations or [])
-        }
+        self._declarations: dict[str, ToolDeclaration] = {d.name: d for d in (declarations or [])}
         self._factories: list[ToolFactory] = list(factories or [])
         # Shallow-copy the context so each resolver gets its own extras dict.
         # Without this, concurrent resolvers sharing a ToolFactoryContext
@@ -46,7 +64,8 @@ class ToolResolver:
         # variables into the wrong PythonComputeTool instance).
         base_ctx = factory_context or ToolFactoryContext()
         self._context: ToolFactoryContext = dataclasses.replace(
-            base_ctx, extras={**base_ctx.extras},
+            base_ctx,
+            extras={**base_ctx.extras},
         )
         self._legacy: ToolRegistry | None = legacy_registry
         self._overrides: dict[str, ResearchTool] = {}
@@ -80,22 +99,29 @@ class ToolResolver:
         # 3. Declaration → factory chain
         if name in self._declarations:
             decl = self._declarations[name]
+            external_ref = _external_ref_for_declaration(decl)
+            if external_ref is not None:
+                if self._legacy is None:
+                    raise ValueError(
+                        f"External tool declaration {name!r} (kind={decl.kind!r}) "
+                        "requires a legacy/external ToolRegistry"
+                    )
+                tool = self._legacy.resolve(external_ref)
+                self._cache[name] = tool
+                return tool
+
             factory_errors: list[str] = []
             for factory in self._factories:
                 if factory.supports(decl.kind):
                     try:
                         tool = await factory.create(decl, self._context)
                     except Exception as exc:
-                        factory_errors.append(
-                            f"{type(factory).__name__}: {exc}"
-                        )
+                        factory_errors.append(f"{type(factory).__name__}: {exc}")
                         continue
                     self._cache[name] = tool
                     return tool
 
             if self._legacy is not None and self._legacy.has(name):
-                from databricks_deep_research.tools.protocol import ToolRef
-
                 logger.info(
                     "TOOL_RESOLVER_FACTORY_FALLBACK tool=%s kind=%s errors=%s",
                     name,
@@ -118,15 +144,9 @@ class ToolResolver:
         # 4. Legacy ToolRegistry fallback (for {type, name} dicts)
         if self._legacy is not None:
             if isinstance(ref, dict):
-                from databricks_deep_research.tools.protocol import ToolRef
-
-                tr = ToolRef(
-                    type=ref.get("type", "builtin"), name=name
-                )
+                tr = ToolRef(type=ref.get("type", "builtin"), name=name)
                 return self._legacy.resolve(tr)
             elif self._legacy.has(name):
-                from databricks_deep_research.tools.protocol import ToolRef
-
                 return self._legacy.resolve(ToolRef(type="builtin", name=name))
 
         raise ValueError(
@@ -135,9 +155,7 @@ class ToolResolver:
             f"Overrides: {sorted(self._overrides)}"
         )
 
-    async def resolve_many(
-        self, refs: list[str | dict[str, Any]]
-    ) -> list[ResearchTool]:
+    async def resolve_many(self, refs: list[str | dict[str, Any]]) -> list[ResearchTool]:
         """Resolve multiple refs.  Collects errors instead of failing on first."""
         tools: list[ResearchTool] = []
         errors: list[str] = []
@@ -157,9 +175,7 @@ class ToolResolver:
                 try:
                     await self.resolve(name)
                 except ValueError:
-                    logger.warning(
-                        "TOOL_INIT_FAILED name=%s kind=%s", name, decl.kind
-                    )
+                    logger.warning("TOOL_INIT_FAILED name=%s kind=%s", name, decl.kind)
 
     async def validate_all(self) -> None:
         """Eagerly resolve every declared tool, raising on the first failure batch.
@@ -184,8 +200,7 @@ class ToolResolver:
                 failures.append(f"{name} (kind={decl.kind}): {exc}")
         if failures:
             raise ValueError(
-                "Workflow declares tools that cannot be constructed:\n  "
-                + "\n  ".join(failures)
+                "Workflow declares tools that cannot be constructed:\n  " + "\n  ".join(failures)
             )
 
     def list_available(self) -> list[str]:

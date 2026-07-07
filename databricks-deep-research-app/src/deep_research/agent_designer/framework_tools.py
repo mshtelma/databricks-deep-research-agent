@@ -204,9 +204,7 @@ def _propose_initial_ast(
 # the ReAct loop's per-tool ``asyncio.create_task`` (the context is copied at task
 # creation) and stays isolated across concurrent designer turns (each runs in its
 # own task context). The build lane never sets it, so its behavior is unchanged.
-_COMPACT_TOOL_RESULTS: ContextVar[bool] = ContextVar(
-    "designer_compact_tool_results", default=False
-)
+_COMPACT_TOOL_RESULTS: ContextVar[bool] = ContextVar("designer_compact_tool_results", default=False)
 
 
 @contextmanager
@@ -251,9 +249,7 @@ def _compact_result_summary(new_ast: dict[str, Any]) -> dict[str, Any]:
             entry["tools"] = list(tools)
         nodes.append(entry)
     tool_names = [
-        t.get("name")
-        for t in (new_ast.get("tools") or [])
-        if isinstance(t, dict) and t.get("name")
+        t.get("name") for t in (new_ast.get("tools") or []) if isinstance(t, dict) and t.get("name")
     ]
     return {"ok": True, "nodes": nodes, "tools": tool_names}
 
@@ -563,9 +559,7 @@ class ProposeWorkflowTool:
             raise ValueError("propose_workflow requires non-empty 'intent'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         intent = str(arguments.get("intent") or "")
         brief = _coerce_brief(arguments.get("design_brief"))
         raw_assets = _read_assets(self._asset_getter)
@@ -657,9 +651,7 @@ class UpdateBlockTool:
                 raise ValueError(f"update_block requires '{key}'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         path = str(arguments.get("path") or "")
         patches = arguments.get("patches") or {}
@@ -756,9 +748,7 @@ class AddBlockTool:
                 raise ValueError(f"add_block requires '{key}'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         parent_path = str(arguments.get("parent_path") or "")
         node_type = str(arguments.get("node_type") or "")
@@ -845,14 +835,10 @@ class BindToolToBlockTool:
         if "tool_name" not in arguments:
             raise ValueError("bind_tool_to_block requires 'tool_name'")
         if not arguments.get("node_path") and not arguments.get("node_paths"):
-            raise ValueError(
-                "bind_tool_to_block requires 'node_path' or non-empty 'node_paths'"
-            )
+            raise ValueError("bind_tool_to_block requires 'node_path' or non-empty 'node_paths'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         tool_name = str(arguments.get("tool_name") or "")
         raw_paths = arguments.get("node_paths")
@@ -934,9 +920,7 @@ class SetModelTierTool:
                 raise ValueError(f"set_model_tier requires '{key}'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         node_path = str(arguments.get("node_path") or "")
         tier = str(arguments.get("tier") or "")
@@ -991,9 +975,7 @@ class DeclareToolTool:
                 raise ValueError(f"declare_tool requires '{key}'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         kind = str(arguments.get("kind") or "")
         name = str(arguments.get("name") or "")
@@ -1044,9 +1026,7 @@ class RemoveToolTool:
             raise ValueError("remove_tool requires 'name'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         name = str(arguments.get("name") or "")
         try:
@@ -1101,8 +1081,7 @@ class DiscoverSourcesTool:
                     "user_id": {
                         "type": "string",
                         "description": (
-                            "Authenticated user id. Required when no OBO "
-                            "token is available."
+                            "Authenticated user id. Required when no OBO token is available."
                         ),
                     },
                 },
@@ -1114,9 +1093,7 @@ class DiscoverSourcesTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         if self._discovery is None:
             payload: dict[str, Any] = {"resources": []}
             return ToolResult(content=json.dumps(payload), data=payload)
@@ -1184,9 +1161,7 @@ class InspectAssetsTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         raw_assets = arguments.get("assets")
         if raw_assets is None and self._asset_getter is not None:
             with suppress(Exception):
@@ -1236,9 +1211,7 @@ class RecommendToolsForAssetsTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         raw_assets = arguments.get("assets")
         if raw_assets is None and self._asset_getter is not None:
             with suppress(Exception):
@@ -1278,9 +1251,7 @@ class ValidateTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         errors, summary = _validate_ast(ast)
         advice = _quality_advice(ast) if not errors else []
@@ -1294,7 +1265,7 @@ class ValidateTool:
 
 
 class ListToolKindsTool:
-    """Returns the sorted list of registered ToolKind enum values.
+    """Returns the sorted list of Designer-supported tool declaration kinds.
 
     Helps the architect avoid hallucinated tool kinds in declare_tool calls.
     """
@@ -1304,7 +1275,7 @@ class ListToolKindsTool:
         return ToolDefinition(
             name="list_tool_kinds",
             description=(
-                "Return the sorted list of all valid tool 'kind' values "
+                "Return the sorted list of all valid Designer tool 'kind' values "
                 "(e.g. 'web_search', 'vector_search', 'table_search'). Use "
                 "this before declare_tool to avoid invalid kinds."
             ),
@@ -1316,12 +1287,10 @@ class ListToolKindsTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, _arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
-        from databricks_deep_research.tools.protocol import ToolKind
+    async def execute(self, _arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
+        from deep_research.agent_designer.registry import tool_kinds_payload
 
-        kinds = sorted(k.value for k in ToolKind)
+        kinds = sorted(str(item["kind"]) for item in tool_kinds_payload())
         payload: dict[str, Any] = {"kinds": kinds, "count": len(kinds)}
         return ToolResult(content=json.dumps(payload), data=payload)
 
@@ -1464,10 +1433,7 @@ def _apply_architect_patches(
 
     for target_key, patch in patches.items():
         if not isinstance(patch, dict):
-            errors.append(
-                f"patch for {target_key!r} is not a dict (got "
-                f"{type(patch).__name__})"
-            )
+            errors.append(f"patch for {target_key!r} is not a dict (got {type(patch).__name__})")
             continue
         node = index.get(target_key)
         if node is None:
@@ -1493,9 +1459,7 @@ def _apply_architect_patches(
             continue
         config = node.setdefault("config", {})
         if not isinstance(config, dict):
-            errors.append(
-                f"node {target_key!r} has non-dict config; cannot patch"
-            )
+            errors.append(f"node {target_key!r} has non-dict config; cannot patch")
             continue
         for key, value in patch.items():
             config[key] = _copy_mod.deepcopy(value)
@@ -1747,8 +1711,7 @@ class ParseArchitectAstTool:
                     "request_signature_revision instead."
                 ),
                 "parse_errors": [
-                    f"unknown top-level key {key!r}; remove it from the "
-                    "patch document"
+                    f"unknown top-level key {key!r}; remove it from the patch document"
                     for key in sorted(unknown_top_level)
                 ],
                 "normalization_fixes": _normalization_fix_payload(fixes),
@@ -1759,9 +1722,7 @@ class ParseArchitectAstTool:
         node_patches = parsed.get("node_patches", {})
         if not isinstance(node_patches, dict):
             node_patches = {}
-        merged_ast, patch_errors = _apply_architect_patches(
-            blueprint, node_patches
-        )
+        merged_ast, patch_errors = _apply_architect_patches(blueprint, node_patches)
         post_fp = compute_structural_fingerprint(merged_ast)
         if expected_fp and post_fp != expected_fp:
             patch_errors.append(
@@ -1805,9 +1766,7 @@ class ParseArchitectAstTool:
         if "surface" not in merged_ast and self._state_getter is not None:
             with suppress(Exception):  # pragma: no cover — defensive read
                 cached_ast = self._state_getter()
-                if isinstance(cached_ast, dict) and isinstance(
-                    cached_ast.get("surface"), dict
-                ):
+                if isinstance(cached_ast, dict) and isinstance(cached_ast.get("surface"), dict):
                     merged_ast["surface"] = cached_ast["surface"]
         normalized_merged_ast, fixes = normalize_ast(merged_ast)
         payload = {
@@ -1820,9 +1779,7 @@ class ParseArchitectAstTool:
         self._publish_summary(normalized_merged_ast, payload)
         return ToolResult(content=json.dumps(normalized_merged_ast), data=payload)
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         raw = arguments.get("raw_message")
         if not isinstance(raw, str):
             raw = "" if raw is None else str(raw)
@@ -1945,20 +1902,16 @@ class EvaluateSignatureLoopTool:
                 "properties": {
                     "critic_approved": {
                         "description": (
-                            "The inner loop's critic_approved payload "
-                            "(dict, JSON string, or bool)."
+                            "The inner loop's critic_approved payload (dict, JSON string, or bool)."
                         ),
                     },
                     "revision_request": {
                         "description": (
-                            "The architect's revision request payload "
-                            "(dict or empty)."
+                            "The architect's revision request payload (dict or empty)."
                         ),
                     },
                     "revision_count": {
-                        "description": (
-                            "Integer count of revisions consumed so far."
-                        ),
+                        "description": ("Integer count of revisions consumed so far."),
                     },
                 },
                 "required": [],
@@ -1970,9 +1923,7 @@ class EvaluateSignatureLoopTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         approved_raw = arguments.get("critic_approved")
         # The upstream ``extract_critic_approved`` tool stores its payload as
         # ``{"critic_approved": <bool>}`` under ``state.critic_approved``; the
@@ -2014,11 +1965,7 @@ class EvaluateSignatureLoopTool:
         # 3. no revision request AND inner loop already ran → "no point
         #    re-classifying" early exit; if the architect didn't
         #    escalate, the failure isn't a classifier mistake.
-        done = (
-            (approved and not has_revision_request)
-            or exhausted
-            or (not has_revision_request)
-        )
+        done = (approved and not has_revision_request) or exhausted or (not has_revision_request)
         payload = {
             "signature_loop_done": bool(done),
             "critic_approved": bool(approved),
@@ -2050,9 +1997,7 @@ class ExtractCriticApprovedTool:
                 "type": "object",
                 "properties": {
                     "critic_verdict": {
-                        "description": (
-                            "The critic agent's output (dict or JSON string)."
-                        ),
+                        "description": ("The critic agent's output (dict or JSON string)."),
                     },
                 },
                 "required": ["critic_verdict"],
@@ -2066,9 +2011,7 @@ class ExtractCriticApprovedTool:
             raise ValueError("extract_critic_approved requires 'critic_verdict'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         raw = arguments.get("critic_verdict")
         approved = _coerce_critic_approved(raw)
         payload = {"critic_approved": approved}
@@ -2113,14 +2056,10 @@ class BehavioralProbeTool:
                 "type": "object",
                 "properties": {
                     "current_ast": {
-                        "description": (
-                            "Optional explicit AST; falls back to state."
-                        ),
+                        "description": ("Optional explicit AST; falls back to state."),
                     },
                     "task_signature": {
-                        "description": (
-                            "Optional explicit TaskSignature; falls back to state."
-                        ),
+                        "description": ("Optional explicit TaskSignature; falls back to state."),
                     },
                     "runtime_queries": {
                         "type": "array",
@@ -2140,9 +2079,7 @@ class BehavioralProbeTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.probe import run_behavioral_probe
 
         ast = _resolve_current_ast(arguments, self._state_getter)
@@ -2212,14 +2149,11 @@ class UpdatePoolTool:
                     "patches": {
                         "type": "object",
                         "description": (
-                            "Dict with optional 'dedup_key' (string) and/or "
-                            "'max_items' (int)."
+                            "Dict with optional 'dedup_key' (string) and/or 'max_items' (int)."
                         ),
                     },
                     "current_ast": {
-                        "description": (
-                            "Optional explicit AST. Falls back to state cache."
-                        ),
+                        "description": ("Optional explicit AST. Falls back to state cache."),
                     },
                 },
                 "required": ["pool_name", "patches"],
@@ -2235,16 +2169,12 @@ class UpdatePoolTool:
             raise ValueError("update_pool requires 'patches' dict")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.mutations import update_pool
 
         ast = _resolve_current_ast(arguments, self._state_getter)
         try:
-            new_ast = update_pool(
-                ast, arguments["pool_name"], arguments["patches"]
-            )
+            new_ast = update_pool(ast, arguments["pool_name"], arguments["patches"])
         except Exception as exc:  # noqa: BLE001 — surface as tool error
             return _error_result(f"update_pool failed: {exc}")
         new_ast = _commit_to_cache(new_ast, self._state_setter)
@@ -2267,8 +2197,7 @@ class DeleteBlockTool:
         return ToolDefinition(
             name="delete_block",
             description=(
-                "Remove the AST node at the given path (or by id). "
-                "Cannot delete the root node."
+                "Remove the AST node at the given path (or by id). Cannot delete the root node."
             ),
             parameters={
                 "type": "object",
@@ -2278,9 +2207,7 @@ class DeleteBlockTool:
                         "description": "Node id OR dot-path to the node.",
                     },
                     "current_ast": {
-                        "description": (
-                            "Optional explicit AST. Falls back to state cache."
-                        ),
+                        "description": ("Optional explicit AST. Falls back to state cache."),
                     },
                 },
                 "required": ["path"],
@@ -2294,9 +2221,7 @@ class DeleteBlockTool:
             raise ValueError("delete_block requires non-empty 'path'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.mutations import delete_block
 
         ast = _resolve_current_ast(arguments, self._state_getter)
@@ -2334,14 +2259,10 @@ class MoveBlockTool:
                     "to_path": {"type": "string"},
                     "position": {
                         "type": "integer",
-                        "description": (
-                            "Optional 0-based insertion index. Appends when omitted."
-                        ),
+                        "description": ("Optional 0-based insertion index. Appends when omitted."),
                     },
                     "current_ast": {
-                        "description": (
-                            "Optional explicit AST. Falls back to state cache."
-                        ),
+                        "description": ("Optional explicit AST. Falls back to state cache."),
                     },
                 },
                 "required": ["from_path", "to_path"],
@@ -2352,14 +2273,10 @@ class MoveBlockTool:
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if not arguments.get("from_path") or not arguments.get("to_path"):
-            raise ValueError(
-                "move_block requires non-empty 'from_path' and 'to_path'"
-            )
+            raise ValueError("move_block requires non-empty 'from_path' and 'to_path'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.mutations import move_block
 
         ast = _resolve_current_ast(arguments, self._state_getter)
@@ -2407,9 +2324,7 @@ class InspectAstSummaryTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, _arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, _arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast({}, self._state_getter)
         payload = _ast_summary_payload(ast)
         return ToolResult(content=json.dumps(payload), data=payload)
@@ -2653,14 +2568,12 @@ class BuildBlueprintTool:
                     "intent": {
                         "type": "string",
                         "description": (
-                            "Optional user intent string; falls back to "
-                            "state.intent when omitted."
+                            "Optional user intent string; falls back to state.intent when omitted."
                         ),
                     },
                     "assets": {
                         "description": (
-                            "Optional list of asset dicts; falls back to "
-                            "state.assets when omitted."
+                            "Optional list of asset dicts; falls back to state.assets when omitted."
                         ),
                     },
                     "prompt_grounding": {
@@ -2686,9 +2599,7 @@ class BuildBlueprintTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.blueprint import (
             SignatureError,
             build_blueprint,
@@ -2716,10 +2627,7 @@ class BuildBlueprintTool:
                 sig_payload = None
 
         intent: Any = arguments.get("intent")
-        if (
-            (not isinstance(intent, str) or not intent.strip())
-            and self._intent_getter is not None
-        ):
+        if (not isinstance(intent, str) or not intent.strip()) and self._intent_getter is not None:
             with suppress(Exception):
                 fetched = self._intent_getter()
                 if isinstance(fetched, str):
@@ -2746,10 +2654,7 @@ class BuildBlueprintTool:
             assets = []
 
         prompt_grounding: Any = arguments.get("prompt_grounding")
-        if (
-            prompt_grounding is None
-            and self._prompt_grounding_getter is not None
-        ):
+        if prompt_grounding is None and self._prompt_grounding_getter is not None:
             with suppress(Exception):
                 prompt_grounding = self._prompt_grounding_getter()
         if isinstance(prompt_grounding, str):
@@ -2775,15 +2680,10 @@ class BuildBlueprintTool:
                         )
                         blocking.append(message)
             detail = "; ".join(blocking) if blocking else "unsafe prompt grounding"
-            return _error_result(
-                "build_blueprint blocked by prompt grounding: " + detail
-            )
+            return _error_result("build_blueprint blocked by prompt grounding: " + detail)
 
         resolved_tool_contract: Any = arguments.get("resolved_tool_contract")
-        if (
-            resolved_tool_contract is None
-            and self._resolved_tool_contract_getter is not None
-        ):
+        if resolved_tool_contract is None and self._resolved_tool_contract_getter is not None:
             with suppress(Exception):
                 resolved_tool_contract = self._resolved_tool_contract_getter()
         if isinstance(resolved_tool_contract, str):
@@ -2802,9 +2702,7 @@ class BuildBlueprintTool:
         except SignatureError as exc:
             return _error_result(f"build_blueprint failed: {exc}")
         except Exception as exc:  # defensive: an unexpected builder bug
-            return _error_result(
-                f"build_blueprint raised unexpected error: {exc}"
-            )
+            return _error_result(f"build_blueprint raised unexpected error: {exc}")
 
         fingerprint = str(ast.get("structural_fingerprint") or "")
         lane_keys = ast.get("lane_keys") or {}
@@ -2828,9 +2726,7 @@ class BuildBlueprintTool:
             # ``initial_blueprint.placeholder_pending_nodes`` but buried
             # inside the larger blueprint JSON the LLM tends to skim.
             with suppress(Exception):
-                self._placeholder_pending_setter(
-                    list(ast.get("placeholder_pending_nodes") or [])
-                )
+                self._placeholder_pending_setter(list(ast.get("placeholder_pending_nodes") or []))
 
         # Content carries the full blueprint AST as JSON. The YAML
         # tool-node executor writes content to ``state.<output_key>``
@@ -2845,9 +2741,7 @@ class BuildBlueprintTool:
                 "current_ast": ast,
                 "blueprint_fingerprint": fingerprint,
                 "blueprint_lane_keys": lane_keys,
-                "resolved_tool_contract_summary": ast.get(
-                    "resolved_tool_contract_summary"
-                ),
+                "resolved_tool_contract_summary": ast.get("resolved_tool_contract_summary"),
             },
         )
 
@@ -2926,25 +2820,17 @@ class RequestSignatureRevisionTool:
 
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(arguments, dict):
-            raise ValueError(
-                "request_signature_revision requires a dict argument payload"
-            )
+            raise ValueError("request_signature_revision requires a dict argument payload")
         reason = arguments.get("reason")
         if not isinstance(reason, str) or not reason.strip():
-            raise ValueError(
-                "request_signature_revision.reason must be a non-empty string"
-            )
+            raise ValueError("request_signature_revision.reason must be a non-empty string")
         fields = arguments.get("fields_to_reconsider") or []
         if not isinstance(fields, list):
-            raise ValueError(
-                "request_signature_revision.fields_to_reconsider must be a list"
-            )
+            raise ValueError("request_signature_revision.fields_to_reconsider must be a list")
         cleaned_fields = [str(f).strip() for f in fields if str(f).strip()]
         return {"reason": reason.strip(), "fields_to_reconsider": cleaned_fields}
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         current_count = 0
         if self._revision_count_getter is not None:
             with suppress(Exception):
@@ -3099,9 +2985,7 @@ class EmitTaskSignatureTool:
             raise ValueError("emit_task_signature requires a non-empty payload")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.task_signature import TaskSignature
 
         try:
@@ -3215,9 +3099,7 @@ class EmitGroundedAssetsTool:
             raise ValueError("emit_grounded_assets requires an object argument")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.assets import (
             DesignerAsset,
             asset_context_payload,
@@ -3246,35 +3128,34 @@ class EmitGroundedAssetsTool:
                 try:
                     asset = DesignerAsset.model_validate(payload)
                 except Exception as exc:
-                    rejected.append({
-                        "entry": json.dumps(payload, default=str)[:200],
-                        "error": str(exc)[:200],
-                    })
+                    rejected.append(
+                        {
+                            "entry": json.dumps(payload, default=str)[:200],
+                            "error": str(exc)[:200],
+                        }
+                    )
                     continue
                 identity = asset.full_name or asset.source_id or asset.name
                 if not identity:
-                    rejected.append({
-                        "entry": json.dumps(payload, default=str)[:200],
-                        "error": "no full_name/source_id/name",
-                    })
+                    rejected.append(
+                        {
+                            "entry": json.dumps(payload, default=str)[:200],
+                            "error": "no full_name/source_id/name",
+                        }
+                    )
                     continue
                 grounded.append(asset)
 
-        existing = (
-            normalize_assets(self._asset_getter()) if self._asset_getter else []
-        )
+        existing = normalize_assets(self._asset_getter()) if self._asset_getter else []
 
         # Merge: existing (UI-selected) wins ties; identity = (kind, casefold).
         seen: set[tuple[str, str]] = {
-            (a.kind, (a.full_name or a.source_id or a.name or "").casefold())
-            for a in existing
+            (a.kind, (a.full_name or a.source_id or a.name or "").casefold()) for a in existing
         }
         merged: list[DesignerAsset] = list(existing)
         added: list[DesignerAsset] = []
         for asset in grounded:
-            identity_lower = (
-                (asset.full_name or asset.source_id or asset.name or "").casefold()
-            )
+            identity_lower = (asset.full_name or asset.source_id or asset.name or "").casefold()
             key = (asset.kind, identity_lower)
             if not identity_lower or key in seen:
                 continue
@@ -3345,9 +3226,7 @@ class SelectTopologyTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments or {}
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.agent_designer.task_signature import (
             TaskSignature,
             select_topology,
@@ -3451,9 +3330,7 @@ class EditUpdateBlockTool:
                 raise ValueError(f"edit_update_block requires '{key}'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         path = str(arguments.get("path") or "")
         patches = arguments.get("patches") or {}
@@ -3462,9 +3339,7 @@ class EditUpdateBlockTool:
         expected_count = _coerce_expected_count(arguments.get("expected_count"))
         patches = _brace_escape_patches(patches)
         try:
-            new_ast = mutations.edit_update_block(
-                ast, path, patches, expected_count=expected_count
-            )
+            new_ast = mutations.edit_update_block(ast, path, patches, expected_count=expected_count)
         except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
             return _error_result(f"edit_update_block failed: {exc}")
         new_ast = _commit_to_cache(new_ast, self._state_setter)
@@ -3525,9 +3400,7 @@ class CloneBlockTool:
             raise ValueError("clone_block requires 'source_ref'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         source_ref = str(arguments.get("source_ref") or "")
         parent_ref_raw = arguments.get("parent_ref")
@@ -3537,9 +3410,7 @@ class CloneBlockTool:
             return _error_result("clone_block 'overrides' must be a dict")
         overrides = _brace_escape_patches(overrides)
         try:
-            new_ast, new_id = mutations.clone_block(
-                ast, source_ref, parent_ref, overrides
-            )
+            new_ast, new_id = mutations.clone_block(ast, source_ref, parent_ref, overrides)
         except (mutations.BlockPathError, mutations.BlockMutationError) as exc:
             return _error_result(f"clone_block failed: {exc}")
         new_ast = _commit_to_cache(new_ast, self._state_setter)
@@ -3590,9 +3461,7 @@ class UpdateWorkflowMetaTool:
             raise ValueError("update_workflow_meta requires 'patches'")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         ast = _resolve_current_ast(arguments, self._state_getter)
         patches = arguments.get("patches") or {}
         if not isinstance(patches, dict):
@@ -3703,9 +3572,7 @@ class SetSurfaceTool:
             raise ValueError("set_surface requires 'surface' (object or null)")
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.surface.validation import validate_surface
 
         ast = _resolve_current_ast(arguments, self._state_getter)
@@ -3715,15 +3582,11 @@ class SetSurfaceTool:
         if surface is not None:
             probe = dict(ast)
             probe["surface"] = surface
-            blocking = [
-                f for f in validate_surface(probe) if f.severity == "blocking"
-            ]
+            blocking = [f for f in validate_surface(probe) if f.severity == "blocking"]
             if blocking:
                 return _error_result(
                     "surface validation failed (AST unchanged; fix and retry): "
-                    + "; ".join(
-                        f"{f.path or '<surface>'}: {f.message}" for f in blocking
-                    )
+                    + "; ".join(f"{f.path or '<surface>'}: {f.message}" for f in blocking)
                 )
         try:
             new_ast = mutations.set_surface(ast, surface)
@@ -3770,9 +3633,7 @@ class ScaffoldSurfaceTool:
     def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
         return arguments
 
-    async def execute(
-        self, arguments: dict[str, Any], _context: ToolContext
-    ) -> ToolResult:
+    async def execute(self, arguments: dict[str, Any], _context: ToolContext) -> ToolResult:
         from deep_research.surface.scaffold import scaffold_surface_from_workflow
 
         ast = _resolve_current_ast(arguments, self._state_getter)

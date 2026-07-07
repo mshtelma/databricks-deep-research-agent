@@ -234,21 +234,75 @@ function updateToolRefsInBlock(
   transform: (toolName: string) => string | null,
 ): Block {
   const result: Block = { ...block };
+  const config = result.config as Record<string, unknown> | undefined;
   if (Array.isArray(result.children)) {
     result.children = result.children.map((child) => updateToolRefsInBlock(child, transform));
+  }
+  if (
+    config?.['body'] &&
+    typeof config['body'] === 'object' &&
+    !Array.isArray(config['body'])
+  ) {
+    result.config = {
+      ...(result.config as Record<string, unknown>),
+      body: updateToolRefsInBlock(config['body'] as Block, transform),
+    };
+  }
+  for (const nestedKey of ['planner', 'evaluator']) {
+    const latestConfig = result.config as Record<string, unknown> | undefined;
+    const nested = latestConfig?.[nestedKey];
+    if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+      const nestedBlock: Block = {
+        id: `${result.id}-${nestedKey}`,
+        type: 'agent',
+        label: nestedKey,
+        config: nested as Record<string, unknown>,
+        children: [],
+      };
+      result.config = {
+        ...(latestConfig ?? {}),
+        [nestedKey]: updateToolRefsInBlock(nestedBlock, transform).config,
+      };
+    }
   }
   if (
     result.config &&
     Array.isArray((result.config as Record<string, unknown>)['tools'])
   ) {
-    const configTools = (result.config as Record<string, unknown>)['tools'] as string[];
-    const filtered = configTools
-      .map(transform)
-      .filter((item): item is string => typeof item === 'string' && item.length > 0);
+    const configTools = (result.config as Record<string, unknown>)['tools'] as unknown[];
+    const filtered = configTools.flatMap((item) => {
+      if (typeof item !== 'string') return [item];
+      const nextName = transform(item);
+      return nextName ? [nextName] : [];
+    });
     result.config = {
       ...(result.config as Record<string, unknown>),
       tools: filtered.length > 0 ? filtered : undefined,
     };
+  }
+  const nextConfig = result.config as Record<string, unknown> | undefined;
+  const ref = nextConfig?.['ref'];
+  if (typeof ref === 'string') {
+    const nextName = transform(ref);
+    result.config = {
+      ...(nextConfig ?? {}),
+      ref: nextName ?? '',
+    };
+  } else if (ref && typeof ref === 'object' && !Array.isArray(ref)) {
+    const refObject = ref as Record<string, unknown>;
+    const refType = typeof refObject['type'] === 'string' ? refObject['type'] : 'builtin';
+    const refName = typeof refObject['name'] === 'string' ? refObject['name'] : '';
+    if (refName && refType === 'builtin') {
+      const nextName = transform(refName);
+      result.config = {
+        ...(nextConfig ?? {}),
+        ref: {
+          ...refObject,
+          type: refType,
+          name: nextName ?? '',
+        },
+      };
+    }
   }
   return result;
 }

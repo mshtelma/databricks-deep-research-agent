@@ -1,4 +1,5 @@
 """PR3-D Layer 3a — synthetic behavioral_probe tests."""
+
 from __future__ import annotations
 
 import json
@@ -81,8 +82,7 @@ def _conformant_pipelined_ast() -> dict[str, Any]:
                                 "model_tier": "analytical",
                                 "tools": ["vs", "dt", "comp"],
                                 "user_prompt_template": (
-                                    "Investigate {query}. Cover both "
-                                    "fiscal year and calendar year."
+                                    "Investigate {query}. Cover both fiscal year and calendar year."
                                 ),
                             },
                         },
@@ -137,8 +137,7 @@ def _wrong_topology_ast() -> dict[str, Any]:
                                 "subtype": "researcher",
                                 "tools": ["vs", "dt", "comp"],
                                 "user_prompt_template": (
-                                    "Investigate {query}. Cover both "
-                                    "fiscal year and calendar year."
+                                    "Investigate {query}. Cover both fiscal year and calendar year."
                                 ),
                             },
                         }
@@ -195,14 +194,11 @@ def test_probe_clears_conformant_pipelined_workflow() -> None:
         _signature_pipelined_period_basis(),
     )
     assert result.passed, f"unexpected gaps: {result.gaps}"
-    assert "all_tool_kinds_in_enum" in result.invariants_passed
+    assert "all_tool_kinds_registered" in result.invariants_passed
     assert "every_lane_has_bound_tools" in result.invariants_passed
     assert "every_lane_has_query_anchor" in result.invariants_passed
     assert "synthesizer_reads_pools" in result.invariants_passed
-    assert any(
-        x.startswith("topology_matches_signature")
-        for x in result.conditional_passed
-    )
+    assert any(x.startswith("topology_matches_signature") for x in result.conditional_passed)
     assert "period_basis_in_lane_prompts" in result.conditional_passed
     assert "numeric_aggregation_has_compute_and_table_read" in result.conditional_passed
     assert "structured_tables_has_table_read" in result.conditional_passed
@@ -255,7 +251,7 @@ def test_probe_runs_without_signature() -> None:
     # supplied; the conformant AST should still pass.
     result = run_behavioral_probe(_conformant_pipelined_ast(), None)
     assert result.passed
-    assert "all_tool_kinds_in_enum" in result.invariants_passed
+    assert "all_tool_kinds_registered" in result.invariants_passed
     # No conditional checks fired without a signature.
     assert result.conditional_passed == []
 
@@ -276,9 +272,7 @@ def test_probe_runtime_queries_satisfy_period_basis() -> None:
         runtime_queries=queries,
     )
     assert result.passed
-    assert (
-        "runtime_query_axis_satisfied:period_basis" in result.conditional_passed
-    )
+    assert "runtime_query_axis_satisfied:period_basis" in result.conditional_passed
     assert result.runtime_queries == queries
 
 
@@ -293,9 +287,7 @@ def test_probe_runtime_queries_missing_calendar_year() -> None:
         runtime_queries=queries,
     )
     assert not result.passed
-    assert any(
-        "runtime_query_axis_unsatisfied:period_basis" in g for g in result.gaps
-    )
+    assert any("runtime_query_axis_unsatisfied:period_basis" in g for g in result.gaps)
 
 
 # ---------------------------------------------------------------------------
@@ -414,9 +406,9 @@ def test_probe_catches_corpus_only_signature_with_only_web_tools() -> None:
         sig,
     )
     assert not result.passed
-    assert any(
-        g.startswith("asset_signature_tool_kind_mismatch") for g in result.gaps
-    ), f"expected mismatch gap, got: {result.gaps}"
+    assert any(g.startswith("asset_signature_tool_kind_mismatch") for g in result.gaps), (
+        f"expected mismatch gap, got: {result.gaps}"
+    )
 
 
 def test_probe_passes_corpus_only_with_corpus_tools_bound() -> None:
@@ -482,12 +474,9 @@ def test_probe_skips_asset_signature_invariant_for_web_only() -> None:
     }
     result = run_behavioral_probe(ast, web_only_sig)
     # No asset_signature gap for web_only.
-    assert not any(
-        g.startswith("asset_signature_tool_kind_mismatch") for g in result.gaps
-    )
+    assert not any(g.startswith("asset_signature_tool_kind_mismatch") for g in result.gaps)
     # And no asset_signature conditional pass entry (only applies to
     # corpus_only/structured_only).
     assert not any(
-        c.startswith("asset_signature_matches_tool_kinds")
-        for c in result.conditional_passed
+        c.startswith("asset_signature_matches_tool_kinds") for c in result.conditional_passed
     )
