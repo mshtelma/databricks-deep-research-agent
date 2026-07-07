@@ -29,7 +29,7 @@ import logging
 import os
 import re
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 from databricks.sdk import WorkspaceClient
 
 from deep_research.core.config import Settings, get_settings

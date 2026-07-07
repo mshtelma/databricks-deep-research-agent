@@ -36,7 +36,7 @@ async def database_exists(
         True if database exists, False otherwise
     """
     try:
-        import asyncpg  # type: ignore[import-untyped]
+        import asyncpg
 
         info = get_lakebase_connection_info(
             instance_name=instance_name,
