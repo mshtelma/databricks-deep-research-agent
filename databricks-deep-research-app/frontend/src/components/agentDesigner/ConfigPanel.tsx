@@ -47,6 +47,7 @@ import { resolveBlock } from '@/lib/blockPath';
 import { requiredConfigErrors, schemaProperties } from '@/lib/jsonSchema';
 import { useAgentEditorStore } from '@/stores/agentEditorStore';
 import { TypePill, LayerChip } from './atoms';
+import { FunctionParamsEditor } from './FunctionParamsEditor';
 import { SchemaField } from './SchemaField';
 import { AddToolDialog } from './AddToolDialog';
 import { WorkflowSettingsPanel } from './WorkflowSettingsPanel';
@@ -124,6 +125,11 @@ function toolSummary(decl: ToolDecl): string {
     config['index_name'] ??
     config['space_id'] ??
     config['endpoint_name'] ??
+    config['function'] ??
+    config['function_name'] ?? // legacy alias shape from imported drafts
+    config['tool_name'] ??
+    config['import'] ??
+    config['key'] ??
     config['max_results'] ??
     config['num_results'];
   return primary === undefined || primary === null || primary === '' ? 'Not configured' : String(primary);
@@ -185,6 +191,11 @@ export interface ConfigPanelProps {
   chatSessionId?: string;
 }
 
+type AddToolRequest =
+  | { mode: 'workspace' }
+  | { mode: 'bind-agent'; blockPath: string }
+  | { mode: 'select-tool-step'; blockPath: string; prefillQuery?: string };
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -193,7 +204,7 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
   const selectedPath = useAgentEditorStore((s) => s.selectedPath);
   const ast = useAgentEditorStore((s) => s.ast);
 
-  const [showAddTool, setShowAddTool] = React.useState(false);
+  const [addToolRequest, setAddToolRequest] = React.useState<AddToolRequest | null>(null);
   const [selectedToolName, setSelectedToolName] = React.useState<string | null>(null);
   // No-selection view tab: the Workspace tool registry, or the workflow co-pilot
   // (which used to be a separate column; Direction 2 folds it into the inspector).
@@ -206,6 +217,41 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
 
   const declaredTools: ToolDecl[] = React.useMemo(() => ast?.tools ?? [], [ast?.tools]);
   const selectedTool = declaredTools.find((tool) => tool.name === selectedToolName) ?? null;
+  const showAddTool = addToolRequest !== null;
+
+  const handleToolDeclared = React.useCallback(
+    (tool: ToolDecl) => {
+      const request = addToolRequest;
+      if (!request) return;
+      const store = useAgentEditorStore.getState();
+      if (request.mode === 'bind-agent') {
+        store.bindToolToBlock(request.blockPath, tool.name);
+      } else if (request.mode === 'select-tool-step') {
+        const latestAst = store.ast;
+        const latestBlock = latestAst ? resolveBlock(latestAst, request.blockPath) : null;
+        const currentConfig =
+          latestBlock?.config && typeof latestBlock.config === 'object' ? latestBlock.config : {};
+        store.updateBlock(request.blockPath, {
+          config: { ...currentConfig, ref: { type: 'builtin', name: tool.name } },
+        });
+      }
+    },
+    [addToolRequest],
+  );
+  const addToolDialog = showAddTool ? (
+    <AddToolDialog
+      open={showAddTool}
+      onOpenChange={(open) => setAddToolRequest(open ? addToolRequest : null)}
+      onDeclared={handleToolDeclared}
+      registry={registry}
+      intent={addToolRequest?.mode ?? 'workspace'}
+      initialQuery={
+        addToolRequest?.mode === 'select-tool-step'
+          ? addToolRequest.prefillQuery
+          : undefined
+      }
+    />
+  ) : null;
 
   React.useEffect(() => {
     if (selectedToolName && !declaredTools.some((tool) => tool.name === selectedToolName)) {
@@ -231,7 +277,7 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
               {noSelTab === 'tools' && (
                 <button
                   type="button"
-                  onClick={() => setShowAddTool(true)}
+                  onClick={() => setAddToolRequest({ mode: 'workspace' })}
                   className="inline-flex items-center gap-1 rounded-db-md bg-db-lava-600 px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-db-lava-700"
                 >
                   <Plus size={11} /> Add
@@ -284,9 +330,7 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
             </>
           )}
         </aside>
-        {showAddTool && (
-          <AddToolDialog open={showAddTool} onOpenChange={setShowAddTool} registry={registry} />
-        )}
+        {addToolDialog}
       </>
     );
   }
@@ -302,12 +346,10 @@ export function ConfigPanel({ registry, chatSessionId }: ConfigPanelProps): Reac
         selectedPath={selectedPath}
         registry={registry}
         declaredTools={declaredTools}
-        onShowAddTool={() => setShowAddTool(true)}
+        onShowAddTool={(request) => setAddToolRequest(request)}
         chatSessionId={chatSessionId}
       />
-      {showAddTool && (
-        <AddToolDialog open={showAddTool} onOpenChange={setShowAddTool} registry={registry} />
-      )}
+      {addToolDialog}
     </>
   );
 }
@@ -321,7 +363,7 @@ interface SelectedInspectorProps {
   selectedPath: string;
   registry: RegistryResponse;
   declaredTools: ToolDecl[];
-  onShowAddTool: () => void;
+  onShowAddTool: (request: AddToolRequest) => void;
   chatSessionId?: string;
 }
 
@@ -404,7 +446,13 @@ function SelectedInspector({
       ) : (
         <div className="min-h-0 flex-1 overflow-auto p-4">
           {tab === 'config' && (
-            <ConfigureForm block={block} selectedPath={selectedPath} registry={registry} />
+            <ConfigureForm
+              block={block}
+              selectedPath={selectedPath}
+              registry={registry}
+              declaredTools={declaredTools}
+              onShowAddTool={onShowAddTool}
+            />
           )}
           {tab === 'tools' && isAgent && (
             <ToolsPane
@@ -473,9 +521,17 @@ interface ConfigureFormProps {
   block: import('@/types/ast').Block;
   selectedPath: string;
   registry: RegistryResponse;
+  declaredTools: ToolDecl[];
+  onShowAddTool: (request: AddToolRequest) => void;
 }
 
-function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): React.ReactElement {
+function ConfigureForm({
+  block,
+  selectedPath,
+  registry,
+  declaredTools,
+  onShowAddTool,
+}: ConfigureFormProps): React.ReactElement {
   const nodeSpec = registry.node_types.find((s) => s.type === block.type) ?? null;
   const configSchema = nodeSpec?.config_schema ?? null;
 
@@ -567,6 +623,22 @@ function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): R
   if (!configSchema) {
     return (
       <p className="text-[12px] text-db-gray-text">No configurable properties for this block.</p>
+    );
+  }
+
+  // Tool nodes: declaration-first step editor (ToolStepForm). The bespoke
+  // FunctionToolNodeEditor (UC picker + signature params) is kept in-tree and
+  // folds into this form in the tool-UX plan's Phase 2; UcFunctionPicker
+  // already renders in declaration editors via the uc-function-picker widget.
+  if (block.type === 'tool') {
+    return (
+      <ToolStepForm
+        block={block}
+        selectedPath={selectedPath}
+        registry={registry}
+        declaredTools={declaredTools}
+        onShowAddTool={onShowAddTool}
+      />
     );
   }
 
@@ -726,6 +798,455 @@ function ConfigureForm({ block, selectedPath, registry }: ConfigureFormProps): R
 }
 
 // ---------------------------------------------------------------------------
+// Tool Step form — declaration-first calls with advanced direct-ref compatibility
+// ---------------------------------------------------------------------------
+
+type DirectToolRefType = 'uc_function' | 'uc_tool' | 'enterprise';
+
+const TOOL_STEP_INPUT_CLASS =
+  'w-full rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 font-db-sans text-[13px] leading-[1.4] text-db-navy-800 outline-none transition-colors placeholder:text-db-navy-300 focus:border-db-navy-400 focus:shadow-db-focus';
+
+const TOOL_STEP_MONO_INPUT_CLASS =
+  'w-full rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 font-db-mono text-[12px] leading-[1.4] text-db-navy-800 outline-none transition-colors placeholder:text-db-navy-300 focus:border-db-navy-400 focus:shadow-db-focus';
+
+const DIRECT_TOOL_REF_LABELS: Record<DirectToolRefType, {
+  nameLabel: string;
+  placeholder: string;
+}> = {
+  uc_function: {
+    nameLabel: 'Function name',
+    placeholder: 'catalog.schema.function',
+  },
+  uc_tool: {
+    nameLabel: 'Tool name',
+    placeholder: 'catalog.schema.tool',
+  },
+  enterprise: {
+    nameLabel: 'Tool name',
+    placeholder: 'tool_name',
+  },
+};
+
+function normalizeToolRef(value: unknown): { type: string; name: string } {
+  if (typeof value === 'string') {
+    return { type: 'builtin', name: value };
+  }
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    const raw = value as Record<string, unknown>;
+    return {
+      type: typeof raw['type'] === 'string' ? raw['type'] : 'builtin',
+      name: typeof raw['name'] === 'string' ? raw['name'] : '',
+    };
+  }
+  return { type: 'builtin', name: '' };
+}
+
+function isDirectToolRef(ref: { type: string }): boolean {
+  if (ref.type === 'uc_function' || ref.type === 'uc_tool' || ref.type === 'enterprise') {
+    return true;
+  }
+  return false;
+}
+
+function normalizeInputMapping(value: unknown): Record<string, string> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  const out: Record<string, string> = {};
+  for (const [key, raw] of Object.entries(value as Record<string, unknown>)) {
+    out[key] = typeof raw === 'string' ? raw : String(raw ?? '');
+  }
+  return out;
+}
+
+function normalizeInputLiterals(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return { ...(value as Record<string, unknown>) };
+}
+
+/**
+ * Declared signature params of a workflow tool, when its kind carries them
+ * (uc_function: introspected on save; python_function: authored). Drives the
+ * signature-aware mapping rows in the tool-step inspector.
+ */
+function declarationParams(
+  decl: ToolDecl | null,
+): Array<{ name: string; type: string; required: boolean }> {
+  if (!decl || (decl.kind !== 'uc_function' && decl.kind !== 'python_function')) {
+    return [];
+  }
+  const raw = decl.config?.['params'];
+  if (!Array.isArray(raw)) return [];
+  const out: Array<{ name: string; type: string; required: boolean }> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const record = item as Record<string, unknown>;
+    const name = typeof record['name'] === 'string' ? record['name'] : '';
+    if (!name) continue;
+    out.push({
+      name,
+      type: typeof record['type'] === 'string' ? record['type'] : 'string',
+      required: record['required'] !== false,
+    });
+  }
+  return out;
+}
+
+function uniqueMappingKey(mapping: Record<string, string>): string {
+  const base = 'parameter';
+  if (!(base in mapping)) return base;
+  let index = 2;
+  while (`${base}_${index}` in mapping) {
+    index += 1;
+  }
+  return `${base}_${index}`;
+}
+
+function ToolStepForm({
+  block,
+  selectedPath,
+  registry,
+  declaredTools,
+  onShowAddTool,
+}: {
+  block: import('@/types/ast').Block;
+  selectedPath: string;
+  registry: RegistryResponse;
+  declaredTools: ToolDecl[];
+  onShowAddTool: (request: AddToolRequest) => void;
+}): React.ReactElement {
+  const config = block.config as Record<string, unknown>;
+  const ref = normalizeToolRef(config['ref']);
+  const directRef = isDirectToolRef(ref);
+  const inputMapping = normalizeInputMapping(config['input_mapping']);
+  const inputLiterals = normalizeInputLiterals(config['input_literals']);
+  const outputKey = typeof config['output_key'] === 'string' ? config['output_key'] : 'tool_result';
+  const selectedDecl =
+    !directRef
+      ? declaredTools.find((tool) => tool.name === ref.name) ?? null
+      : null;
+  const unresolvedLocalRef = !directRef && ref.name.length > 0 && selectedDecl === null;
+  const signatureParams = declarationParams(selectedDecl);
+  const missingRequired = signatureParams
+    .filter((p) => p.required && !(p.name in inputMapping) && !(p.name in inputLiterals))
+    .map((p) => p.name);
+
+  const updateConfig = React.useCallback(
+    (patch: Record<string, unknown>) => {
+      useAgentEditorStore.getState().updateBlock(selectedPath, {
+        config: { ...config, ...patch },
+      });
+    },
+    [config, selectedPath],
+  );
+
+  const updateRef = React.useCallback(
+    (nextRef: { type: string; name: string }) => {
+      updateConfig({ ref: nextRef });
+    },
+    [updateConfig],
+  );
+
+  const updateMappingEntries = React.useCallback(
+    (entries: Array<[string, string]>) => {
+      updateConfig({ input_mapping: Object.fromEntries(entries) });
+    },
+    [updateConfig],
+  );
+
+  const mappingEntries = Object.entries(inputMapping);
+  const directType: DirectToolRefType =
+    ref.type === 'uc_tool' || ref.type === 'enterprise' ? ref.type : 'uc_function';
+  const directLabels = DIRECT_TOOL_REF_LABELS[directType];
+
+  return (
+    <div>
+      <FieldShell label="Workflow tool">
+        {declaredTools.length === 0 ? (
+          <div className="rounded-db-md border border-dashed border-db-gray-lines p-3 text-center text-[12px] leading-[1.5] text-db-gray-text">
+            No workflow tools.
+            <button
+              type="button"
+              onClick={() => onShowAddTool({ mode: 'select-tool-step', blockPath: selectedPath })}
+              className="ml-1 font-medium text-db-navy-800 underline"
+            >
+              Add to workflow
+            </button>
+          </div>
+        ) : (
+          <div className="flex gap-2">
+            <select
+              aria-label="Workflow tool"
+              value={directRef ? '' : ref.name}
+              onChange={(event) => updateRef({ type: 'builtin', name: event.target.value })}
+              className={`${TOOL_STEP_INPUT_CLASS} min-w-0 flex-1`}
+            >
+              <option value="">{unresolvedLocalRef ? 'Unresolved tool' : 'Select tool'}</option>
+              {declaredTools.map((decl) => {
+                const kind = findToolKind(registry, decl.kind);
+                return (
+                  <option key={decl.name} value={decl.name}>
+                    {kind?.label ? `${decl.name} · ${kind.label}` : decl.name}
+                  </option>
+                );
+              })}
+            </select>
+            <button
+              type="button"
+              onClick={() => onShowAddTool({ mode: 'select-tool-step', blockPath: selectedPath })}
+              className="inline-flex shrink-0 items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
+            >
+              <Plus size={11} /> Add
+            </button>
+          </div>
+        )}
+      </FieldShell>
+
+      {unresolvedLocalRef && (
+        <div className="mb-3.5 rounded-db-md border border-db-yellow-500 bg-db-yellow-100 px-2.5 py-2 text-[11px] leading-[1.45] text-db-navy-800">
+          This step references undeclared workflow tool{' '}
+          <code className="font-db-mono">{ref.name}</code>. Select a declared tool or add it to
+          the workflow.
+        </div>
+      )}
+
+      {selectedDecl && (
+        <div className="mb-3.5 rounded-db-md border border-db-gray-lines bg-db-oat-light px-2.5 py-2">
+          <div className="flex items-center gap-2">
+            <LayerChip layer={findToolKind(registry, selectedDecl.kind)?.layer ?? 'D'} />
+            <div className="min-w-0 flex-1">
+              <div className="truncate font-db-mono text-[12px] font-medium text-db-navy-800">
+                {selectedDecl.name}
+              </div>
+              <div className="truncate text-[10px] text-db-gray-text">
+                {findToolKind(registry, selectedDecl.kind)?.label ?? selectedDecl.kind}
+                {' · '}
+                {toolSummary(selectedDecl)}
+              </div>
+            </div>
+          </div>
+          {selectedDecl.description && (
+            <p className="mt-1.5 text-[11px] leading-[1.45] text-db-gray-text">
+              {selectedDecl.description}
+            </p>
+          )}
+        </div>
+      )}
+
+      {directRef && (
+        <div className="mb-3.5 rounded-db-md border border-db-yellow-500 bg-db-yellow-100 px-2.5 py-2 text-[11px] leading-[1.45] text-db-navy-800">
+          This step uses an imported direct reference. Prefer declaring it as a workflow tool
+          when editing this workflow.
+        </div>
+      )}
+
+      <details
+        open={directRef}
+        className="mb-3.5 rounded-db-md border border-db-gray-lines bg-white"
+      >
+        <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-db-navy-700 hover:bg-db-oat-light">
+          Advanced direct reference
+        </summary>
+        <div className="border-t border-db-gray-lines px-3 pt-3">
+          <FieldShell label="Direct reference type">
+            <select
+              aria-label="Direct reference type"
+              value={directType}
+              onChange={(event) => {
+                const nextType = event.target.value as DirectToolRefType;
+                updateRef({ type: nextType, name: directRef ? ref.name : '' });
+              }}
+              className={TOOL_STEP_INPUT_CLASS}
+            >
+              <option value="uc_function">Unity Catalog function</option>
+              <option value="uc_tool">UC tool</option>
+              <option value="enterprise">Enterprise tool</option>
+            </select>
+          </FieldShell>
+          <FieldShell label={directLabels.nameLabel}>
+            <input
+              aria-label={directLabels.nameLabel}
+              value={directRef ? ref.name : ''}
+              onChange={(event) => updateRef({ type: directType, name: event.target.value })}
+              placeholder={directLabels.placeholder}
+              className={TOOL_STEP_MONO_INPUT_CLASS}
+            />
+          </FieldShell>
+          <button
+            type="button"
+            onClick={() =>
+              onShowAddTool({
+                mode: 'select-tool-step',
+                blockPath: selectedPath,
+                // Prefill the picker with the direct target so conversion is
+                // one click (pasted-FQN fast path for uc_function refs).
+                prefillQuery: directRef ? ref.name : undefined,
+              })
+            }
+            className="mb-3 inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
+          >
+            <Plus size={11} /> Convert to workflow tool
+          </button>
+        </div>
+      </details>
+
+      {signatureParams.length > 0 && (
+        <FieldShell label="Parameters">
+          <FunctionParamsEditor
+            params={signatureParams}
+            inputMapping={inputMapping}
+            inputLiterals={inputLiterals}
+            onChange={({ inputMapping: nextMapping, inputLiterals: nextLiterals }) =>
+              updateConfig({ input_mapping: nextMapping, input_literals: nextLiterals })
+            }
+          />
+          {missingRequired.length > 0 && (
+            <p
+              role="status"
+              className="mt-1.5 rounded-db-md border border-db-yellow-500 bg-db-yellow-100 px-2.5 py-1.5 text-[11px] leading-[1.45] text-db-navy-800"
+            >
+              Required parameter{missingRequired.length > 1 ? 's' : ''} not mapped:{' '}
+              <code className="font-db-mono">{missingRequired.join(', ')}</code>
+            </p>
+          )}
+        </FieldShell>
+      )}
+
+      {signatureParams.length === 0 && (
+      <FieldShell label="Parameters">
+        <div className="space-y-2 rounded-db-md border border-db-gray-lines bg-db-oat-light p-2.5">
+          {mappingEntries.length === 0 && (
+            <p className="text-[11px] italic text-db-gray-text">No parameter mappings.</p>
+          )}
+          {mappingEntries.map(([argName, stateKey], index) => (
+            <div key={`${argName}-${index}`} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+              <input
+                aria-label={`Parameter ${index + 1}`}
+                value={argName}
+                onChange={(event) => {
+                  const next = [...mappingEntries];
+                  next[index] = [event.target.value, stateKey];
+                  updateMappingEntries(next);
+                }}
+                placeholder="parameter"
+                className={TOOL_STEP_MONO_INPUT_CLASS}
+              />
+              <input
+                aria-label={`State key for ${argName || `parameter ${index + 1}`}`}
+                value={stateKey}
+                onChange={(event) => {
+                  const next = [...mappingEntries];
+                  next[index] = [argName, event.target.value];
+                  updateMappingEntries(next);
+                }}
+                placeholder="state_key"
+                className={TOOL_STEP_MONO_INPUT_CLASS}
+              />
+              <button
+                type="button"
+                aria-label={`Remove ${argName || `parameter ${index + 1}`}`}
+                onClick={() => {
+                  updateMappingEntries(mappingEntries.filter((_, i) => i !== index));
+                }}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-db-md border border-transparent text-db-gray-text transition-colors hover:border-db-lava-400 hover:bg-db-lava-300 hover:text-db-lava-800"
+              >
+                <X size={13} />
+              </button>
+            </div>
+          ))}
+          <button
+            type="button"
+            aria-label="Add parameter mapping"
+            onClick={() => {
+              updateConfig({
+                input_mapping: {
+                  ...inputMapping,
+                  [uniqueMappingKey(inputMapping)]: '',
+                },
+              });
+            }}
+            className="inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1 text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
+          >
+            <Plus size={11} /> Add parameter
+          </button>
+        </div>
+      </FieldShell>
+      )}
+
+      <FieldShell label="Output key">
+        <input
+          aria-label="Output key"
+          value={outputKey}
+          onChange={(event) => updateConfig({ output_key: event.target.value })}
+          className={TOOL_STEP_MONO_INPUT_CLASS}
+        />
+      </FieldShell>
+
+      <label className="mb-3.5 flex cursor-pointer items-center gap-2 text-[12px] text-db-navy-800">
+        <input
+          type="checkbox"
+          aria-label="Fail step on tool error"
+          checked={config['fail_on_error'] === true}
+          onChange={(event) => updateConfig({ fail_on_error: event.target.checked })}
+          className="h-3.5 w-3.5 rounded border-db-gray-lines accent-db-lava-600"
+        />
+        Fail the step when the tool errors
+      </label>
+
+      <details className="mb-3.5 rounded-db-md border border-db-gray-lines bg-white">
+        <summary className="cursor-pointer select-none px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.06em] text-db-navy-700 hover:bg-db-oat-light">
+          Advanced output
+        </summary>
+        <div className="border-t border-db-gray-lines px-3 pt-3">
+          <FieldShell label="Structured data key">
+            <input
+              aria-label="Structured data key"
+              value={typeof config['output_data_key'] === 'string' ? config['output_data_key'] : ''}
+              onChange={(event) =>
+                updateConfig({ output_data_key: event.target.value || undefined })
+              }
+              placeholder="also store ToolResult.data under this state key"
+              className={TOOL_STEP_MONO_INPUT_CLASS}
+            />
+          </FieldShell>
+          <FieldShell label="Bind into compute namespace">
+            <input
+              aria-label="Bind into compute namespace"
+              value={typeof config['bind_namespace'] === 'string' ? config['bind_namespace'] : ''}
+              onChange={(event) =>
+                updateConfig({ bind_namespace: event.target.value || undefined })
+              }
+              placeholder="session variable name for compute/python_function"
+              className={TOOL_STEP_MONO_INPUT_CLASS}
+            />
+          </FieldShell>
+          <label className="mb-3 flex cursor-pointer items-center gap-2 text-[12px] text-db-navy-800">
+            <input
+              type="checkbox"
+              aria-label="Enforce output schema"
+              checked={config['enforce_output_schema'] === true}
+              onChange={(event) =>
+                updateConfig({ enforce_output_schema: event.target.checked })
+              }
+              className="h-3.5 w-3.5 rounded border-db-gray-lines accent-db-lava-600"
+            />
+            Enforce required keys from the output schema
+          </label>
+          <SchemaField
+            name="output_schema"
+            schema={{ type: 'object', title: 'Output schema', 'x-widget': 'json' }}
+            value={config['output_schema']}
+            onChange={(value) => updateConfig({ output_schema: value })}
+          />
+        </div>
+      </details>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Tools tab (agent only) — bind/unbind workflow tools
 // ---------------------------------------------------------------------------
 
@@ -735,7 +1256,7 @@ interface ToolsBindingFormProps {
   registry: RegistryResponse;
   declaredTools: ToolDecl[];
   boundToolNames: string[];
-  onShowAddTool: () => void;
+  onShowAddTool: (request: AddToolRequest) => void;
 }
 
 function ToolsBindingForm({
@@ -918,7 +1439,7 @@ function ToolsBindingForm({
           Click{' '}
           <button
             type="button"
-            onClick={onShowAddTool}
+            onClick={() => onShowAddTool({ mode: 'bind-agent', blockPath: selectedPath })}
             className="font-medium text-db-navy-800 underline"
           >
             + Add to workflow
@@ -948,7 +1469,7 @@ function ToolsBindingForm({
       )}
       <button
         type="button"
-        onClick={onShowAddTool}
+        onClick={() => onShowAddTool({ mode: 'bind-agent', blockPath: selectedPath })}
         className="mt-3 inline-flex items-center gap-1.5 rounded-db-md border border-db-gray-lines bg-white px-2.5 py-1.5 text-[12px] font-medium text-db-navy-800 transition-colors hover:border-db-navy-300 hover:bg-db-oat-medium"
       >
         <Plus size={11} /> Add to workflow
@@ -1069,7 +1590,7 @@ interface ToolsPaneProps {
   registry: RegistryResponse;
   declaredTools: ToolDecl[];
   boundToolNames: string[];
-  onShowAddTool: () => void;
+  onShowAddTool: (request: AddToolRequest) => void;
 }
 
 function ToolsPane({
@@ -1150,13 +1671,6 @@ function ToolsPane({
             />
           ))
         )}
-        <button
-          type="button"
-          onClick={onShowAddTool}
-          className="mt-2 inline-flex w-full items-center justify-center gap-1.5 rounded-db-md border border-dashed border-db-navy-300 bg-db-oat-light px-2.5 py-2 text-[12px] font-medium text-db-navy-800 transition-colors hover:bg-db-oat-medium"
-        >
-          <Plus size={12} /> Connect MCP server
-        </button>
       </div>
     </div>
   );

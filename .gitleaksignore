@@ -1,0 +1,17 @@
+# Reviewed false positives for the Databricks secret-scan githooks (gitleaks).
+#
+# All six findings are the same rule (postgres-connection-string) in one
+# HISTORICAL commit (a0ade283, 2026-05-20) that is already an ancestor of
+# origin/main — i.e. already public. The matched strings were documentation
+# format examples and fake test fixtures (placeholder user/password DSNs such
+# as the FAKE_DSN constant), not real credentials. The current tree no longer
+# contains any matching literal: docs/observability-policy.md was deleted and
+# the surviving fixture is credential-free. History is immutable, so first
+# pushes of new branches keep re-flagging these; ignoring them BY FINGERPRINT
+# keeps the scanner fully active for everything else.
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/docs/observability-policy.md:postgres-connection-string:71
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/docs/observability-policy.md:postgres-connection-string:94
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v1_data_check.py:postgres-connection-string:41
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v1_data_check.py:postgres-connection-string:239
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v15_data_check.py:postgres-connection-string:46
+a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v15_data_check.py:postgres-connection-string:204

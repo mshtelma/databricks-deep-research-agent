@@ -4,7 +4,7 @@ import asyncio
 import logging
 from urllib.parse import urlparse
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 
 from deep_research.core.config import Settings, get_settings
 from deep_research.db.asyncpg_config import (

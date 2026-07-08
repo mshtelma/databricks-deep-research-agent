@@ -336,12 +336,17 @@ export async function probeTools({
 // ---------------------------------------------------------------------------
 
 export async function listDesignerResources(
-  kinds?: string[]
+  kinds?: string[],
+  opts?: { parent?: string; query?: string }
 ): Promise<DesignerResourcesResponse> {
   const params = new URLSearchParams()
   for (const kind of kinds ?? []) {
     params.append('kinds', kind)
   }
+  // Parent scopes a cascading UC browse (catalog for uc_schema,
+  // 'catalog.schema' for uc_function); query is an optional name-prefix filter.
+  if (opts?.parent) params.append('parent', opts.parent)
+  if (opts?.query) params.append('query', opts.query)
   const qs = params.toString()
   const response = await fetch(`${API_BASE_URL}/agent-designer/resources${qs ? `?${qs}` : ''}`, {
     headers: { 'Content-Type': 'application/json' },
@@ -364,6 +369,51 @@ export async function listDesignerResources(
   }
 
   return response.json() as Promise<DesignerResourcesResponse>
+}
+
+export interface UcFunctionParam {
+  name: string
+  type: string
+  required: boolean
+}
+
+export interface UcFunctionSignature {
+  function: string
+  params: UcFunctionParam[]
+  scalar: boolean
+  /** True for a table-valued function (invoked SELECT * FROM fn(..)). */
+  returns_table: boolean
+  /** False when the caller lacks USE CATALOG (can browse but not run it). */
+  run_ready: boolean
+  warning?: string | null
+}
+
+/**
+ * Live pre-save signature for a UC function ('catalog.schema.function').
+ * The server is fail-soft (a query error returns empty params + a warning), so a
+ * thrown error here means transport/4xx, not "function has no params".
+ */
+export async function getUcFunctionSignature(fqn: string): Promise<UcFunctionSignature> {
+  const response = await fetch(
+    `${API_BASE_URL}/agent-designer/resources/uc-functions/${encodeURIComponent(fqn)}/signature`,
+    { headers: { 'Content-Type': 'application/json' } }
+  )
+  if (!response.ok) {
+    let errorData: { code?: string; message?: string; detail?: unknown } = {}
+    try {
+      errorData = (await response.json()) as typeof errorData
+    } catch {
+      errorData = { code: 'UNKNOWN', message: response.statusText }
+    }
+    const message =
+      typeof errorData.message === 'string'
+        ? errorData.message
+        : typeof errorData.detail === 'string'
+          ? errorData.detail
+          : 'Failed to fetch function signature'
+    throw new ApiError(response.status, errorData.code ?? 'UNKNOWN', message)
+  }
+  return response.json() as Promise<UcFunctionSignature>
 }
 
 export async function startDesignerSqlWarehouse(

@@ -1,0 +1,73 @@
+# Deterministic functions + agents in one workflow.
+#
+# A python_function computes SMA deterministically (no LLM) as a DAG tool
+# node; its result lands in state (output_data_key), in the run's sandbox
+# scratchpad (bind_result), and — being citeable — in the evidence pool. The
+# synthesizer agent then interprets the numbers, reading the scratchpad via
+# {compute_namespace}.
+#
+# Run:
+#   make run-example WORKFLOW=technical_indicators QUERY="Analyze the trend"
+
+id: technical_indicators
+name: Technical Indicators (deterministic + agentic)
+version: "1"
+required_inputs: [query, prices]
+output_keys: [report]
+runtime_injected_keys: [prices]
+
+tools:
+  - name: sma_indicator
+    kind: python_function
+    description: "Simple moving average over a numeric price series"
+    config:
+      timeout_seconds: 10
+      extra_allowed_modules: [numpy]
+      citeable: true
+      bind_result: sma_series
+      params:
+        - {name: prices, type: array, required: true}
+        - {name: window, type: integer, default: 5}
+      code: |
+        import numpy as np
+        arr = np.asarray(prices, dtype=float)
+        w = max(1, int(window))
+        result = np.convolve(arr, np.ones(w) / w, mode="valid").tolist()
+
+root:
+  id: main
+  type: sequence
+  label: Main
+  children:
+    - id: compute_sma
+      type: tool
+      label: Compute SMA (deterministic)
+      config:
+        ref: {name: sma_indicator}
+        input_mapping:
+          prices: prices          # state key seeded by the caller
+        input_literals:
+          window: 5
+        output_key: sma_summary
+        output_data_key: sma_data # -> get_nested("sma_data.result")
+        fail_on_error: true
+
+    - id: interpret
+      type: agent
+      label: Interpret the indicator
+      config:
+        subtype: synthesizer
+        model_tier: analytical
+        output_key: report
+        input_keys: [query, sma_summary, compute_namespace]
+        user_prompt_template: |
+          Question: {query}
+
+          Deterministic SMA computation output:
+          {sma_summary}
+
+          Run scratchpad:
+          {compute_namespace}
+
+          Interpret the moving-average trend for the user. Be concise and
+          ground every numeric claim in the computed values above.

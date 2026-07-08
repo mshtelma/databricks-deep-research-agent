@@ -162,14 +162,21 @@ _MAX_SOURCE_LENGTH = 20_000
 # AST policy
 # ---------------------------------------------------------------------------
 
-def validate_script_source(source: str) -> None:
+def validate_script_source(
+    source: str,
+    *,
+    allowed_modules: frozenset[str] = ALLOWED_MODULES,
+    blocked_attrs: frozenset[str] = frozenset(),
+) -> None:
     """Raise :class:`SkillScriptPolicyError` if *source* violates the policy.
 
     Walks the entire AST and rejects:
 
     * any ``import``/``from import`` whose ROOT module is not in
-      :data:`ALLOWED_MODULES`;
-    * any attribute access or bare name in :data:`_BLOCKED_DUNDER_ATTRS`;
+      *allowed_modules* (default :data:`ALLOWED_MODULES`);
+    * any attribute access or bare name in :data:`_BLOCKED_DUNDER_ATTRS`,
+      plus any attribute in *blocked_attrs* (session mode adds data-lib IO
+      method names here);
     * any bare reference to a name in :data:`_BLOCKED_BUILTIN_NAMES`.
 
     This is the SAME check the subprocess applies; the parent calls it first as a
@@ -190,17 +197,19 @@ def validate_script_source(source: str) -> None:
         if isinstance(node, ast.Import):
             for alias in node.names:
                 root = alias.name.split(".", 1)[0]
-                if root not in ALLOWED_MODULES:
+                if root not in allowed_modules:
                     raise SkillScriptPolicyError(
                         f"import of '{alias.name}' is not allowed in a skill script"
                     )
         elif isinstance(node, ast.ImportFrom):
             root = (node.module or "").split(".", 1)[0]
-            if node.level != 0 or root not in ALLOWED_MODULES:
+            if node.level != 0 or root not in allowed_modules:
                 raise SkillScriptPolicyError(
                     f"import from '{node.module}' is not allowed in a skill script"
                 )
-        elif isinstance(node, ast.Attribute) and node.attr in _BLOCKED_DUNDER_ATTRS:
+        elif isinstance(node, ast.Attribute) and (
+            node.attr in _BLOCKED_DUNDER_ATTRS or node.attr in blocked_attrs
+        ):
             raise SkillScriptPolicyError(
                 f"access to '.{node.attr}' is not allowed in a skill script"
             )
@@ -231,7 +240,7 @@ def validate_script_source(source: str) -> None:
 # Restricted execution
 # ---------------------------------------------------------------------------
 
-def _facade_module(module: Any) -> Any:
+def _facade_module(module: Any, extra_drops: frozenset[str] = frozenset()) -> Any:
     """Return a safe facade over *module* exposing only non-module public attrs.
 
     SECURITY (CRITICAL — review CRIT-1, the R6 live-module-reach escape class).
@@ -248,7 +257,7 @@ def _facade_module(module: Any) -> Any:
     """
     facade = types.SimpleNamespace()
     for attr in dir(module):
-        if attr.startswith("_") or attr in _BLOCKED_DUNDER_ATTRS:
+        if attr.startswith("_") or attr in _BLOCKED_DUNDER_ATTRS or attr in extra_drops:
             continue
         try:
             value = getattr(module, attr)
@@ -374,6 +383,255 @@ def run_script(
     return envelope
 
 
+# ---------------------------------------------------------------------------
+# Session mode — persistent REPL for python_function tools
+# ---------------------------------------------------------------------------
+#
+# ``python -I -B _skill_script_runner.py --session`` runs a LINE-DELIMITED JSON
+# command loop over stdin/stdout instead of the one-shot envelope. The exec
+# namespace PERSISTS across commands (the run-scoped MemEx scratchpad lives in
+# this process); the parent keeps a JSON-able "shadow" fed by per-exec deltas.
+# Same trusted-computing-base rules as one-shot mode: pure stdlib, AST policy +
+# restricted builtins in-process, OS boundary (rlimits/env-scrub/SIGKILL) in
+# the parent. Exits on stdin EOF so an orphaned child never outlives its parent.
+
+# Data libraries importable in a session when the parent's init allows them.
+# Both are exposed as facades by default (module-typed attrs dropped => no
+# ``np.linalg``/``pd.api`` submodules; top-level API only) with the IO/eval
+# primitives below removed; ``data_lib_mode == "live"`` (trusted configs only)
+# returns the real modules.
+DATA_LIBS: frozenset[str] = frozenset({"pandas", "numpy"})
+
+# Module-level attrs dropped from data-lib facades: file/DB/pickle IO and
+# string-eval primitives that would bypass the no-open/no-eval posture.
+_DATA_LIB_FACADE_DROPS: dict[str, frozenset[str]] = {
+    "pandas": frozenset({
+        "read_pickle", "read_csv", "read_table", "read_fwf", "read_clipboard",
+        "read_excel", "read_json", "read_html", "read_xml", "read_hdf",
+        "read_feather", "read_parquet", "read_orc", "read_sas", "read_spss",
+        "read_sql", "read_sql_query", "read_sql_table", "read_gbq",
+        "read_stata", "to_pickle", "eval",
+    }),
+    "numpy": frozenset({
+        "load", "save", "savez", "savez_compressed", "loadtxt", "savetxt",
+        "genfromtxt", "fromfile", "memmap", "frombuffer",
+    }),
+}
+
+# Instance-method names rejected by the AST policy when data libs are active
+# (module facades can't see methods; serialization/DB sinks are blocked here,
+# residual plain-file writes are bounded by RLIMIT_FSIZE + the tempdir cwd).
+_DATA_LIB_BLOCKED_METHOD_ATTRS: frozenset[str] = frozenset({
+    "to_pickle", "read_pickle", "to_sql", "to_hdf", "tofile",
+})
+
+_SHADOW_VALUE_MAX_BYTES = 8 * 1024
+_SHADOW_TOTAL_MAX_BYTES = 256 * 1024
+
+
+class _Session:
+    """Persistent exec namespace + policy state for one session process."""
+
+    def __init__(self) -> None:
+        self.allowed: set[str] = set(ALLOWED_MODULES)
+        self.data_lib_mode = "facade"
+        self.max_output_bytes = _MAX_RESULT_BYTES_DEFAULT
+        self.namespace: dict[str, Any] = {"__builtins__": self._build_builtins()}
+        # name -> serialized JSON of the last shadow value (delta detection)
+        self._shadow_cache: dict[str, str] = {}
+
+    # -- imports ------------------------------------------------------------
+
+    def _guarded_session_import(
+        self,
+        name: str,
+        globals: dict[str, Any] | None = None,
+        locals: dict[str, Any] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        del globals, locals
+        if level != 0:
+            raise ImportError("relative imports are not allowed in a skill script")
+        root = name.split(".", 1)[0]
+        if root not in self.allowed:
+            available = ", ".join(sorted(self.allowed))
+            raise ImportError(
+                f"module '{name}' is not available in this session. Available: {available}"
+            )
+        module = __import__(name, fromlist=fromlist)
+        if root in DATA_LIBS:
+            if self.data_lib_mode == "live":
+                return module
+            return _facade_module(module, _DATA_LIB_FACADE_DROPS.get(root, frozenset()))
+        return _facade_module(module)
+
+    def _build_builtins(self) -> dict[str, Any]:
+        safe: dict[str, Any] = {
+            name: getattr(builtins, name) for name in _SAFE_BUILTIN_NAMES
+        }
+        safe["__import__"] = self._guarded_session_import
+        return safe
+
+    # -- shadow -------------------------------------------------------------
+
+    def _shadow_and_described(self) -> tuple[dict[str, Any], dict[str, str]]:
+        """JSON-able view of user bindings + type descriptors for the rest."""
+        shadow: dict[str, Any] = {}
+        described: dict[str, str] = {}
+        total = 0
+        for key, value in self.namespace.items():
+            if key.startswith("_") or key == "__builtins__":
+                continue
+            try:
+                encoded = json.dumps(value)
+            except (TypeError, ValueError):
+                encoded = None
+            if encoded is not None and len(encoded) <= _SHADOW_VALUE_MAX_BYTES:
+                if total + len(encoded) > _SHADOW_TOTAL_MAX_BYTES:
+                    described[key] = f"{type(value).__name__} (shadow budget exceeded)"
+                    continue
+                shadow[key] = value
+                total += len(encoded)
+            else:
+                detail = type(value).__name__
+                with contextlib.suppress(TypeError):
+                    detail += f" len={len(value)}"
+                described[key] = detail
+        return shadow, described
+
+    def _shadow_delta(self) -> tuple[dict[str, Any], dict[str, str]]:
+        shadow, described = self._shadow_and_described()
+        delta: dict[str, Any] = {}
+        for key, value in shadow.items():
+            encoded = json.dumps(value)
+            if self._shadow_cache.get(key) != encoded:
+                delta[key] = value
+                self._shadow_cache[key] = encoded
+        for gone in set(self._shadow_cache) - set(shadow):
+            del self._shadow_cache[gone]
+        return delta, described
+
+    # -- command handlers -----------------------------------------------------
+
+    def handle(self, command: dict[str, Any]) -> dict[str, Any]:
+        op = command.get("op")
+        if op == "init":
+            requested = command.get("extra_allowed_modules") or []
+            if isinstance(requested, list):
+                self.allowed |= {
+                    m for m in requested if isinstance(m, str) and m in DATA_LIBS
+                }
+            if command.get("data_lib_mode") == "live":
+                self.data_lib_mode = "live"
+            max_out = command.get("max_output_bytes")
+            if isinstance(max_out, int) and max_out > 0:
+                self.max_output_bytes = max_out
+            return {"ok": True, "op": "init"}
+        if op == "exec":
+            return self._exec(
+                str(command.get("code", "")),
+                command.get("args") or {},
+                command.get("bind_result"),
+            )
+        if op == "inject":
+            name = command.get("name")
+            if not (isinstance(name, str) and name.isidentifier() and not name.startswith("__")):
+                return {"ok": False, "error": f"invalid variable name: {name!r}"}
+            self.namespace[name] = command.get("value")
+            return {"ok": True, "op": "inject"}
+        if op == "snapshot":
+            shadow, described = self._shadow_and_described()
+            return {"ok": True, "op": "snapshot", "shadow": shadow, "described": described}
+        if op == "ping":
+            return {"ok": True, "op": "ping"}
+        if op == "shutdown":
+            return {"ok": True, "op": "shutdown"}
+        return {"ok": False, "error": f"unknown op: {op!r}"}
+
+    def _exec(
+        self, source: str, args: dict[str, Any], bind_result: Any
+    ) -> dict[str, Any]:
+        data_libs_active = bool(self.allowed & DATA_LIBS)
+        try:
+            validate_script_source(
+                source,
+                allowed_modules=frozenset(self.allowed),
+                blocked_attrs=(
+                    _DATA_LIB_BLOCKED_METHOD_ATTRS if data_libs_active else frozenset()
+                ),
+            )
+        except SkillScriptPolicyError as exc:
+            return {"ok": False, "error": str(exc), "error_type": "SkillScriptPolicyError"}
+
+        if isinstance(args, dict):
+            for key, value in args.items():
+                if isinstance(key, str) and key.isidentifier() and not key.startswith("__"):
+                    self.namespace[key] = value
+        self.namespace.pop("result", None)
+
+        buffer = io.StringIO()
+        try:
+            compiled = compile(source, "<python_function>", "exec")
+            with contextlib.redirect_stdout(buffer):
+                exec(compiled, self.namespace)  # noqa: S102 — restricted namespace is the boundary
+        except BaseException as exc:  # noqa: BLE001 — report ANY failure to the caller
+            captured = buffer.getvalue()
+            if len(captured) > self.max_output_bytes:
+                captured = captured[: self.max_output_bytes] + "\n... (output truncated)"
+            delta, described = self._shadow_delta()
+            return {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "error_type": type(exc).__name__,
+                "stdout": captured,
+                "shadow_delta": delta,
+                "described": described,
+            }
+
+        if isinstance(bind_result, str) and bind_result.isidentifier():
+            self.namespace[bind_result] = self.namespace.get("result")
+
+        stdout = buffer.getvalue()
+        if len(stdout) > self.max_output_bytes:
+            stdout = stdout[: self.max_output_bytes] + "\n... (output truncated)"
+        result_value, note = _coerce_result(
+            self.namespace.get("result"), max_bytes=self.max_output_bytes
+        )
+        delta, described = self._shadow_delta()
+        envelope: dict[str, Any] = {
+            "ok": True,
+            "result": result_value,
+            "stdout": stdout,
+            "shadow_delta": delta,
+            "described": described,
+        }
+        if note is not None:
+            envelope["note"] = note
+        return envelope
+
+
+def _session_main() -> int:
+    """Session entry point: line-delimited JSON commands until EOF/shutdown."""
+    session = _Session()
+    while True:
+        line = sys.stdin.readline()
+        if not line:  # EOF — parent died or closed stdin; never outlive it.
+            return 0
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            command = json.loads(line)
+            reply = session.handle(command)
+        except Exception as exc:  # noqa: BLE001 — the loop must never die mid-session
+            reply = {"ok": False, "error": f"bad command: {exc}", "error_type": type(exc).__name__}
+        sys.stdout.write(json.dumps(reply) + "\n")
+        sys.stdout.flush()
+        if reply.get("op") == "shutdown":
+            return 0
+
+
 def _main() -> int:
     """Subprocess entry point: stdin JSON -> run -> stdout JSON envelope."""
     try:
@@ -395,4 +653,6 @@ def _main() -> int:
 
 
 if __name__ == "__main__":
+    if "--session" in sys.argv[1:]:
+        raise SystemExit(_session_main())
     raise SystemExit(_main())

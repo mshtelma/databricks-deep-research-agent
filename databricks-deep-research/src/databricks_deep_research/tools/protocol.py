@@ -76,6 +76,14 @@ class ToolKind(StrEnum):
     table_load = "table_load"
     table_aggregate = "table_aggregate"
     mcp = "mcp"
+    # Invoke an existing UC scalar function (catalog.schema.fn) via SQL under
+    # the caller's OBO identity (see tools.builtins.uc_function.UCFunctionTool).
+    uc_function = "uc_function"
+    # Fixed design-time Python code, sandboxed (subprocess session by default).
+    python_function = "python_function"
+    # Host-curated catalog tool resolved by dict lookup (config.key) — the safe
+    # sibling of `decorated` for stored workflow definitions.
+    registered = "registered"
     custom = "custom"
 
 
@@ -97,6 +105,7 @@ DATABRICKS_BOUND_TOOL_KINDS: frozenset[str] = frozenset(
         ToolKind.table_aggregate,
         ToolKind.compute,
         ToolKind.compute_namespace,
+        ToolKind.uc_function,
     }
 )
 
@@ -113,6 +122,8 @@ _TOOL_KIND_TO_SOURCE_KIND: dict[str, str] = {
     ToolKind.genie: SourceKind.sql_analytics,
     ToolKind.knowledge_assistant: SourceKind.qa_assistant,
     ToolKind.compute: SourceKind.builtin,
+    ToolKind.python_function: SourceKind.builtin,  # citeable decls flip per-instance
+    ToolKind.uc_function: SourceKind.sql_analytics,
     ToolKind.compute_namespace: SourceKind.builtin,
     ToolKind.table_discovery: SourceKind.text_table,
     ToolKind.table_search: SourceKind.text_table,
@@ -162,6 +173,7 @@ _TOOL_KIND_REQUIRED_CTX: dict[str, frozenset[str]] = {
     ToolKind.table_aggregate: frozenset(
         {"table_registry", "schema_cache", "sql_executor"}
     ),
+    ToolKind.uc_function: frozenset({"sql_executor"}),
     # web_crawl, file_search, compute, compute_namespace, custom: no required ctx
 }
 

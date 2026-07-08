@@ -73,11 +73,20 @@ class StatementExecutionTableSQL:
         warehouse_id: str,
         timeout_sec: float = 30.0,
         poll_interval_sec: float = 1.0,
+        catalog: str | None = None,
+        schema: str | None = None,
     ) -> None:
         self._workspace_client = workspace_client
         self._warehouse_id = warehouse_id
         self._timeout_sec = timeout_sec
         self._poll_interval_sec = poll_interval_sec
+        # Optional session context. When set, statements run as if
+        # ``USE CATALOG <catalog>; USE SCHEMA <schema>`` were issued first — the
+        # only way to run ``SHOW USER FUNCTIONS`` cross-catalog (a 3-part ``IN``
+        # reference is unsupported). Default ``None`` = no context (table tools
+        # pass fully-qualified names and are unaffected).
+        self._catalog = catalog
+        self._schema = schema
 
     def __call__(
         self,
@@ -96,6 +105,8 @@ class StatementExecutionTableSQL:
             warehouse_id=self._warehouse_id,
             parameters=params or None,
             wait_timeout=f"{initial_wait}s",
+            catalog=self._catalog,
+            schema=self._schema,
         )
         started = time.monotonic()
         while True:
@@ -185,7 +196,7 @@ def wire_statement_execution_text_table_context(
             "TEXT_TABLE_WIRING_INCOMPLETE warehouse_id=MISSING "
             "reason=STORAGE_WAREHOUSE_ID and TABLE_TOOLS_WAREHOUSE_ID are unset. "
             "Workflows declaring table_search/table_read/table_neighbors/table_load/"
-            "table_aggregate will fail strict tool resolution."
+            "table_aggregate/uc_function will fail strict tool resolution."
         )
 
     return ctx

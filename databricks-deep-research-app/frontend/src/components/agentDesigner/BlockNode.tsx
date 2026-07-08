@@ -120,8 +120,11 @@ function subdescription(block: Block, registry: RegistryResponse): string {
       }
       return `Agent · ${(cfg['model_tier'] as string | undefined) ?? 'analytical'}`;
     }
-    case 'tool':
-      return `Tool · ${(cfg['tool_name'] as string | undefined) ?? '<unbound>'}`;
+    case 'tool': {
+      const ref = cfg['ref'] as { name?: string } | string | undefined;
+      const boundName = typeof ref === 'string' ? ref : ref?.name;
+      return `Tool · ${boundName || '<unbound>'}`;
+    }
     case 'parallel':
       return `Parallel · ${block.children?.length ?? 0} children`;
     case 'sequence':

@@ -31,7 +31,7 @@ from databricks_deep_research.events.types import (
 )
 from databricks_deep_research.templates.renderer import SafeTemplateRenderer
 from databricks_deep_research.tools.factory import ToolFactoryContext
-from databricks_deep_research.tools.protocol import ToolDefinition
+from databricks_deep_research.tools.protocol import ToolContext, ToolDefinition, ToolResult
 from databricks_deep_research.tools.resolver import ToolResolver
 from databricks_deep_research.workflow.conditions import ConditionBranch, StateCondition
 from databricks_deep_research.workflow.definition import (
@@ -77,6 +77,33 @@ def _make_definition(root: WorkflowNode) -> WorkflowDefinition:
         name="Test Workflow",
         root=root,
     )
+
+
+class _DirectTool:
+    """Minimal tool that echoes validated arguments as JSON content."""
+
+    def __init__(self, name: str = "calculate_pct_change") -> None:
+        self.arguments: dict[str, Any] | None = None
+        self._definition = ToolDefinition(
+            name=name,
+            description="Direct test tool",
+            parameters={"type": "object", "properties": {}},
+        )
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return self._definition
+
+    def validate_arguments(self, arguments: dict[str, Any]) -> dict[str, Any]:
+        self.arguments = arguments
+        return arguments
+
+    async def execute(
+        self,
+        arguments: dict[str, Any],
+        context: ToolContext,  # noqa: ARG002 - protocol fixture
+    ) -> ToolResult:
+        return ToolResult(content=json.dumps(arguments, sort_keys=True))
 
 
 class TestStructuredOutputSerialization:
@@ -146,6 +173,7 @@ class TestStructuredOutputSerialization:
         assert evt.final_report == "# Report\n\nbody"  # type: ignore[attr-defined]
         assert evt.structured_output is None  # type: ignore[attr-defined]
 
+
 # ---------------------------------------------------------------------------
 # Sequence
 # ---------------------------------------------------------------------------
@@ -163,9 +191,7 @@ class TestSequenceNode:
             events=[],
         )
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             execution_order.append(node_id)
             return AgentOutput(
                 content=f"result-{node_id}",
@@ -222,6 +248,44 @@ class TestSequenceNode:
 
 
 # ---------------------------------------------------------------------------
+# Tool
+# ---------------------------------------------------------------------------
+
+
+class TestToolNode:
+    @pytest.mark.asyncio
+    async def test_tool_node_resolves_declared_workflow_tool_through_resolver(
+        self,
+    ) -> None:
+        """Direct tool steps use the same resolver path as agent-bound tools."""
+        tool = _DirectTool("calculate_pct_change")
+        resolver = ToolResolver()
+        resolver.override("calculate_pct_change", tool)
+        root = WorkflowNode(
+            id="transform",
+            type=NodeType.tool,
+            label="Transform",
+            config={
+                "ref": {"type": "builtin", "name": "calculate_pct_change"},
+                "input_mapping": {"value": "baseline_revenue"},
+                "output_key": "pct_change",
+            },
+        )
+        executor = WorkflowExecutor(
+            _make_definition(root),
+            _mock_llm_client(),
+            tool_resolver=resolver,
+        )
+        state = WorkflowState(query="calculate")
+        state.append("source", "baseline_revenue", 100)
+
+        await _collect_events(executor, state)
+
+        assert tool.arguments == {"value": 100}
+        assert state.get("pct_change") == '{"value": 100}'
+
+
+# ---------------------------------------------------------------------------
 # Parallel
 # ---------------------------------------------------------------------------
 
@@ -232,9 +296,7 @@ class TestParallelNode:
         """Parallel node spawns children concurrently and collects events."""
         executed: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             executed.append(node_id)
             return AgentOutput(
                 content=f"result-{node_id}",
@@ -296,9 +358,7 @@ class TestLoopNode:
         """Loop runs up to max_iterations when condition never fires."""
         call_count = 0
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             nonlocal call_count
             call_count += 1
             return AgentOutput(
@@ -348,9 +408,7 @@ class TestLoopNode:
         """Loop exits early when the until-condition evaluates to True."""
         call_count = 0
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             nonlocal call_count
             call_count += 1
             # On second call, set state so condition fires
@@ -399,9 +457,7 @@ class TestLoopNode:
         """Loop does not exit before min_iterations even if condition is met."""
         call_count = 0
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             nonlocal call_count
             call_count += 1
             st = kwargs.get("state")
@@ -456,9 +512,7 @@ class TestConditionalNode:
         """Conditional selects the first matching condition's branch."""
         executed_children: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             executed_children.append(node_id)
             return AgentOutput(content="branch", output_key="output", events=[])
 
@@ -509,9 +563,7 @@ class TestConditionalNode:
         """Conditional respects ConditionBranch.child_index, not condition list index."""
         executed_children: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             executed_children.append(node_id)
             return AgentOutput(content="branch", output_key="output", events=[])
 
@@ -565,9 +617,7 @@ class TestConditionalNode:
         """Conditional falls through to default_branch when no condition matches."""
         executed_children: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             executed_children.append(node_id)
             return AgentOutput(content="default", output_key="output", events=[])
 
@@ -618,9 +668,7 @@ class TestConditionalNode:
         """Missing condition operands fail closed instead of selecting default_branch."""
         executed_children: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             executed_children.append(node_id)
             return AgentOutput(content="branch", output_key="output", events=[])
 
@@ -674,9 +722,8 @@ class TestAgentNode:
     @pytest.mark.asyncio
     async def test_agent_writes_output_to_state(self) -> None:
         """Agent node calls execute_agent and output is written to state."""
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             # The harness writes to state internally; simulate that
             state = kwargs.get("state")
             if state:
@@ -728,6 +775,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_skip_on_error(self) -> None:
         """Node with on_error=skip emits NodeSkippedEvent and continues."""
+
         async def failing_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             raise RuntimeError("boom")
 
@@ -787,9 +835,7 @@ class TestErrorHandling:
             type=NodeType.agent,
             label="Retryable Agent",
             config={"subtype": "researcher", "output_key": "out"},
-            error_handling=ErrorConfig(
-                on_error="retry", max_retries=3, retry_delay_seconds=0.01
-            ),
+            error_handling=ErrorConfig(on_error="retry", max_retries=3, retry_delay_seconds=0.01),
         )
         defn = _make_definition(root)
         executor = WorkflowExecutor(defn, _mock_llm_client())
@@ -811,6 +857,7 @@ class TestErrorHandling:
     @pytest.mark.asyncio
     async def test_error_propagates_with_fail_policy(self) -> None:
         """Node with default on_error=fail raises the exception."""
+
         async def failing_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             raise RuntimeError("fatal error")
 
@@ -825,10 +872,13 @@ class TestErrorHandling:
         executor = WorkflowExecutor(defn, _mock_llm_client())
         state = WorkflowState(query="test")
 
-        with patch(
-            "databricks_deep_research.workflow.executor.execute_agent",
-            side_effect=failing_agent,
-        ), pytest.raises(RuntimeError, match="fatal error"):
+        with (
+            patch(
+                "databricks_deep_research.workflow.executor.execute_agent",
+                side_effect=failing_agent,
+            ),
+            pytest.raises(RuntimeError, match="fatal error"),
+        ):
             await _collect_events(executor, state)
 
 
@@ -878,9 +928,8 @@ class TestRunWorkflow:
     @pytest.mark.asyncio
     async def test_run_workflow_returns_state_and_events(self) -> None:
         """The run_workflow convenience function collects events."""
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             state = kwargs.get("state")
             if state:
                 state.append(node_id, "output", "final result")
@@ -913,9 +962,7 @@ class TestRunWorkflow:
             "databricks_deep_research.workflow.executor.execute_agent",
             side_effect=fake_execute_agent,
         ):
-            state, events = await run_workflow(
-                defn, llm, initial_state={"query": "hello"}
-            )
+            state, events = await run_workflow(defn, llm, initial_state={"query": "hello"})
 
         assert state.get("output") == "final result"
         assert any(isinstance(e, WorkflowStartedEvent) for e in events)
@@ -938,10 +985,13 @@ class TestRunWorkflow:
         )
         llm = _mock_llm_client()
 
-        with patch(
-            "databricks_deep_research.workflow.executor.execute_agent",
-            side_effect=failing_execute_agent,
-        ), pytest.raises(WorkflowExecutionError, match="fatal agent crash") as exc_info:
+        with (
+            patch(
+                "databricks_deep_research.workflow.executor.execute_agent",
+                side_effect=failing_execute_agent,
+            ),
+            pytest.raises(WorkflowExecutionError, match="fatal agent crash") as exc_info,
+        ):
             await run_workflow(defn, llm, initial_state={"query": "hello"})
 
         assert isinstance(exc_info.value.cause, RuntimeError)
@@ -981,8 +1031,10 @@ class TestExtractItems:
 
     def test_from_object_with_attr(self) -> None:
         """_extract_items navigates object attributes."""
+
         class Plan:
             steps = [{"id": "s1"}, {"id": "s2"}]
+
         items = _extract_items(Plan(), "steps")
         assert len(items) == 2
 
@@ -1000,9 +1052,7 @@ class TestParallelNodeMergedQueue:
 
         executed: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             await asyncio.sleep(0.01)  # simulate work
             executed.append(node_id)
             return AgentOutput(
@@ -1076,9 +1126,32 @@ class TestReflectorObservationCap:
         from databricks_deep_research.pools.pool_state import PoolConfig, PoolState
 
         pool = PoolState(PoolConfig(name="sources", dedup_content_hash=False))
-        pool.add({"url": "https://a.com", "title": "A", "snippet": "some text", "admission_status": "accepted", "evidence_quality": "full_text"})
-        pool.add({"url": "https://b.com", "title": "B", "admission_status": "accepted_low_value", "evidence_quality": "metadata_only"})
-        pool.add({"url": "https://a.com/other", "title": "C", "snippet": "more", "admission_status": "accepted", "evidence_quality": "full_text"})
+        pool.add(
+            {
+                "url": "https://a.com",
+                "title": "A",
+                "snippet": "some text",
+                "admission_status": "accepted",
+                "evidence_quality": "full_text",
+            }
+        )
+        pool.add(
+            {
+                "url": "https://b.com",
+                "title": "B",
+                "admission_status": "accepted_low_value",
+                "evidence_quality": "metadata_only",
+            }
+        )
+        pool.add(
+            {
+                "url": "https://a.com/other",
+                "title": "C",
+                "snippet": "more",
+                "admission_status": "accepted",
+                "evidence_quality": "full_text",
+            }
+        )
 
         result = _format_source_quality({"sources": pool})
 
@@ -1100,9 +1173,7 @@ class TestAlwaysEvaluate:
         """Evaluator runs on step 0 and under-min exhaustion triggers a degraded exit."""
         evaluation_calls: list[str] = []
 
-        async def fake_execute_agent(
-            node_id: str, **kwargs: Any
-        ) -> AgentOutput:
+        async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
             config = kwargs.get("config")
             # Detect evaluator vs researcher by subtype
             if config and config.subtype == "reflector":
@@ -1191,7 +1262,8 @@ class TestSynthesisState:
         observations.add("observation 1")
 
         _populate_synthesis_state(
-            "pe_node", state,
+            "pe_node",
+            state,
             {"sources": sources, "observations": observations},
             total_items_processed=3,
             replan_cycles=1,
@@ -1208,9 +1280,7 @@ class TestSynthesisState:
 async def test_plan_and_execute_treats_adjust_as_replan() -> None:
     evaluation_calls = 0
 
-    async def fake_execute_agent(
-        node_id: str, **kwargs: Any
-    ) -> AgentOutput:
+    async def fake_execute_agent(node_id: str, **kwargs: Any) -> AgentOutput:
         nonlocal evaluation_calls
         config = kwargs.get("config")
         if config and config.subtype == "planner":
@@ -1261,10 +1331,7 @@ async def test_plan_and_execute_treats_adjust_as_replan() -> None:
     ):
         events = await _collect_events(executor, state)
 
-    decisions = [
-        event for event in events
-        if event.__class__.__name__ == "EvaluationDecisionEvent"
-    ]
+    decisions = [event for event in events if event.__class__.__name__ == "EvaluationDecisionEvent"]
     replans = _events_of_type(events, ReplanTriggeredEvent)
 
     assert evaluation_calls >= 1
@@ -1310,10 +1377,13 @@ async def test_plan_and_execute_empty_plan_replans_and_fails_when_no_progress() 
     executor = WorkflowExecutor(_make_definition(root), _mock_llm_client())
     state = WorkflowState(query="test")
 
-    with patch(
-        "databricks_deep_research.workflow.executor.execute_agent",
-        side_effect=fake_execute_agent,
-    ), pytest.raises(PlanningContractError, match="zero executable steps"):
+    with (
+        patch(
+            "databricks_deep_research.workflow.executor.execute_agent",
+            side_effect=fake_execute_agent,
+        ),
+        pytest.raises(PlanningContractError, match="zero executable steps"),
+    ):
         await _collect_events(executor, state)
 
     assert planner_calls == 2
@@ -1330,12 +1400,18 @@ async def test_plan_and_execute_under_min_iterations_triggers_replan_then_exit()
             planner_calls += 1
             if planner_calls == 1:
                 return AgentOutput(
-                    content={"title": "Plan A", "steps": [{"id": "step-1", "title": "Research A", "needs_search": False}]},
+                    content={
+                        "title": "Plan A",
+                        "steps": [{"id": "step-1", "title": "Research A", "needs_search": False}],
+                    },
                     output_key="plan",
                     events=[],
                 )
             return AgentOutput(
-                content={"title": "Plan B", "steps": [{"id": "step-2", "title": "Research B", "needs_search": False}]},
+                content={
+                    "title": "Plan B",
+                    "steps": [{"id": "step-2", "title": "Research B", "needs_search": False}],
+                },
                 output_key="plan",
                 events=[],
             )
@@ -1430,11 +1506,15 @@ async def test_available_source_catalog_uses_body_tools_and_excludes_helpers() -
         tools=[
             ToolDeclaration(name="web_search", kind="web_search", description="Public web search"),
             ToolDeclaration(name="web_crawl", kind="web_crawl", description="Crawler helper"),
-            ToolDeclaration(name="vector_search", kind="vector_search", description="Internal docs"),
+            ToolDeclaration(
+                name="vector_search", kind="vector_search", description="Internal docs"
+            ),
         ],
         sources=[
             SourceDefinition(name="web_search", kind="web", description="Public web search"),
-            SourceDefinition(name="vector_search", kind="vector_index", description="Internal docs"),
+            SourceDefinition(
+                name="vector_search", kind="vector_index", description="Internal docs"
+            ),
         ],
         root=WorkflowNode(
             id="root",
@@ -1611,9 +1691,7 @@ async def test_agent_compute_namespace_gets_table_and_vector_providers() -> None
         ),
     )
 
-    async def fake_execute_agent(
-        node_id: str, tools: list[Any], **kwargs: Any
-    ) -> AgentOutput:
+    async def fake_execute_agent(node_id: str, tools: list[Any], **kwargs: Any) -> AgentOutput:
         config = kwargs["config"]
         assert "## Available text tables" in config.system_prompt
         assert "binding: docs" in config.system_prompt
@@ -1709,10 +1787,11 @@ def test_planner_event_uses_normalized_executable_steps() -> None:
     assert events[0].steps[0]["title"] == "Environmental Impacts of Lithium Mining for EV Batteries"
 
 
-
 class TestExecutablePlanNormalization:
     def test_normalize_executable_plan_contract_synthesizes_step(self) -> None:
-        contract = _normalize_executable_plan_contract({"title": "Research Plan", "thought": "Investigate the topic", "steps": []}, "steps")
+        contract = _normalize_executable_plan_contract(
+            {"title": "Research Plan", "thought": "Investigate the topic", "steps": []}, "steps"
+        )
         assert len(contract["items"]) == 1
         step = contract["items"][0]
         assert step["title"] == "Research Plan"
@@ -1721,12 +1800,18 @@ class TestExecutablePlanNormalization:
 
 class TestTypedPlanContract:
     def test_extract_raw_plan_contract(self) -> None:
-        contract = _extract_raw_plan_contract({"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]}, "steps")
+        contract = _extract_raw_plan_contract(
+            {"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]}, "steps"
+        )
         assert isinstance(contract, NormalizedPlanContract)
         assert contract.title == "Plan"
         assert len(contract.raw_items) == 2
 
     def test_finalize_plan_contract_filters_empty_items(self) -> None:
-        raw = _extract_raw_plan_contract({"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]}, "steps")
-        finalized = _finalize_plan_contract(raw, {"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]})
+        raw = _extract_raw_plan_contract(
+            {"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]}, "steps"
+        )
+        finalized = _finalize_plan_contract(
+            raw, {"title": "Plan", "thought": "Think", "steps": [{}, {"title": "Step"}]}
+        )
         assert len(finalized.items) == 1

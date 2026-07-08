@@ -157,7 +157,7 @@ describe('ToolsPanel', () => {
   // 1. Empty state
   it('renders empty state when no tools are declared', () => {
     useAgentEditorStore.setState({ ast: makeAst(), selectedPath: null });
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     expect(screen.getByText('No tools declared yet')).toBeInTheDocument();
   });
 
@@ -170,7 +170,7 @@ describe('ToolsPanel', () => {
       ],
     });
     useAgentEditorStore.setState({ ast, selectedPath: null });
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
 
     // Both tool names appear
     expect(screen.getByText('ws1')).toBeInTheDocument();
@@ -191,7 +191,7 @@ describe('ToolsPanel', () => {
   // 3. Add Tool button opens AddToolDialog
   it('Add Tool button opens AddToolDialog', () => {
     useAgentEditorStore.setState({ ast: makeAst(), selectedPath: null });
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
 
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
 
@@ -200,31 +200,41 @@ describe('ToolsPanel', () => {
     expect(dialog).toBeInTheDocument();
     // Dialog title is rendered as an h2 inside the dialog
     expect(dialog.querySelector('h2')).toHaveTextContent('Add tool');
+    // Search-first: the picker opens on a focused search box, not dropdowns.
+    expect(screen.getByRole('textbox', { name: /search tools/i })).toBeInTheDocument();
   });
 
-  // 4. AddToolDialog submit calls declareTool with correct args
-  it('AddToolDialog submit calls declareTool with selected kind and name', () => {
+  // 4. Zero-required kinds declare immediately from the search list
+  it('declares a zero-required kind immediately with an auto-generated name', () => {
     useAgentEditorStore.setState({ ast: makeAst(), selectedPath: null });
     const declareSpy = vi.spyOn(useAgentEditorStore.getState(), 'declareTool');
 
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
 
-    // Dialog is open — pick "Web Search" kind card
-    fireEvent.click(screen.getByText('Web Search'));
-
-    // Name field is auto-filled with "web_search"
-    const nameInput = screen.getByRole('textbox');
-    expect((nameInput as HTMLInputElement).value).toBe('web_search');
-
-    // Submit via the dialog's footer button (not the panel's "Add Tool" trigger)
-    const dialog = screen.getByRole('dialog');
-    // Find the enabled submit button inside the dialog footer
-    const footerBtns = Array.from(dialog.querySelectorAll('button'));
-    const addBtn = footerBtns.find((b) => b.textContent?.trim() === 'Add tool' && !b.disabled);
-    fireEvent.click(addBtn!);
+    // Clicking the "Web Search" result declares without a name prompt.
+    fireEvent.click(screen.getByRole('button', { name: /web search/i }));
 
     expect(declareSpy).toHaveBeenCalledWith('web_search', 'web_search', {});
+    declareSpy.mockRestore();
+  });
+
+  it('auto-suffixes the generated name when it collides with a declared tool', () => {
+    const ast = makeAst({
+      tools: [{ kind: 'web_search', name: 'web_search', config: {} }],
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: null });
+    const declareSpy = vi.spyOn(useAgentEditorStore.getState(), 'declareTool');
+
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
+    // Two "web search" matches now exist: the declared tool (existing group)
+    // and the kind row. Pick the kind row (it carries the family suffix).
+    const rows = screen.getAllByRole('button', { name: /web search/i });
+    const kindRow = rows.find((row) => row.textContent?.includes('Built-in'));
+    fireEvent.click(kindRow!);
+
+    expect(declareSpy).toHaveBeenCalledWith('web_search', 'web_search_2', {});
     declareSpy.mockRestore();
   });
 
@@ -234,7 +244,8 @@ describe('ToolsPanel', () => {
 
     renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
-    fireEvent.click(screen.getByText('Vector Search'));
+    // Required config → the configure step opens for the selected kind.
+    fireEvent.click(screen.getByRole('button', { name: /vector search/i }));
 
     fireEvent.change(screen.getByRole('combobox', { name: /vector search index/i }), {
       target: { value: 'main.sales.customer_index' },
@@ -259,7 +270,7 @@ describe('ToolsPanel', () => {
 
     renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
-    fireEvent.click(screen.getByText('Vector Search'));
+    fireEvent.click(screen.getByRole('button', { name: /vector search/i }));
 
     const dialog = screen.getByRole('dialog');
     const addBtn = Array.from(dialog.querySelectorAll('button')).find(
@@ -272,38 +283,71 @@ describe('ToolsPanel', () => {
     declareSpy.mockRestore();
   });
 
-  // 5. AddToolDialog rejects duplicate names
-  it('AddToolDialog shows error and does not call declareTool again for duplicate name', () => {
+  // 5. Explicit duplicate names (Advanced) still surface an error
+  it('AddToolDialog shows error for an explicit duplicate name in Advanced', () => {
     const ast = makeAst({
-      tools: [{ kind: 'web_search', name: 'web_search', config: {} }],
+      tools: [{ kind: 'web_search', name: 'taken_name', config: {} }],
     });
     useAgentEditorStore.setState({ ast, selectedPath: null });
     const declareSpy = vi.spyOn(useAgentEditorStore.getState(), 'declareTool');
 
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /add tool/i }));
+    fireEvent.click(screen.getByRole('button', { name: /vector search/i }));
 
-    // Select web_search kind — name auto-fills to "web_search" (duplicate)
-    fireEvent.click(screen.getByText('Web Search'));
+    fireEvent.change(screen.getByRole('combobox', { name: /vector search index/i }), {
+      target: { value: 'main.sales.customer_index' },
+    });
+    fireEvent.change(screen.getByLabelText(/local tool name/i), {
+      target: { value: 'taken_name' },
+    });
 
-    // Submit via the dialog's enabled footer "Add Tool" button
     const dialog = screen.getByRole('dialog');
-    const footerBtns = Array.from(dialog.querySelectorAll('button'));
-    const addBtn = footerBtns.find((b) => b.textContent?.trim() === 'Add tool' && !b.disabled);
+    const addBtn = Array.from(dialog.querySelectorAll('button')).find(
+      (b) => b.textContent?.trim() === 'Add tool' && !b.disabled,
+    );
     fireEvent.click(addBtn!);
 
-    // Error message must be visible
     expect(screen.getByRole('alert')).toHaveTextContent('Tool name already exists');
-
-    // declareTool was called once (it returned false), not called a second time
-    expect(declareSpy).toHaveBeenCalledTimes(1);
+    expect(declareSpy).toHaveBeenCalledTimes(1); // returned false, no retry
     declareSpy.mockRestore();
+  });
+
+  // Used-by badge (tool-UX plan Phase 4)
+  it('shows how many places use each declared tool', () => {
+    const ast = makeAst({
+      tools: [
+        { kind: 'web_search', name: 'ws1', config: {} },
+        { kind: 'vector_search', name: 'vs1', config: { index_name: 'main.s.i' } },
+      ],
+      root: {
+        id: 'root-id',
+        type: 'sequence',
+        label: 'Root',
+        config: {},
+        children: [
+          { id: 'agent-1', type: 'agent', label: 'A', config: { tools: ['ws1'] }, children: [] },
+          {
+            id: 'tool-1',
+            type: 'tool',
+            label: 'T',
+            config: { ref: { type: 'builtin', name: 'ws1' } },
+            children: [],
+          },
+        ],
+      },
+    });
+    useAgentEditorStore.setState({ ast, selectedPath: null });
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+
+    expect(screen.getByText(/used by 2/)).toBeInTheDocument(); // ws1: agent + tool node
+    expect(screen.getByText(/unused/)).toBeInTheDocument(); // vs1: declared only
   });
 
   // 6. Bind Tools is disabled when no agent is selected
   it('Bind Tools button is disabled when no agent block is selected', () => {
     useAgentEditorStore.setState({ ast: makeAst(), selectedPath: null });
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
 
     const bindBtn = screen.getByRole('button', { name: /bind tools/i });
     expect(bindBtn).toBeDisabled();
@@ -313,7 +357,7 @@ describe('ToolsPanel', () => {
   it('Bind Tools button opens BindToolDialog when an agent block is selected', () => {
     const ast = makeAstWithAgent();
     useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
 
     const bindBtn = screen.getByRole('button', { name: /bind tools/i });
     expect(bindBtn).not.toBeDisabled();
@@ -350,7 +394,7 @@ describe('ToolsPanel', () => {
     useAgentEditorStore.setState({ ast, selectedPath: 'root.children.0' });
     const updateSpy = vi.spyOn(useAgentEditorStore.getState(), 'updateBlock');
 
-    render(<ToolsPanel registry={FIXTURE_REGISTRY} />);
+    renderWithQuery(<ToolsPanel registry={FIXTURE_REGISTRY} />);
     fireEvent.click(screen.getByRole('button', { name: /bind tools/i }));
 
     // Dialog is open — check "ws1"

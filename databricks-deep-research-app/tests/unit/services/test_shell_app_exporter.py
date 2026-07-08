@@ -42,11 +42,20 @@ def _agent_revision(
     web_search: bool = False,
     web_search_provider: str | None = None,
     table_tools: bool = False,
+    uc_function: bool = False,
 ) -> tuple[MagicMock, MagicMock]:
     agent = MagicMock(id=uuid4(), name="Deep Research Agent")
     tools: list[dict[str, object]] = []
     if custom_tool:
         tools.append({"name": "mytool", "kind": "custom", "config": {}})
+    if uc_function:
+        tools.append(
+            {
+                "name": "pct_change",
+                "kind": "uc_function",
+                "config": {"function": "main.officeqa_benchmark.pct_change"},
+            }
+        )
     if web_search:
         ws_config: dict[str, object] = {}
         # No provider = inherit the workspace default (databricks); an explicit
@@ -521,6 +530,27 @@ class TestTranslate:
         assert "main.officeqa_benchmark.treasury_chunks" in agent_yaml
         assert artifact.metadata["requires_sql_warehouse"] == "true"
         assert artifact.metadata["storage_warehouse_id_configured"] == "true"
+
+    @pytest.mark.asyncio
+    async def test_uc_function_bundle_binds_storage_warehouse(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        # A uc_function invokes a UC function via the same OBO SQL executor, so a
+        # uc_function-only exported agent must provision the SQL warehouse too.
+        monkeypatch.setenv("TABLE_TOOLS_WAREHOUSE_ID", "d837825f69a03500")
+        translator = ShellAppExporter()
+        agent, revision = _agent_revision(uc_function=True)
+        artifact = await translator.translate(agent, revision, _valid_config())
+        with zipfile.ZipFile(io.BytesIO(artifact.payload)) as zf:
+            databricks_yml = zf.read("databricks.yml").decode("utf-8")
+            agent_yaml = zf.read("agent.yaml").decode("utf-8")
+
+        assert "STORAGE_WAREHOUSE_ID" in databricks_yml
+        assert "sql_warehouse:" in databricks_yml
+        assert "id: 'd837825f69a03500'" in databricks_yml
+        assert "uc_function" in agent_yaml
+        assert artifact.metadata["requires_sql_warehouse"] == "true"
 
     @pytest.mark.asyncio
     async def test_workflow_name_alone_does_not_bind_brave_secret(self) -> None:

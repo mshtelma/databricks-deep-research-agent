@@ -259,6 +259,188 @@ describe('moveBlock', () => {
   });
 });
 
+describe('tool declaration lifecycle references', () => {
+  it('renames local tool step refs with the declaration', () => {
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'decorated', name: 'old_tool', config: { import: 'pkg.mod:old_tool' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'tool-1',
+            type: 'tool',
+            label: 'Call tool',
+            config: { ref: { type: 'builtin', name: 'old_tool' } },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().updateTool('old_tool', { name: 'new_tool' })).toBe(true);
+
+    const toolBlock = store().ast?.root.children?.[0];
+    expect(toolBlock?.config.ref).toEqual({ type: 'builtin', name: 'new_tool' });
+  });
+
+  it('does not rewrite direct external tool step refs', () => {
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'uc_function', name: 'pct_change', config: { function_name: 'main.metrics.pct_change' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'tool-1',
+            type: 'tool',
+            label: 'Direct UC call',
+            config: { ref: { type: 'uc_function', name: 'main.metrics.pct_change' } },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().updateTool('pct_change', { name: 'pct_change_v2' })).toBe(true);
+
+    const toolBlock = store().ast?.root.children?.[0];
+    expect(toolBlock?.config.ref).toEqual({
+      type: 'uc_function',
+      name: 'main.metrics.pct_change',
+    });
+  });
+
+  it('preserves direct external refs in agent tool bindings', () => {
+    const directRef = { type: 'uc_function', name: 'main.metrics.pct_change' };
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'uc_function', name: 'pct_change', config: { function_name: 'main.metrics.pct_change' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'agent-1',
+            type: 'agent',
+            label: 'Agent',
+            config: { tools: ['pct_change', directRef] },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().updateTool('pct_change', { name: 'pct_change_v2' })).toBe(true);
+
+    const agentBlock = store().ast?.root.children?.[0];
+    expect(agentBlock?.config.tools).toEqual(['pct_change_v2', directRef]);
+  });
+
+  it('clears local tool step refs when a declaration is removed', () => {
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'decorated', name: 'old_tool', config: { import: 'pkg.mod:old_tool' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'tool-1',
+            type: 'tool',
+            label: 'Call tool',
+            config: { ref: { type: 'builtin', name: 'old_tool' } },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().removeTool('old_tool')).toBe(true);
+
+    const toolBlock = store().ast?.root.children?.[0];
+    expect(toolBlock?.config.ref).toEqual({ type: 'builtin', name: '' });
+  });
+
+  it('updates local refs inside plan_and_execute config.body', () => {
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'decorated', name: 'old_tool', config: { import: 'pkg.mod:old_tool' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'plan-1',
+            type: 'plan_and_execute',
+            label: 'Plan',
+            config: {
+              body: {
+                id: 'tool-1',
+                type: 'tool',
+                label: 'Call tool',
+                config: { ref: { type: 'builtin', name: 'old_tool' } },
+                children: [],
+              },
+            },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().updateTool('old_tool', { name: 'new_tool' })).toBe(true);
+
+    const planBlock = store().ast?.root.children?.[0];
+    const body = planBlock?.config.body as Block;
+    expect(body.config.ref).toEqual({ type: 'builtin', name: 'new_tool' });
+  });
+
+  it('updates local tool bindings inside plan_and_execute planner and evaluator configs', () => {
+    const directRef = { type: 'uc_function', name: 'main.metrics.pct_change' };
+    const ast: AST = {
+      ...makeAst(),
+      tools: [{ kind: 'decorated', name: 'old_tool', config: { import: 'pkg.mod:old_tool' } }],
+      root: {
+        ...makeAst().root,
+        children: [
+          {
+            id: 'plan-1',
+            type: 'plan_and_execute',
+            label: 'Plan',
+            config: {
+              planner: { tools: ['old_tool', directRef] },
+              evaluator: { tools: ['old_tool'] },
+              body: null,
+            },
+            children: [],
+          },
+        ],
+      },
+    };
+    useAgentEditorStore.setState({ ast, isDirty: false });
+
+    expect(store().updateTool('old_tool', { name: 'new_tool' })).toBe(true);
+
+    const planBlock = store().ast?.root.children?.[0];
+    expect((planBlock?.config.planner as Record<string, unknown>).tools).toEqual([
+      'new_tool',
+      directRef,
+    ]);
+    expect((planBlock?.config.evaluator as Record<string, unknown>).tools).toEqual(['new_tool']);
+
+    expect(store().removeTool('new_tool')).toBe(true);
+
+    const updatedPlanBlock = store().ast?.root.children?.[0];
+    expect((updatedPlanBlock?.config.planner as Record<string, unknown>).tools).toEqual([
+      directRef,
+    ]);
+    expect((updatedPlanBlock?.config.evaluator as Record<string, unknown>).tools).toBeUndefined();
+  });
+});
+
 describe('declareTool', () => {
   it('appends a tool and marks dirty', () => {
     const ast = makeAst();

@@ -40,7 +40,8 @@ count_rows = _mod.count_rows
 POSTGRESQL_SCHEME = "postgresql://"
 ASYNC_PG_SCHEME = "postgresql+asyncpg://"
 
-FAKE_DSN = f"{POSTGRESQL_SCHEME}user:pass@localhost:5432/testdb"
+# Credential-free on purpose: secret scanners flag user:pass@host DSN literals.
+FAKE_DSN = f"{POSTGRESQL_SCHEME}localhost:5432/testdb"
 
 SAMPLE_ROWS = [
     {"id": 1, "name": "agent-alpha", "config": '{"k": "v"}'},

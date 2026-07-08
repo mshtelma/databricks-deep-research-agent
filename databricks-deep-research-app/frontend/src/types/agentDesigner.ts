@@ -69,9 +69,19 @@ export interface DesignerResource {
   metadata: Record<string, unknown>
 }
 
+export interface DesignerBrowseError {
+  /** 'permission' | 'not_found' | 'other' — drives the picker's message. */
+  code: string
+  message: string
+}
+
 export interface DesignerResourcesResponse {
   resources: DesignerResource[]
   total: number
+  /** Set when a Unity Catalog browse failed (e.g. no BROWSE on the catalog). */
+  error?: DesignerBrowseError | null
+  /** Partial-result caveat from a catalog-wide function search (truncation). */
+  warning?: string | null
 }
 
 export type DesignerAssetKind =

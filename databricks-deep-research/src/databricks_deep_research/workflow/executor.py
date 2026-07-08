@@ -395,7 +395,15 @@ class WorkflowExecutor:
         registry = tool_registry or ToolRegistry()
         resolved_factories: list[ToolFactory] = list(
             tool_factories
-            or [BuiltinToolFactory(), DatabricksToolFactory(), DecoratedToolFactory()]
+            or [
+                BuiltinToolFactory(),
+                DatabricksToolFactory(),
+                # Fail-closed by default: default-chain hosts may execute
+                # STORED workflow definitions, and a decorated import runs
+                # arbitrary code. Hosts whose YAML is import-time-authored can
+                # pass their own DecoratedToolFactory(allowed_import_prefixes=None).
+                DecoratedToolFactory(allowed_import_prefixes=()),
+            ]
         )
         resolved_factory_context = factory_context or ToolFactoryContext()
 
@@ -551,6 +559,11 @@ class WorkflowExecutor:
                         "workflow.error_type": type(exc).__name__,
                     })
                 raise
+            finally:
+                try:
+                    await self._close_sandbox_session()
+                except Exception:  # pragma: no cover — cleanup must never mask the run
+                    logger.debug("SANDBOX_SESSION_CLOSE_FAILED", exc_info=True)
 
             elapsed_ms = (time.monotonic() - start) * 1000
             sources_pool = self._pools.get("sources", PoolState(PoolConfig(name="_")))
@@ -1094,18 +1107,54 @@ class WorkflowExecutor:
     async def _exec_tool(
         self, node: WorkflowNode, state: WorkflowState
     ) -> AsyncGenerator[StreamEvent, None]:
-        """Execute a direct tool call (no LLM)."""
+        """Execute a direct tool call (no LLM).
+
+        Resolution goes resolver-first (overrides -> cache -> declarations ->
+        the resolver's own legacy fallback) so declared, factory-built, and
+        per-request override tools (e.g. MCP) are reachable from DAG steps.
+        The executor's legacy registry remains an explicit fallback because
+        host-injected resolvers may carry no legacy registry of their own.
+        """
         config = ToolNodeConfig(**node.config)
 
         from databricks_deep_research.tools.protocol import ToolRef
-        ref_dict = config.ref
-        ref = ToolRef(type=ref_dict.get("type", "builtin"), name=ref_dict.get("name", ""))
-        tool = self._tool_registry.resolve(ref)
 
-        # Map inputs from state
-        args: dict[str, Any] = {}
+        ref = config.ref
+        try:
+            tool = await self._resolver.resolve({"type": ref.type, "name": ref.name})
+        except ValueError as resolve_exc:
+            try:
+                tool = self._tool_registry.resolve(ToolRef(type=ref.type, name=ref.name))
+            except Exception:
+                if ref.type == "mcp":
+                    raise WorkflowError(
+                        f"tool node '{node.id}': MCP tool {ref.name!r} was not "
+                        "discovered at runtime — its server may have been "
+                        "skipped (build failure) or is not configured for this "
+                        "request"
+                    ) from resolve_exc
+                raise resolve_exc from None
+
+        # Literals first; input_mapping keys cannot collide (config validator).
+        args: dict[str, Any] = dict(config.input_literals)
         for arg_name, state_key in config.input_mapping.items():
             args[arg_name] = state.get(state_key)
+
+        # Event payloads carry truncated argument text: mapped state values can
+        # be entire documents, and events are streamed/persisted.
+        event_args: dict[str, Any] = {}
+        for arg_name, value in args.items():
+            if value is None or isinstance(value, (int, float, bool)):
+                event_args[arg_name] = value
+            else:
+                text = value if isinstance(value, str) else repr(value)
+                event_args[arg_name] = text[:500]
+        yield self._emit(ToolCallEvent(
+            node_id=node.id,
+            timestamp=_now(),
+            tool_name=ref.name,
+            arguments=event_args,
+        ))
 
         async with trace_span(
             f"tool.{ref.name}",
@@ -1113,15 +1162,74 @@ class WorkflowExecutor:
             attributes={"tool.name": ref.name},
         ) as tool_span:
             validated = tool.validate_arguments(args)
-            ctx = ToolContext(query=state.query, url_registry=self._url_registry, table_registry=self._table_registry)
+            factory_ctx = self._resolver.factory_context
+            extras: dict[str, Any] = {**factory_ctx.extras}
+            user_token = state.user_token or factory_ctx.user_token
+            if user_token:
+                # get_user_token(extras) consumers (text_table tools) read this
+                # key; the factory context carries the token only as a field.
+                extras["user_token"] = user_token
+            ctx = ToolContext(
+                query=state.query,
+                url_registry=self._url_registry,
+                table_registry=self._table_registry,
+                extras=extras,
+            )
             result = await tool.execute(validated, ctx)
 
             if tool_span:
                 tool_span.set_attributes({"tool.result_len": len(result.content)})
 
+        # Pool admission: non-builtin sources (function:// / mcp:// artifacts)
+        # flow through the same evidence gate as agent-invoked tools, so
+        # DAG-step results are citeable in synthesis.
+        raw_source_count = len(result.sources)
+        accepted_count = 0
+        rejected_count = 0
+        if result.sources and tool.definition.source_kind != "builtin":
+            from databricks_deep_research.agents.source_aware import admit_tool_result
+
+            admitted = admit_tool_result(
+                tool.definition,
+                result,
+                current_step=None,
+                root_query=state.query,
+            )
+            accepted_count = admitted.accepted_count
+            rejected_count = len(admitted.rejected_sources)
+            sources_pool = self._pools.get("sources")
+            if sources_pool is not None:
+                added = sum(
+                    1 for source in admitted.accepted_sources if sources_pool.add(source)
+                )
+                logger.info(
+                    "TOOL_NODE_POOL_ADMIT node=%s tool=%s raw=%d accepted=%d "
+                    "added=%d rejected=%d",
+                    node.id, ref.name, raw_source_count, accepted_count,
+                    added, rejected_count,
+                )
+            else:
+                logger.info(
+                    "TOOL_NODE_POOL_ADMIT_SKIPPED node=%s tool=%s reason=no_sources_pool",
+                    node.id, ref.name,
+                )
+
+        _content_str = result.content if isinstance(result.content, str) else str(result.content)
+        yield self._emit(ToolResultEvent(
+            node_id=node.id,
+            timestamp=_now(),
+            tool_name=ref.name,
+            result_summary=_content_str[:400],
+            source_count=accepted_count,
+            raw_source_count=raw_source_count,
+            accepted_source_count=accepted_count,
+            rejected_source_count=rejected_count,
+            tool_success=result.success,
+            tool_error=result.error or "",
+        ))
+
         # DR_LEAK_TRACE state_write: capture tool-node state writes too.
         try:
-            _content_str = result.content if isinstance(result.content, str) else str(result.content)
             logger.info(
                 "DR_LEAK_TRACE phase=state_write origin=tool "
                 "node=%s tool=%s output_key=%s value_len=%d value_head=%r",
@@ -1134,8 +1242,79 @@ class WorkflowExecutor:
         except Exception as _exc:  # pragma: no cover — diagnostic only
             logger.debug("DR_LEAK_TRACE state_write (tool) skipped: %s", _exc)
         state.append(node.id, config.output_key, result.content)
-        return
-        yield  # pragma: no cover — make this an async generator
+
+        # Table interop: a structured table in the result becomes addressable
+        # by table_* tools and compute callables via the run's TableRegistry.
+        table_index: int | None = None
+        table_json = result.data.get("table_json")
+        if isinstance(table_json, dict) and "headers" in table_json and "rows" in table_json:
+            try:
+                table_index = self._table_registry.register(
+                    table_json,
+                    source_kind=str(tool.definition.source_kind),
+                    source_label=f"function://{ref.name}",
+                )
+            except ValueError as exc:
+                logger.warning(
+                    "TOOL_NODE_TABLE_REGISTER_FAILED node=%s tool=%s err=%s",
+                    node.id, ref.name, exc,
+                )
+
+        if config.output_data_key:
+            data_payload: dict[str, Any] = dict(result.data)
+            data_payload["success"] = result.success
+            if result.error:
+                data_payload["error"] = result.error
+            if table_index is not None:
+                data_payload["table_index"] = table_index
+            state.append(node.id, config.output_data_key, data_payload)
+
+        if config.bind_namespace:
+            from databricks_deep_research.tools.compute_session import get_compute_tool
+
+            compute = get_compute_tool(factory_ctx.extras)
+            if compute is not None:
+                bind_value = result.data.get("result", result.content)
+                compute.inject_variable(config.bind_namespace, bind_value)
+            else:
+                logger.info(
+                    "TOOL_NODE_BIND_NAMESPACE_SKIPPED node=%s var=%s reason=no_compute_tool",
+                    node.id,
+                    config.bind_namespace,
+                )
+
+        if config.enforce_output_schema and config.output_schema:
+            payload: Any = result.data if result.data else result.content
+            if isinstance(payload, str):
+                try:
+                    payload = json.loads(payload)
+                except (TypeError, ValueError):
+                    payload = None
+            required = config.output_schema.get("required", [])
+            missing = [
+                key for key in required
+                if not (isinstance(payload, dict) and key in payload)
+            ]
+            if missing:
+                raise WorkflowError(
+                    f"tool node '{node.id}' ({ref.name}): output missing "
+                    f"required key(s) {missing} per output_schema"
+                )
+
+        if config.fail_on_error and not result.success:
+            raise WorkflowError(
+                f"tool node '{node.id}' ({ref.name}) failed: "
+                f"{result.error or _content_str[:200]}"
+            )
+
+    async def _close_sandbox_session(self, resolver: ToolResolver | None = None) -> None:
+        """Close the run's persistent sandbox REPL, if one was created."""
+        from databricks_deep_research.tools.code_executor import SandboxSessionHolder
+
+        target = resolver or self._resolver
+        holder = target.factory_context.extras.get("_sandbox_session")
+        if isinstance(holder, SandboxSessionHolder):
+            await holder.aclose()
 
     def _build_isolated_child_resolver(
         self, child_defn: WorkflowDefinition
@@ -1172,16 +1351,25 @@ class WorkflowExecutor:
         child_extras: dict[str, Any] = {
             key: value
             for key, value in parent_ctx.extras.items()
-            if key != "_resolver_cache"
+            # _sandbox_session diverges like _resolver_cache: the isolated child
+            # gets its own persistent sandbox REPL (fresh scratchpad).
+            if key not in ("_resolver_cache", "_sandbox_session")
         }
         child_extras["_framework_vfs"] = InMemoryBackend()
         child_factory_ctx = dataclasses.replace(parent_ctx, extras=child_extras)
-        return ToolResolver(
+        child_resolver = ToolResolver(
             declarations=list(child_defn.tools) if child_defn.tools else None,
             factories=self._resolver._factories,
             factory_context=child_factory_ctx,
             legacy_registry=self._resolver._legacy,
         )
+        # Carry runtime overrides (enterprise + per-request MCP tools) so tool
+        # nodes inside isolate children still resolve. Sharing the instances is
+        # identity-preserving (same OBO principal) per the contract above —
+        # only the scratchpad diverges.
+        for override_name, override_tool in self._resolver._overrides.items():
+            child_resolver.override(override_name, override_tool)
+        return child_resolver
 
     async def _run_inline_subworkflow(
         self,
@@ -1274,10 +1462,19 @@ class WorkflowExecutor:
             child_state.pools = child_exec._pools
 
         # Drive the child's root directly, propagating parent cancellation in.
-        async for event in child_exec._exec_node(child_defn.root, child_state):
-            if parent_state.is_cancelled:
-                child_state.is_cancelled = True
-            yield event
+        try:
+            async for event in child_exec._exec_node(child_defn.root, child_state):
+                if parent_state.is_cancelled:
+                    child_state.is_cancelled = True
+                yield event
+        finally:
+            if pool_mode == "isolate":
+                # The isolated child owns a private sandbox REPL (its holder was
+                # excluded from the copied extras); close it with the child.
+                try:
+                    await self._close_sandbox_session(child_resolver)
+                except Exception:  # pragma: no cover — cleanup must never mask the run
+                    logger.debug("CHILD_SANDBOX_CLOSE_FAILED", exc_info=True)
 
         # ``merge``: fold child pool contents back into the parent pools.
         if pool_mode == "merge":

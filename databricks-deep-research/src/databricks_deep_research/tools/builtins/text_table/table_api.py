@@ -254,7 +254,7 @@ class Table:
 
     def to_dataframe(self, *, include_totals: bool = True) -> Any:
         """Convert to a ``pandas.DataFrame``.  Pandas is imported lazily."""
-        import pandas as pd  # type: ignore[import-untyped]  # noqa: PLC0415
+        import pandas as pd  # noqa: PLC0415
 
         records: list[dict[str, Any]] = []
         for r in self._rows:

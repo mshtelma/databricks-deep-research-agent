@@ -20,6 +20,45 @@ import { resolveBlock } from '@/lib/blockPath';
 import { AddToolDialog } from './AddToolDialog';
 import { BindToolDialog } from './BindToolDialog';
 import type { RegistryResponse } from '@/types/agentDesigner';
+import type { Block } from '@/types/ast';
+
+/**
+ * How many places in the workflow reference a declared tool: agent bindings
+ * (config.tools, incl. plan_and_execute planner/evaluator) plus tool-node refs.
+ */
+function usedByCount(root: Block | undefined, name: string): number {
+  if (!root) return 0;
+  let count = 0;
+  const visit = (block: Block): void => {
+    const cfg = (block.config ?? {}) as Record<string, unknown>;
+    const bound = cfg['tools'];
+    if (Array.isArray(bound) && bound.includes(name)) count += 1;
+    if (block.type === 'tool') {
+      const ref = cfg['ref'];
+      const refName =
+        typeof ref === 'string'
+          ? ref
+          : ref && typeof ref === 'object'
+            ? (ref as { name?: unknown }).name
+            : undefined;
+      if (refName === name) count += 1;
+    }
+    for (const nestedKey of ['planner', 'evaluator']) {
+      const nested = cfg[nestedKey];
+      if (nested && typeof nested === 'object' && !Array.isArray(nested)) {
+        const nestedTools = (nested as Record<string, unknown>)['tools'];
+        if (Array.isArray(nestedTools) && nestedTools.includes(name)) count += 1;
+      }
+    }
+    const body = cfg['body'];
+    if (body && typeof body === 'object' && !Array.isArray(body) && 'type' in body) {
+      visit(body as Block);
+    }
+    for (const child of block.children ?? []) visit(child);
+  };
+  visit(root);
+  return count;
+}
 
 // ---------------------------------------------------------------------------
 // Layer badge styles (matches AddToolDialog layer mapping) — drawn from the
@@ -122,11 +161,19 @@ export function ToolsPanel({ registry }: ToolsPanelProps): React.ReactElement {
           {tools.map((tool) => {
             const kindMeta = kindMetaMap.get(tool.kind);
             const badgeStyle = layerBadgeStyle(kindMeta?.layer, kindMeta?.index ?? 0);
-            // One-line summary: show config.endpoint if present, else "—"
-            const summary =
-              typeof tool.config['endpoint'] === 'string'
-                ? tool.config['endpoint']
-                : '—';
+            const target =
+              tool.config['function'] ??
+              tool.config['index_name'] ??
+              tool.config['space_id'] ??
+              tool.config['endpoint_name'] ??
+              tool.config['endpoint'] ??
+              tool.config['import'] ??
+              tool.config['key'] ??
+              tool.config['tool_name'];
+            const usage = usedByCount(ast?.root, tool.name);
+            const summary = `${typeof target === 'string' && target ? target : '—'} · ${
+              usage > 0 ? `used by ${usage}` : 'unused'
+            }`;
 
             return (
               <li

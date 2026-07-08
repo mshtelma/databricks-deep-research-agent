@@ -4,6 +4,7 @@ and consumed by the chat orchestrator's list_node_types / list_tool_kinds tools.
 Lives in the agent_designer package so the orchestrator (service layer) does
 not need to import from the API layer.
 """
+
 from __future__ import annotations
 
 import copy
@@ -52,8 +53,10 @@ NODE_TYPE_META: dict[str, dict[str, Any]] = {
         "category": "leaf",
         "is_composite": False,
         "config_model": ToolNodeConfig,
-        "default_config": {"ref": "web_search"},
-        "summary_template": "tool: {{ref}}",
+        # Unbound draft: the picker sets ref.name (create/select a declaration).
+        # ref MUST be a dict — a bare string fails ToolNodeConfig validation.
+        "default_config": {"ref": {"name": ""}},
+        "summary_template": "tool: {{ref.name}}",
     },
     NodeType.sequence: {
         "label": "Sequence",
@@ -146,8 +149,18 @@ NODE_TYPE_META: dict[str, dict[str, Any]] = {
 AGENT_SUBTYPES: list[dict[str, Any]] = [
     {"id": "coordinator", "label": "Coordinator", "icon": "star", "default_model_tier": "complex"},
     {"id": "planner", "label": "Planner", "icon": "map", "default_model_tier": "analytical"},
-    {"id": "researcher", "label": "Researcher", "icon": "search", "default_model_tier": "analytical"},
-    {"id": "reflector", "label": "Reflector", "icon": "reflect", "default_model_tier": "analytical"},
+    {
+        "id": "researcher",
+        "label": "Researcher",
+        "icon": "search",
+        "default_model_tier": "analytical",
+    },
+    {
+        "id": "reflector",
+        "label": "Reflector",
+        "icon": "reflect",
+        "default_model_tier": "analytical",
+    },
     {"id": "synthesizer", "label": "Synthesizer", "icon": "merge", "default_model_tier": "complex"},
     {"id": "background", "label": "Background", "icon": "clock", "default_model_tier": "simple"},
 ]
@@ -462,6 +475,7 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["http", "sse"],
             "title": "Transport",
+            "x-advanced": True,
             "description": "Stateless transport. 'http' (streamable) or 'sse'. stdio is unsupported.",
             "default": "http",
         },
@@ -483,28 +497,33 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
         "api_key_header": {
             "type": "string",
             "title": "API Key Header",
+            "x-advanced": True,
             "description": "Header name used when Auth Type is 'api_key'.",
             "default": "X-API-Key",
         },
         "allow": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Allow Tools",
+            "x-advanced": True,
             "description": "Optional allowlist of tool names to expose from this server.",
         },
         "deny": {
             **_STRING_ARRAY_SCHEMA,
             "title": "Deny Tools",
+            "x-advanced": True,
             "description": "Optional denylist of tool names; applied after Allow.",
         },
         "name_prefix": {
             "type": "string",
             "title": "Name Prefix",
+            "x-advanced": True,
             "description": "Optional prefix namespacing this server's tool names.",
         },
         "strategy": {
             "type": "string",
             "enum": ["fast", "deep"],
             "title": "Discovery Strategy",
+            "x-advanced": True,
             "description": "'fast' discovers once and caches; 'deep' re-discovers per step.",
             "default": "fast",
         },
@@ -516,12 +535,226 @@ _MCP_SERVER_SCHEMA: dict[str, Any] = {
                 "citeable evidence. Off => results inform the model but are never cited."
             ),
             "default": True,
+            "x-advanced": True,
         },
     },
     # Only ``name`` is structurally required; the url-vs-target rule depends on
     # ``client_kind`` and is enforced by semantic validation + the framework
     # ``MCPServerConfig`` validator (which the form can't express conditionally).
     "required": ["name"],
+}
+
+
+_DECORATED_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "import": {
+            "type": "string",
+            "title": "Python Import",
+            "description": (
+                "Import path in 'module:attr' form. The function must already "
+                "be importable in the deployed app runtime (a package or wheel "
+                "shipped with the app) — to author code in the workflow "
+                "itself, use an Inline Python Function instead."
+            ),
+        },
+        "description": {
+            "type": "string",
+            "title": "Description Override",
+            "description": "Optional tool description used when wrapping a plain Python function.",
+            "format": "multiline",
+            "x-advanced": True,
+        },
+        "requires_confirmation": {
+            "type": "boolean",
+            "title": "Requires Confirmation",
+            "description": "Ask the caller to confirm before executing this Python function.",
+            "default": False,
+            "x-advanced": True,
+        },
+    },
+    "required": ["import"],
+}
+
+_ENTERPRISE_TOOL_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "tool_name": {
+            "type": "string",
+            "title": "Runtime Tool",
+            "description": "Name of an externally registered runtime tool.",
+        },
+    },
+    "required": ["tool_name"],
+}
+
+
+# A UC scalar function invoked at runtime via the OBO SQL executor
+# (UCFunctionTool) — first-class, NOT normalized into mcp_servers. ``config.params``
+# is usually left empty and auto-filled from the function signature on save
+# (uc_function_introspect); the Designer picker fills ``function`` + ``params``.
+_UC_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "function": {
+            "type": "string",
+            "title": "UC Function",
+            "x-widget": "uc-function-picker",
+            "description": (
+                "Fully qualified Unity Catalog function "
+                "(catalog.schema.function). Invoked via SQL under the caller's "
+                "identity (OBO) — no app-side sandbox. Scalar or table-valued."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "x-widget": "hidden",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean), required, default. Auto-discovered from the "
+                "function signature on save; hidden in the picker UI."
+            ),
+        },
+        "returns_table": {
+            "type": "boolean",
+            "title": "Returns Table",
+            "x-widget": "hidden",
+            "default": False,
+            "description": (
+                "True for a table-valued function (invoked SELECT * FROM fn(..)); "
+                "auto-detected from the signature on save. Hidden in the UI."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "description": (
+                "On (default): results are admitted to the evidence pool and can be "
+                "cited. Off: results inform the model but are never cited."
+            ),
+            "default": True,
+        },
+    },
+    "required": ["function"],
+}
+
+
+# Operator-curated catalog tool: workflows reference a key, never an import
+# path (dict lookup at resolution — stored definitions cannot execute imports).
+_REGISTERED_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "key": {
+            "type": "string",
+            "title": "Catalog Key",
+            "description": (
+                "Key of an operator-registered Python tool (app.yaml "
+                "tools.registered_tools). Save-time validation rejects keys "
+                "that are not in the catalog."
+            ),
+        },
+    },
+    "required": ["key"],
+}
+
+
+# Fixed design-time Python code executed in the run's persistent sandboxed
+# session (subprocess REPL). Callable by agents AND by deterministic tool nodes.
+_PYTHON_FUNCTION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {
+            "type": "string",
+            "title": "Python Code",
+            "x-widget": "code",
+            "description": (
+                "Fixed function body authored at design time. Declared params "
+                "become globals; assign `result`. Runs in the run's sandboxed "
+                "session process — variables persist across calls (the run's "
+                "scratchpad)."
+            ),
+        },
+        "params": {
+            "type": "array",
+            "title": "Parameters",
+            "items": {"type": "object"},
+            "description": (
+                "Declared inputs: objects with name, type (string/integer/"
+                "number/boolean/array/object), required, default, description."
+            ),
+        },
+        "backend": {
+            "type": "string",
+            "title": "Backend",
+            "enum": ["subprocess", "restricted"],
+            "default": "subprocess",
+            "x-advanced": True,
+            "description": (
+                "subprocess (default): hardened per-run sandbox session. "
+                "restricted: in-process — trusted hosts only (requires the "
+                "operator switch execution.allow_inprocess_python_function)."
+            ),
+        },
+        "timeout_seconds": {
+            "type": "number",
+            "title": "Timeout (seconds)",
+            "default": 10,
+            "x-advanced": True,
+        },
+        "extra_allowed_modules": {
+            "type": "array",
+            "title": "Data Libraries",
+            "x-advanced": True,
+            "items": {"type": "string", "enum": ["pandas", "numpy"]},
+            "description": (
+                "Vetted data libraries importable by the code (facade view: "
+                "top-level API, IO/eval primitives removed)."
+            ),
+        },
+        "data_lib_mode": {
+            "type": "string",
+            "title": "Data-lib Exposure",
+            "x-advanced": True,
+            "enum": ["facade", "live"],
+            "default": "facade",
+            "description": (
+                "facade (default): top-level pandas/numpy API only. live: full "
+                "modules — trusted hosts only (operator switch required)."
+            ),
+        },
+        "reads_namespace": {
+            "type": "array",
+            "title": "Reads Variables",
+            "x-advanced": True,
+            "items": {"type": "string"},
+            "description": (
+                "Session variables the code expects to already exist (bridged "
+                "from the compute scratchpad when JSON-able)."
+            ),
+        },
+        "bind_result": {
+            "type": "string",
+            "title": "Bind Result As",
+            "x-advanced": True,
+            "description": (
+                "Also store the script's `result` under this session variable "
+                "so later functions and agents can use it."
+            ),
+        },
+        "citeable": {
+            "type": "boolean",
+            "title": "Citeable Evidence",
+            "default": False,
+            "description": (
+                "Admit successful results into the evidence pool so synthesis "
+                "can cite them (function:// source)."
+            ),
+            "x-advanced": True,
+        },
+    },
+    "required": ["code"],
 }
 
 
@@ -685,9 +918,27 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
     },
     "compute": {"layer": "C", "config_schema": _COMPUTE_SCHEMA},
     "compute_namespace": {"layer": "C", "config_schema": _COMPUTE_NAMESPACE_SCHEMA},
+    # Labels disambiguate the three Python-ish kinds in the shared picker
+    # (title-casing python_function would collide with decorated's
+    # "Python Function" label).
+    "python_function": {
+        "label": "Inline Python Function",
+        "layer": "C",
+        "config_schema": _PYTHON_FUNCTION_SCHEMA,
+    },
+    "registered": {
+        "label": "Registered Python Tool",
+        "layer": "D",
+        "config_schema": _REGISTERED_SCHEMA,
+    },
     "mcp": {
         "layer": "B",
         "config_schema": _MCP_SERVER_SCHEMA,
+    },
+    "uc_function": {
+        "label": "Unity Catalog Function",
+        "layer": "B",
+        "config_schema": _UC_FUNCTION_SCHEMA,
     },
     "table_discovery": {
         "layer": "B",
@@ -724,6 +975,25 @@ _TOOL_KIND_META: dict[str, dict[str, Any]] = {
         "config_schema": _TABLE_AGGREGATE_SCHEMA,
     },
     "custom": {"layer": "D", "config_schema": _EMPTY_SCHEMA},
+}
+
+_DECLARATION_TOOL_KIND_META: dict[str, dict[str, Any]] = {
+    # Honest label (tool-UX plan Phase 3): this kind IMPORTS an already-deployed
+    # function; it never accepts pasted code (that is python_function).
+    "decorated": {
+        "label": "Python Import (deployed package)",
+        "layer": "D",
+        "config_schema": _DECORATED_TOOL_SCHEMA,
+    },
+    # uc_function is NOT listed here: it is a first-class ToolKind (OBO-SQL
+    # UCFunctionTool) carried by _TOOL_KIND_META with _UC_FUNCTION_SCHEMA.
+    # uc_tool is retired from authoring (no discovery, no runtime registration
+    # path); direct {type: uc_tool} refs remain parseable for imported YAML.
+    "enterprise": {
+        "label": "Enterprise Tool",
+        "layer": "D",
+        "config_schema": _ENTERPRISE_TOOL_SCHEMA,
+    },
 }
 
 
@@ -850,19 +1120,25 @@ def node_types_payload() -> list[dict[str, Any]]:
             config_schema = deref_schema(config_model.model_json_schema())
         else:
             config_schema = _EMPTY_SCHEMA
-        out.append({
-            "type": nt.value,
-            "label": meta["label"],
-            "icon": meta["icon"],
-            "category": meta["category"],
-            "is_composite": meta["is_composite"],
-            "config_schema": config_schema,
-            "default_config": meta.get("default_config", {}),
-            "summary_template": meta.get("summary_template", "{{type}}"),
-            **({"children_kind": meta["children_kind"]} if "children_kind" in meta else {}),
-            **({"children_slots": meta["children_slots"]} if "children_slots" in meta else {}),
-            **({"branches_pairing": meta["branches_pairing"]} if "branches_pairing" in meta else {}),
-        })
+        out.append(
+            {
+                "type": nt.value,
+                "label": meta["label"],
+                "icon": meta["icon"],
+                "category": meta["category"],
+                "is_composite": meta["is_composite"],
+                "config_schema": config_schema,
+                "default_config": meta.get("default_config", {}),
+                "summary_template": meta.get("summary_template", "{{type}}"),
+                **({"children_kind": meta["children_kind"]} if "children_kind" in meta else {}),
+                **({"children_slots": meta["children_slots"]} if "children_slots" in meta else {}),
+                **(
+                    {"branches_pairing": meta["branches_pairing"]}
+                    if "branches_pairing" in meta
+                    else {}
+                ),
+            }
+        )
     return out
 
 
@@ -924,8 +1200,7 @@ def _web_provider_properties() -> dict[str, dict[str, Any]]:
             "enum": ["openai", "gemini"],
             "title": "Model Family",
             "description": (
-                "databricks provider only — auto-detected from the endpoint name "
-                "when blank."
+                "databricks provider only — auto-detected from the endpoint name when blank."
             ),
         },
         "timeout_seconds": {
@@ -955,9 +1230,7 @@ def _with_web_provider_fields(config_schema: Any) -> dict[str, Any]:
     across requests. Uses ``setdefault`` so an explicit per-kind property of the
     same name (none today) is never clobbered.
     """
-    merged: dict[str, Any] = (
-        copy.deepcopy(config_schema) if isinstance(config_schema, dict) else {}
-    )
+    merged: dict[str, Any] = copy.deepcopy(config_schema) if isinstance(config_schema, dict) else {}
     merged.setdefault("type", "object")
     props = merged.get("properties")
     if not isinstance(props, dict):
@@ -972,8 +1245,9 @@ def tool_kinds_payload() -> list[dict[str, Any]]:
     """Enumerate supported tool kinds with editor metadata.
 
     Tool-name harmonization from the final plan remains a separate framework
-    migration; this endpoint exposes the currently executable built-in
-    ToolKind values with the richer registry shape expected by the editor.
+    migration; this endpoint exposes executable built-in ToolKind values plus
+    declaration-backed callable kinds that the framework resolver can execute
+    (``decorated`` Python functions and externally registered enterprise refs).
     Bare ``kind: custom`` declarations are intentionally hidden here: the
     current framework uses that kind only for compile-time instance overrides,
     not for Designer-authored deployable YAML declarations. User-visible
@@ -989,15 +1263,29 @@ def tool_kinds_payload() -> list[dict[str, Any]]:
             # Merge the per-tool provider dropdown + databricks knobs (deep-copied
             # so the static _TOOL_KIND_META is never mutated).
             config_schema = _with_web_provider_fields(config_schema)
-        payload.append({
-            "kind": k.value,
-            "label": k.value.replace("_", " ").title(),
-            "icon": "tool",
-            "layer": meta.get("layer", "D"),
-            "config_schema": config_schema,
-            "discoverable": bool(meta.get("discoverable", False)),
-            "discovery_path": meta.get("discovery_path"),
-        })
+        payload.append(
+            {
+                "kind": k.value,
+                "label": meta.get("label", k.value.replace("_", " ").title()),
+                "icon": "tool",
+                "layer": meta.get("layer", "D"),
+                "config_schema": config_schema,
+                "discoverable": bool(meta.get("discoverable", False)),
+                "discovery_path": meta.get("discovery_path"),
+            }
+        )
+    for kind, meta in _DECLARATION_TOOL_KIND_META.items():
+        payload.append(
+            {
+                "kind": kind,
+                "label": meta.get("label", kind.replace("_", " ").title()),
+                "icon": "tool",
+                "layer": meta.get("layer", "D"),
+                "config_schema": meta.get("config_schema", _EMPTY_SCHEMA),
+                "discoverable": bool(meta.get("discoverable", False)),
+                "discovery_path": meta.get("discovery_path"),
+            }
+        )
     return payload
 
 
@@ -1030,8 +1318,9 @@ async def tool_kinds_payload_with_custom(
 ) -> list[dict[str, Any]]:
     """Return builtin tool kinds plus user-visible custom tool defs.
 
-    Builtin entries (Layer A–C) come from the framework ToolKind enum.
-    Layer D entries are custom tool defs owned by the user OR workspace-visible.
+    Builtin entries come from the framework ToolKind enum and declaration-backed
+    callable kinds. User custom tool defs owned by the user OR workspace-visible
+    are appended when a session is supplied.
 
     Args:
         session: Optional async DB session.  When ``None``, only builtin kinds
@@ -1054,12 +1343,14 @@ async def tool_kinds_payload_with_custom(
         )
         result = await session.execute(stmt)
         for tool in result.scalars():
-            payload.append({
-                "kind": tool.name,
-                "label": tool.name,
-                "layer": "D",
-                "config_schema": tool.config_schema,
-                "factory_ref": tool.factory_ref,
-                "icon": "tool",
-            })
+            payload.append(
+                {
+                    "kind": tool.name,
+                    "label": tool.name,
+                    "layer": "D",
+                    "config_schema": tool.config_schema,
+                    "factory_ref": tool.factory_ref,
+                    "icon": "tool",
+                }
+            )
     return payload
