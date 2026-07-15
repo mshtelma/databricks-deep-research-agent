@@ -120,6 +120,26 @@ make deploy TARGET=dev
 # make deploy TARGET=dev BRAVE_SCOPE=your-secret-scope
 ```
 
+To compile deployment requirements through a different PEP 503 package index:
+
+```bash
+make deploy TARGET=dev PYPI_PROXY_URL=https://proxy.example.com/simple
+```
+
+This override is local to dependency resolution. It does not change the
+Databricks runtime installer or mutate lockfiles. To intentionally recreate the
+workspace, framework, and app lockfiles before deployment:
+
+```bash
+make deploy TARGET=dev \
+  PYPI_PROXY_URL=https://proxy.example.com/simple \
+  RECREATE_UV_LOCK=1
+```
+
+Run `make relock PYPI_PROXY_URL=...` for lock recreation without deployment.
+Compatible pins are preserved by default; `RELOCK_UPGRADE=1` permits upgrades.
+Do not embed credentials in the proxy URL; query strings and fragments are rejected.
+
 This single command executes the complete 9-step deployment pipeline:
 
 ```
@@ -290,8 +310,6 @@ make logs TARGET=dev FOLLOW=-f SEARCH="--search ERROR"
 | `scripts/clean-db.sh` | Clean database data |
 | `scripts/db-cleanup.py` | Remove orphaned provisioning resources |
 | `scripts/kill-server.sh` | Kill running dev server |
-| `scripts/purge_deleted_chats.py` | Purge soft-deleted chats |
-| `scripts/analyze_traces.py` | Analyze MLflow traces |
 
 ## Documentation
 

@@ -33,7 +33,7 @@
         test test-framework test-app test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all \
         db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean_db clean-e2e \
         e2e e2e-fast e2e-medium e2e-slow e2e-super-slow e2e-all e2e-ui e2e-debug e2e-custom-agents \
-        clean clean-all quickstart deploy deploy-unchecked app-deploy app-deploy-unchecked requirements bundle-validate bundle-summary logs \
+        clean clean-all quickstart deploy deploy-unchecked app-deploy app-deploy-unchecked requirements relock relock-check maybe-relock bundle-validate bundle-summary logs \
         run-example \
         worktree worktree-list worktree-remove worktree-link
 
@@ -252,7 +252,30 @@ quickstart:
 	$(MAKE) -C $(APP_DIR) quickstart
 
 requirements:
-	$(MAKE) -C $(APP_DIR) requirements
+	@$(MAKE) -C $(APP_DIR) requirements
+
+PYPI_PROXY_URL ?=
+export PYPI_PROXY_URL
+LOCK_SCOPE ?= all
+RELOCK_UPGRADE ?= 0
+ALLOW_DEFAULT_RELOCK ?= 0
+
+relock:
+	@LOCK_SCOPE="$(LOCK_SCOPE)" RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)" ./scripts/recreate_uv_locks.sh
+
+relock-check:
+	@./scripts/with_pypi_index.sh uv lock --check
+	@cd $(FRAMEWORK_DIR) && ../scripts/with_pypi_index.sh uv lock --check
+	@cd $(APP_DIR) && ../scripts/with_pypi_index.sh uv lock --check
+
+maybe-relock:
+	@case "$(RECREATE_UV_LOCK)" in \
+		0|no|false|off|"") ;; \
+		1|yes|true|on) \
+			if [ "$(LOCK_SCOPE)" != "all" ]; then echo "ERROR: deploy-integrated relock requires LOCK_SCOPE=all." >&2; exit 2; fi; \
+			$(MAKE) relock LOCK_SCOPE=all RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)" ;; \
+		*) echo "ERROR: RECREATE_UV_LOCK must be a boolean value." >&2; exit 2 ;; \
+	esac
 
 bundle-validate:
 	$(MAKE) -C $(APP_DIR) bundle-validate
@@ -262,26 +285,41 @@ bundle-summary:
 
 TARGET ?= ais
 BRAVE_SCOPE ?=
+RECREATE_UV_LOCK ?= 0
 # `deploy` and `app-deploy` gate on `typecheck-framework` so attribute-name
 # typos, missing kwargs, and signature drift cannot reach production. Strict
 # mypy is configured in `databricks-deep-research/pyproject.toml`. For
 # emergency reverts where typecheck cannot pass (e.g., a baseline-cleanup
 # follow-up is still pending), use the `*-unchecked` variants.
 deploy: typecheck-framework
-	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
+	@$(MAKE) maybe-relock RECREATE_UV_LOCK="$(RECREATE_UV_LOCK)" LOCK_SCOPE="$(LOCK_SCOPE)" RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)"
+	@$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) RECREATE_UV_LOCK=0
 
 deploy-unchecked:
-	$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE)
+	@$(MAKE) maybe-relock RECREATE_UV_LOCK="$(RECREATE_UV_LOCK)" LOCK_SCOPE="$(LOCK_SCOPE)" RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)"
+	@$(MAKE) -C $(APP_DIR) deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) RECREATE_UV_LOCK=0
 
 # Fast app-only redeploy (Python/yaml/vars, no DB migrate, no grants).
 # Rebuilds frontend + wheels by DEFAULT (the app runs from an installed wheel,
 # so a stale wheel ships stale code). Pass BUILD=0 for a config-only redeploy.
 BUILD ?= 1
 app-deploy: typecheck-framework
-	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
+	@case "$(BUILD)" in \
+		0|no|false|off) case "$(RECREATE_UV_LOCK)" in 1|yes|true|on) echo "ERROR: BUILD=0 cannot be combined with RECREATE_UV_LOCK." >&2; exit 2 ;; esac ;; \
+		1|yes|true|on) ;; \
+		*) echo "ERROR: BUILD must be a boolean value." >&2; exit 2 ;; \
+	esac
+	@$(MAKE) maybe-relock RECREATE_UV_LOCK="$(RECREATE_UV_LOCK)" LOCK_SCOPE="$(LOCK_SCOPE)" RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)"
+	@$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD) RECREATE_UV_LOCK=0
 
 app-deploy-unchecked:
-	$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD)
+	@case "$(BUILD)" in \
+		0|no|false|off) case "$(RECREATE_UV_LOCK)" in 1|yes|true|on) echo "ERROR: BUILD=0 cannot be combined with RECREATE_UV_LOCK." >&2; exit 2 ;; esac ;; \
+		1|yes|true|on) ;; \
+		*) echo "ERROR: BUILD must be a boolean value." >&2; exit 2 ;; \
+	esac
+	@$(MAKE) maybe-relock RECREATE_UV_LOCK="$(RECREATE_UV_LOCK)" LOCK_SCOPE="$(LOCK_SCOPE)" RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)"
+	@$(MAKE) -C $(APP_DIR) app-deploy TARGET=$(TARGET) BRAVE_SCOPE=$(BRAVE_SCOPE) BUILD=$(BUILD) RECREATE_UV_LOCK=0
 
 FOLLOW ?=
 SEARCH ?=

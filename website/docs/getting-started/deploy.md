@@ -34,6 +34,20 @@ databricks configure --profile my-profile   # prompts for host + token
 make deploy TARGET=my-workspace
 ```
 
+??? tip "Use a private Python package index"
+    Override the index used to compile deployment requirements:
+
+    ```bash
+    make deploy TARGET=my-workspace \
+      PYPI_PROXY_URL=https://proxy.example.com/simple
+    ```
+
+    This does not modify `uv.lock`. To recreate all tracked lockfiles with the
+    alternate index before deployment, add `RECREATE_UV_LOCK=1`. The regenerated
+    locks intentionally record the alternate registry URL, so do not include
+    credentials, a query string, or a fragment in it. See the deployment operations guide for scopes, rollback,
+    and upgrade behavior.
+
 This one command builds the frontend, provisions a **Lakebase** Postgres database for
 conversation history, deploys the app, runs migrations, grants the app access, and
 starts it.

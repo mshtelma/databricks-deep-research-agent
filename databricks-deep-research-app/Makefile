@@ -12,6 +12,7 @@
 #
 # Databricks Apps Deployment:
 #   make deploy TARGET=dev BRAVE_SCOPE=msh  - Full deployment (recommended)
+#   make deploy TARGET=dev PYPI_PROXY_URL=https://proxy.example/simple
 #   make app-deploy TARGET=dev              - Fast app-only redeploy (Python/yaml/vars,
 #                                             no DB migrate, no provisioning, no grants)
 #   make app-deploy TARGET=dev BUILD=1      - Also rebuild frontend + requirements.txt
@@ -52,7 +53,7 @@
 #   make lint           - Run linting (backend + frontend)
 #   make logs TARGET=dev - Download app logs (add FOLLOW=-f to follow)
 
-.PHONY: dev dev-backend dev-frontend build build-framework prod clean clean_db db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean-e2e typecheck lint install e2e e2e-ui e2e-debug e2e-custom-agents test test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all quickstart deploy app-deploy requirements bundle-validate bundle-summary logs
+.PHONY: dev dev-backend dev-frontend build build-framework prod clean clean_db db-provision db-cleanup db-migrate db-status db-reset db-migrate-remote db-local db-local-stop clean-e2e typecheck lint install e2e e2e-ui e2e-debug e2e-custom-agents test test-integration test-complex test-scaffold-and-run test-all-python test-frontend test-all quickstart deploy app-deploy requirements compile-requirements validate-relock-request maybe-relock bundle-validate bundle-summary logs
 
 # =============================================================================
 # Target-bound env loading
@@ -131,7 +132,7 @@ dev-help:
 # Production Build
 # =============================================================================
 
-build-framework:
+build-framework: | maybe-relock
 	@echo "Building framework wheel..."
 	@rm -f wheels/databricks_deep_research-*.whl
 	@rm -f src/deep_research/services/deployment/_framework_wheel/databricks_deep_research-*.whl
@@ -666,26 +667,55 @@ clean-all: clean
 # Databricks Apps Deployment
 # =============================================================================
 
+PYPI_PROXY_URL ?=
+export PYPI_PROXY_URL
+RECREATE_UV_LOCK ?= 0
+LOCK_SCOPE ?= all
+RELOCK_UPGRADE ?= 0
+ALLOW_DEFAULT_RELOCK ?= 0
+
+validate-relock-request:
+	@case "$(BUILD)" in \
+		0|no|false|off) case "$(RECREATE_UV_LOCK)" in 1|yes|true|on) echo "ERROR: BUILD=0 cannot be combined with RECREATE_UV_LOCK." >&2; exit 2 ;; esac ;; \
+		1|yes|true|on) ;; \
+		*) echo "ERROR: BUILD must be a boolean value." >&2; exit 2 ;; \
+	esac
+
+maybe-relock: validate-relock-request
+	@case "$(RECREATE_UV_LOCK)" in \
+		0|no|false|off|"") ;; \
+		1|yes|true|on) \
+			if [ "$(LOCK_SCOPE)" != "all" ]; then echo "ERROR: deploy-integrated relock requires LOCK_SCOPE=all." >&2; exit 2; fi; \
+			cd .. && $(MAKE) relock LOCK_SCOPE=all RELOCK_UPGRADE="$(RELOCK_UPGRADE)" ALLOW_DEFAULT_RELOCK="$(ALLOW_DEFAULT_RELOCK)" ;; \
+		*) echo "ERROR: RECREATE_UV_LOCK must be a boolean value." >&2; exit 2 ;; \
+	esac
+
+compile-requirements: | maybe-relock
+	@echo "Compiling deployment requirements..."
+	@n=0; until ../scripts/with_pypi_index.sh uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt; do \
+		n=$$((n+1)); \
+		[ $$n -ge 5 ] && { echo "ERROR: 'uv pip compile' failed after 5 attempts using the configured Python package index."; exit 1; }; \
+		echo "uv pip compile failed (attempt $$n/5); retrying in $$((n*3))s..."; \
+		sleep $$((n*3)); \
+	done
+
 # Quickstart: Set up local development environment
 quickstart:
 	@./scripts/quickstart.sh
 
 # Generate requirements.txt for Databricks Apps
-requirements: build-framework
+requirements: build compile-requirements
 	@echo "Generating requirements.txt from pyproject.toml..."
 	@# --extra mcp ships the Model Context Protocol client (mcp + databricks-mcp)
 	@# in the deployed image. Without it, chat-/Designer-attached MCP servers
 	@# (client_kind=databricks) fail to build at runtime (MCPConfigError) and
 	@# contribute zero tools. The guarded imports keep the default path clean.
-	@# Retry the compile: the Databricks PyPI proxy (pypi-proxy.dev.databricks.com)
-	@# intermittently returns 5xx (502 Bad Gateway); a transient hiccup must NOT
-	@# fail the whole deploy. Retry up to 5x with linear backoff, then fail hard so
-	@# a GENUINE resolution error still surfaces.
-	@n=0; until uv pip compile pyproject.toml --extra mcp --python-platform x86_64-unknown-linux-gnu -o requirements.txt; do n=$$((n+1)); [ $$n -ge 5 ] && { echo "ERROR: 'uv pip compile' failed after 5 attempts (proxy down? check https://pypi-proxy.dev.databricks.com)"; exit 1; }; echo "uv pip compile failed (attempt $$n/5) — likely a transient proxy 5xx; retrying in $$((n*3))s..."; sleep $$((n*3)); done
+	@# Dependency compilation retries transient package-index failures. uv stderr
+	@# remains visible so genuine resolution, authentication, and TLS errors surface.
 	@# Remove local editable installs (workspace deps installed via wheel below)
-	@sed -i '' '/^-e file:/d' requirements.txt
-	@# Tell pip to look in wheels/ for local packages (e.g. databricks-deep-research)
-	@sed -i '' '1s/^/--find-links wheels\/\n/' requirements.txt
+	@tmp=$$(mktemp requirements.txt.XXXXXX); \
+	awk 'BEGIN { print "--find-links wheels/" } !/^-e file:/' requirements.txt > "$$tmp" && \
+	mv "$$tmp" requirements.txt || { status=$$?; rm -f "$$tmp"; exit $$status; }
 	@echo "" >> requirements.txt
 	@echo "# Install framework wheel" >> requirements.txt
 	@WHEEL=$$(ls wheels/databricks_deep_research-*.whl 2>/dev/null | head -1); \
@@ -794,7 +824,7 @@ bootstrap-postgres:
 # `make bootstrap-postgres TARGET=<name>` provisions them via the SDK.
 TARGET ?= ais
 BRAVE_SCOPE ?=
-deploy: build requirements
+deploy: requirements
 	@echo "=============================================="
 	@echo "Full Deployment Pipeline (Autoscaling, DAB-managed Lakebase binding)"
 	@echo "Target: $(TARGET)"
@@ -933,7 +963,7 @@ deploy: build requirements
 # Rebuilds wheels + UI by DEFAULT; the app runs from the installed wheel, so a
 # stale wheel ships stale code. Pass BUILD=0 (or no/false/off) to skip the rebuild.
 BUILD ?= 1
-app-deploy: $(if $(filter-out 0 no false off,$(BUILD)),build requirements,)
+app-deploy: validate-relock-request $(if $(filter-out 0 no false off,$(BUILD)),requirements,)
 	@if [ ! -f $(ROOT_DIR)/.env.$(TARGET) ]; then \
 		echo "ERROR: $(ROOT_DIR)/.env.$(TARGET) not found. Run 'make deploy TARGET=$(TARGET)' first."; \
 		exit 1; \

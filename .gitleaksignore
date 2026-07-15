@@ -13,5 +13,3 @@ a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/docs/obser
 a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/docs/observability-policy.md:postgres-connection-string:94
 a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v1_data_check.py:postgres-connection-string:41
 a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v1_data_check.py:postgres-connection-string:239
-a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v15_data_check.py:postgres-connection-string:46
-a0ade2837dd8cce7eec83c05efaed57f458a10da:databricks-deep-research-app/tests/unit/scripts/test_preflight_v15_data_check.py:postgres-connection-string:204
